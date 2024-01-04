@@ -1,0 +1,20 @@
+[tool.poetry]
+name = "lparchive2epub"
+version = "0.1.0"
+description = ""
+authors = ["Arwalk <siragentprovocateurarwalk@gmail.com>"]
+readme = "README.adoc"
+packages = [{include = "lparchive2epub"}]
+
+[tool.poetry.dependencies]
+python = "^3.12"
+ebooklib = "^0.18"
+requests = "^2.31.0"
+beautifulsoup4 = "^4.12.2"
+
+[tool.poetry.scripts]
+lparchive2epub = 'lparchive2epub.main:main'
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"
