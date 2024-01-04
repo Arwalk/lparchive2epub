@@ -1,0 +1,183 @@
+<!doctype html>
+
+<!--[if lt IE 7]> <html lang="en-gb" class="lt-ie9 lt-ie8 lt-ie7"> <![endif]-->
+<!--[if IE 7]>    <html lang="en-gb" class="lt-ie9 lt-ie8"> <![endif]-->
+<!--[if IE 8]>    <html lang="en-gb" class="lt-ie9"> <![endif]-->
+<!--[if gt IE 8]><!--> <html lang="en-gb"> <!--<![endif]-->
+
+<head>
+  <meta charset="utf-8">
+  <meta http-equiv="X-UA-Compatible" content="IE=edge,chrome=1">
+
+  <title>X-COM: Terror from the Deep</title> 
+  
+  <meta name="keywords" content="archive,let's,play,GuavaMoment,X-COM: Terror from the Deep,hybrid,voice" /> 
+  <meta name="description" content="Let's Play X-COM: Terror from the Deep by GuavaMoment" /> 
+  <meta name="author" content="GuavaMoment" /> 
+  
+	<link rel="stylesheet" href="/style/2012/archive-2.0.6.css" media="screen" /> 
+    
+  <meta name="viewport" content="width=960" />
+
+  <script type="text/javascript">
+    (function(html){html.className = "live";})(document.documentElement||document.body);
+  </script>
+
+  <script src="/script/jquery-1.7.1.min.js"></script>
+  <script src="/script/jquery.ba-outside-events.min.js"></script>
+  
+  <script src="/script/2012/globals.js"></script>
+  <script src="/script/2012/readinghistory-1.0.1.js"></script>
+
+	<script type="text/javascript">
+	/* <![CDATA[ */
+		// remove ugly anchor from search results. Looks like users without JS will need to live with it.
+		var url = window.location.toString();
+		if(url.indexOf('#') != -1) { window.location = url.split('#')[0]; }
+
+    var preload = new Image();
+    preload.src = "/site_images/tag_add.png";
+    preload.src = "/site_images/tag_del.png";
+  
+    lpid = 20204;
+    historyTitle = "X-COM: Terror from the Deep by GuavaMoment";
+
+    $(document).ready(displayUpdatedHistory);
+
+    current_tags = ["7"];
+
+    addtag_html='        Tag it!';
+    deltag_html='        Untag it!';
+
+		$(document).ready(function() {
+			$("div#popups").html("    <div class=\"message\" id=\"likeit\"><strong>Thanks! We like it too.</strong>Why not check out some similar LPs from our recommendations?</div> \
+    <div class=\"message\" id=\"tagit\"> \
+      <strong>What would you like to tag this LP as?</strong> \
+      <div class=\"tagrow\"> \
+        <span>Tag</span> \
+  			<select id=\"tagselect\">        <option value=\"9\">challenges</option> \
+        <option value=\"11\">co-op</option> \
+        <option value=\"14\">completionist</option> \
+        <option value=\"12\">dual-audio</option> \
+        <option value=\"6\">group</option> \
+        <option value=\"15\">high-definition</option> \
+        <option value=\"5\">humorous</option> \
+        <option value=\"4\">informative</option> \
+        <option value=\"10\">narrative</option> \
+        <option value=\"8\">subtitles</option> \
+        <option value=\"7\">voice</option> \
+        </select> \
+        <button class=\"addtag\" id=\"tagbutton\" onclick=\"return tagPopdown();\">        Tag it!        </button> \
+      </div> \
+		</div>");
+		});
+
+	/* ]]> */
+  </script>
+  <script src="/script/2012/archive.js"></script>
+</head> 
+<body>
+  <div class="header">
+    <a class="index-link" href="/">
+      &nbsp;<span class="logo"><i title="The Let's Play Archive">&nbsp;</i></span>
+    </a>
+  </div>
+  
+  <h1 class="indexhead">The Let's Play Archive</h1>  <h1><a href=".">X-COM: Terror from the Deep</a></h1>
+	<h2><span>by</span> <a href="/author/GuavaMoment">GuavaMoment</a></h2>  
+  <div id="details" class="info">
+    <ul id="statistics">
+      <li>Began on <strong>Oct 26, 2009</strong></li>
+      <li>Ended on <strong>Apr 09, 2010</strong></li>
+      <li>This LP has <strong>18</strong> parts.</li>
+      <li id="archival">Added to the archive on <strong>May 14, 2010</strong></li>
+    </ul>
+    
+    <ul id="tags">
+      <li id="controls">
+				<a href="#" class="like" title="Like this LP" onclick="return likePopup()"><span class="button"><i class="func-like">&nbsp;</i></span> Like</a>
+        <a href="#" class="tag" title="Tag this LP" onclick="return tagPopup()"><span class="button"><i class="func-tag">&nbsp;</i></span> Tag</a>
+				</li>
+      <li id="taglist">
+This LP is tagged with: <strong><a href="/?tags=hybrid">hybrid</a>, <a href="/?tags=voice">voice</a></strong>
+      </li>
+    </ul>
+    
+    <div id="popups">
+  	<!-- asd -->
+      <div class="message" id="likeit"><strong>Thanks! We like it too.</strong>Why not check out some similar LPs from our recommendations?</div>
+      <div class="message" id="tagit">
+        <strong>What would you like to tag this LP as?</strong>
+        <div class="tagrow">
+          <span>Tag</span>
+          <select id="tagselect">
+          <option value="9">challenges</option>
+        <option value="11">co-op</option>
+        <option value="14">completionist</option>
+        <option value="12">dual-audio</option>
+        <option value="6">group</option>
+        <option value="15">high-definition</option>
+        <option value="5">humorous</option>
+        <option value="4">informative</option>
+        <option value="10">narrative</option>
+        <option value="8">subtitles</option>
+        <option value="7">voice</option>
+          </select>
+          <button class="addtag" id="tagbutton" onclick="return tagPopdown();">
+          Tag it!  
+          </button>
+        </div>
+      </div>
+    </div>
+    
+    <p id="thread">Original Thread: <a id="threadlink" href="http://forums.somethingawful.com/showthread.php?threadid=3220122">The X-COM: Terror From The Deep Forum Member Murdering Simulator</a></p>
+<p id="similar">&nbsp;</p>  
+  </div> 
+
+  
+
+
+  <div id="content" class="cblock">
+<h1>Introduction</h1>
+X-COM UFO Defense is the greatest game ever made. So it makes sense that the sequel would be an awesome game too, right?<br />
+<br />
+<img src="Images/1-OP80jpg.jpg" alt="" class="img" border="0"><br />
+<br />
+No. Terror From The Deep is a terrible game. Nearly everything is simply a reskin of previous items in UFO Defense. The things that were changed were terrible. They include weapons that no longer work above water, Aliens now like to hide in 1x1 closet tiles for the duration of entire map, the best weapon was nerfed, all ammo capacities were nerfed. The battlefield was changed to be far too large. They added many multi-part missions. And the difficulty, OH! The difficulty! There was a bug present in UFO Defense that reset your difficulty to the easiest setting once you reloaded a save. So when Microprose received feedback that UFO Defense was too easy, they wanted to make sure that people wouldn't have this complaint about TFTD. TFTD's easiest difficulty is harder than UFO Defense's hardest difficulty, superhuman. No one played on superhuman difficulty before TFTD's release. You see where this is going?<br />
+<br />
+I will be playing on TFTD Superhuman.<br />
+<br />
+<a href="/X-COM-Interceptor/" target="_blank" rel="nofollow">LP of X-COM Apocalypse</a> <a href="http://forums.somethingawful.com/showthread.php?threadid=2475148" target="_blank" rel="nofollow">SA Thread</a><br />
+<a href="/X-COM-UFO-Defense/" target="_blank" rel="nofollow"> LP of X-COM UFO Defense</a> <a href="http://forums.somethingawful.com/showthread.php?threadid=2773573" target="_blank" rel="nofollow">SA thread</a><br />
+<br />
+The above two links go to my previous LPs of the XCOM series. Chronologically Terror From The Deep occurs in-between the two in the year 2040. You don't need to read those other LPs to enjoy this one, but it can't hurt either.
+<br /><br /><br />
+
+<h1><strong>Table of Contents</strong></h1>
+<!-- begin TOC -->
+<ul class="toc">
+<li><A HREF="Update%2001/">Update/Video 1</a></li>
+<li><A HREF="Update%2002/">Update/Video 2</a></li>
+<li><A HREF="Update%2003/">Update/Video 3</a></li>
+<li><A HREF="Update%2004/">Update/Video 4</a></li>
+<li><A HREF="Update%2005/">Update/Video 5</a></li>
+<li><A HREF="Update%2006/">Update/Video 6</a></li>
+<li><A HREF="Update%2007/">Update/Video 7</a></li>
+<li><A HREF="Update%2008/">Update/Video 8</a></li>
+<li><A HREF="Update%2009/">Update/Video 9</a></li>
+<li><A HREF="Update%2010/">Update/Video 10</a></li>
+<li><A HREF="Update%2011/">Update/Video 11</a></li>
+<li><A HREF="Update%2012/">Update/Video 12 </a></li>
+<li><A HREF="Update%2013/">Update/Video 13</a></li>
+<li><A HREF="Update%2014/">Update/Video 14</a></li>
+<li><A HREF="Update%2015/">Update/Video 15</a></li>
+<li><A HREF="Update%2016/">Update/Video 16</a></li>
+<li><A HREF="Update%2017/">Update/Video 17</a></li>
+<li><A HREF="Update%2018/">Update/Video 18</a></li>
+<!-- end TOC -->
+</ul>  </div>
+
+  <a class="returnblock" href="/">Archive Index</a>
+
+  </body>
+</html>

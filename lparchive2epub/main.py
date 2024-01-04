@@ -1,6 +1,7 @@
 from argparse import ArgumentParser, ArgumentTypeError
 from argparse import FileType
 from urllib.parse import urlparse
+from lparchive2epub.lib import lparchive2epub
 
 
 def is_lparchive_url(arg):
@@ -23,6 +24,7 @@ arg_parser.add_argument("output", metavar="OUTPUT_FILE", nargs=1, type=FileType(
 
 def main():
     args = arg_parser.parse_args()
+    lparchive2epub(args.url[0], args.output[0])
 
 
 if __name__ == '__main__':
