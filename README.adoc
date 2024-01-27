@@ -1,4 +1,6 @@
 = lparchive2pub
 
+== Currently WIP
+
 this tool (and library) aims at helping people extracting full epubs of Let's Plays from https://lparchive.org/
 

@@ -46,7 +46,7 @@ class Extractor:
         content = p.find("div", id="content")
 
         chapters = content.find_all("a")
-        chapters = [x for x in chapters if "Update" in x.get("href", None) and (root in x.get("href", None) or x.get("href", None).startswith("Update"))]
+        chapters = (x for x in chapters if "Update" in x.get("href", None) and (root in x.get("href", None) or x.get("href", None).startswith("Update")))
         chapters = [Chapters(href=c.get("href", None), txt=str(c.string)) for c in chapters]
 
         return chapters
