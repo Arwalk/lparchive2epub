@@ -1,9 +1,29 @@
-from typing import TextIO, List
-import requests
-from bs4 import BeautifulSoup, Comment
-from ebooklib import epub
 from dataclasses import dataclass
-from itertools import chain
+from typing import TextIO, List
+
+import requests
+from bs4 import BeautifulSoup
+from ebooklib import epub
+
+
+@dataclass(order=True)
+class Chapters:
+    original_href: str
+    txt: str
+    new_href: str
+
+    def __hash__(self):
+        return hash((self.original_href, self.txt))
+
+    def __post_init__(self):
+        self.sort_index = self.original_href
+
+
+@dataclass
+class Image:
+    src: str
+    media_type: str
+
 
 @dataclass
 class Intro:
@@ -11,20 +31,9 @@ class Intro:
     language: str
     author: str
     intro: str
-    images_path: List[str]
-    chapter_links: List[str]
+    images: List[Image]
+    chapters: List[Chapters]
 
-
-@dataclass(order=True)
-class Chapters:
-    href: str
-    txt: str
-
-    def __hash__(self):
-        return hash((self.href, self.txt))
-
-    def __post_init__(self):
-        self.sort_index = self.href
 
 class Extractor:
 
@@ -34,22 +43,37 @@ class Extractor:
         author = next(x for x in p.find_all("meta") if x.get("name", None) == "author").get("content", None)
         language = "en"
         content = p.find("div", id="content")
-        content.find_all()
+        chapters = Extractor.all_chapters(p)
+        for c in chapters:
+            a = content.find("a", text=c.txt)
+            a['href'] = c.new_href
+
+        images = Extractor.all_images(content)
 
         return Intro(
-            title=title, language=language, author=author, intro="", images_path=[], chapter_links=[]
+            title=title, language=language, author=author, intro=str(content), images=images, chapters=chapters
         )
 
     @staticmethod
-    def all_chapters(p: BeautifulSoup, root: str) -> List[Chapters]:
-
+    def all_chapters(p: BeautifulSoup) -> List[Chapters]:
         content = p.find("div", id="content")
 
         chapters = content.find_all("a")
-        chapters = (x for x in chapters if "Update" in x.get("href", None) and (root in x.get("href", None) or x.get("href", None).startswith("Update")))
-        chapters = [Chapters(href=c.get("href", None), txt=str(c.string)) for c in chapters]
+        chapters = (x for x in chapters if "Update" in x.get("href", None))
+        chapters = [
+            Chapters(
+                original_href=c.get("href", None),
+                txt=str(c.string),
+                new_href=f"update_{i}.xhtml") for i, c in enumerate(chapters)
+        ]
 
         return chapters
+
+    @staticmethod
+    def all_images(content: BeautifulSoup) -> List[Image]:
+        images = content.find_all("img")
+        return [Image(src=x['src'], media_type=x["src"][-3:]) for x in images]
+
 
 def lparchive2epub(url: str, file: TextIO):
     page = requests.get(url)
