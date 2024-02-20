@@ -100,6 +100,7 @@ def add_page(book: EpubBook, page: Page):
     for img in page.images:
         book.add_item(img)
 
+
 def lparchive2epub(url: str, file: str):
     page = requests.get(url)
     landing = BeautifulSoup(page.content, 'html.parser')
