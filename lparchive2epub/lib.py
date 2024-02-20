@@ -95,10 +95,12 @@ def build_intro(url_root: str, intro: Intro) -> Page:
     return Page(intro_chapter, images)
 
 
-def add_page(book: EpubBook, page: Page):
+def add_page(book: EpubBook, toc: List, spine: List, page: Page):
     book.add_item(page.chapter)
     for img in page.images:
         book.add_item(img)
+    toc.append(epub.Link(page.chapter.file_name, page.chapter.title, page.chapter.id))
+    spine.append(page.chapter)
 
 
 def lparchive2epub(url: str, file: str):
@@ -112,17 +114,17 @@ def lparchive2epub(url: str, file: str):
     book.set_language(intro.language)
     book.set_identifier(f"lparchive2epub-{hash(intro.title)}-{hash(intro.author)}-{hash(url)}")
 
+    toc = []
+    spine = ["nav"]
     epub_intro = build_intro(url, intro)
 
-    add_page(book, epub_intro)
+    add_page(book, toc, spine, epub_intro)
 
-    book.toc = (
-        epub.Link(epub_intro.chapter.file_name, epub_intro.chapter.title, epub_intro.chapter.id),
-    )
+    book.toc = toc
 
     book.add_item(epub.EpubNcx())
     book.add_item(epub.EpubNav())
 
-    book.spine = ["nav", epub_intro.chapter]
+    book.spine = spine
 
     epub.write_epub(file, book)

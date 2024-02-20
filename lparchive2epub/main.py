@@ -24,7 +24,6 @@ arg_parser.add_argument("output", metavar="OUTPUT_FILE", nargs=1, type=str)
 
 def main():
     args = arg_parser.parse_args()
-    print(args)
     lparchive2epub(args.url[0], args.output[0])
 
 
