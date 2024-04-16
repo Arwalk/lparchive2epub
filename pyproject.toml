@@ -11,6 +11,7 @@ python = "^3.12"
 ebooklib = "^0.18"
 requests = "^2.31.0"
 beautifulsoup4 = "^4.12.2"
+tqdm = "^4.66.2"
 
 [tool.poetry.scripts]
 lparchive2epub = 'lparchive2epub.main:main'

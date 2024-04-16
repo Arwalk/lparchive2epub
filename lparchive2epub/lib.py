@@ -144,7 +144,15 @@ def build_single_page(session: Session, intro: Intro, chapter: Chapters) -> Page
     return build_update(session, chapter, update, intro)
 
 
-def lparchive2epub(url: str, file: str):
+class DummyUpdater:
+
+    def __init__(self, *args, **kwargs):
+        pass
+
+def lparchive2epub(update_manager, url: str, file: str):
+    if update_manager is None:
+        update_manager = DummyUpdater
+
     session = requests.Session()
 
     page = session.get(url)
@@ -168,8 +176,10 @@ def lparchive2epub(url: str, file: str):
 
     with Pool() as pool:
         pages = pool.imap(page_builder, intro.chapters)
-        for page in pages:
-            add_page(book, toc, spine, page)
+        with update_manager(total=len(intro.chapters)) as pbar:
+            for page in pages:
+                add_page(book, toc, spine, page)
+                pbar.update()
 
     book.toc = toc
 

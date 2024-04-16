@@ -1,8 +1,7 @@
 from argparse import ArgumentParser, ArgumentTypeError
-from argparse import FileType
 from urllib.parse import urlparse
 from lparchive2epub.lib import lparchive2epub
-
+from tqdm import tqdm
 
 def is_lparchive_url(arg):
     url = urlparse(arg)
@@ -15,7 +14,7 @@ def is_lparchive_url(arg):
 
 arg_parser = ArgumentParser(
     prog="lparchive2epub",
-    description="A tool to transfrom a Let's Play from lparchive.org to epub format."
+    description="A tool to transform a Let's Play from lparchive.org to epub format."
 )
 
 arg_parser.add_argument("url", metavar="URL", nargs=1, type=is_lparchive_url)
@@ -24,7 +23,7 @@ arg_parser.add_argument("output", metavar="OUTPUT_FILE", nargs=1, type=str)
 
 def main():
     args = arg_parser.parse_args()
-    lparchive2epub(args.url[0], args.output[0])
+    lparchive2epub(tqdm, args.url[0], args.output[0])
 
 
 if __name__ == '__main__':
