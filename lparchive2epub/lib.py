@@ -10,6 +10,7 @@ from multiprocessing import Pool
 
 session = requests.Session()
 
+
 @dataclass(order=True)
 class Chapters:
     original_href: str
@@ -136,11 +137,13 @@ def add_page(book: EpubBook, toc: List, spine: List, page: Page):
     toc.append(epub.Link(page.chapter.file_name, page.chapter.title, page.chapter.id))
     spine.append(page.chapter)
 
+
 def build_single_page(intro: Intro, chapter: Chapters) -> Page:
     chapter_page = session.get(chapter.original_href)
     chapter_bs = BeautifulSoup(chapter_page.content, 'html.parser')
     update = Extractor.get_update(chapter_bs)
     return build_update(chapter, update, intro)
+
 
 def lparchive2epub(url: str, file: str):
     page = session.get(url)
