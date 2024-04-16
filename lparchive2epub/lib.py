@@ -1,3 +1,4 @@
+import functools
 from dataclasses import dataclass
 from typing import List, Tuple
 
@@ -5,7 +6,9 @@ import requests
 from bs4 import BeautifulSoup
 from ebooklib import epub
 from ebooklib.epub import EpubHtml, EpubImage, EpubBook
+from multiprocessing import Pool
 
+session = requests.Session()
 
 @dataclass(order=True)
 class Chapters:
@@ -105,7 +108,7 @@ def build_intro(url_root: str, intro: Intro) -> Page:
     intro_chapter.content = intro.intro
     images = []
     for img in intro.images:
-        r = requests.get(f"{url_root}/{img.src}")
+        r = session.get(f"{url_root}/{img.src}")
         epub_img = EpubImage(uid=img.src, file_name=img.src, media_type=img.media_type, content=r.content)
         images.append(epub_img)
     return Page(intro_chapter, images)
@@ -117,7 +120,7 @@ def build_update(chapter: Chapters, data: Update, intro: Intro) -> Page:
     update_chapter.content = data.content
 
     def img_builder(img: Image) -> EpubImage:
-        r = requests.get(f"{chapter.original_href}/{img.src}")
+        r = session.get(f"{chapter.original_href}/{img.src}")
         return EpubImage(uid=img.src, file_name=img.src, media_type=img.media_type, content=r.content)
 
     images: List[EpubImage] = list(map(img_builder, data.images))
@@ -132,9 +135,14 @@ def add_page(book: EpubBook, toc: List, spine: List, page: Page):
     toc.append(epub.Link(page.chapter.file_name, page.chapter.title, page.chapter.id))
     spine.append(page.chapter)
 
+def build_single_page(intro: Intro, chapter: Chapters) -> Page:
+    chapter_page = session.get(chapter.original_href)
+    chapter_bs = BeautifulSoup(chapter_page.content, 'html.parser')
+    update = Extractor.get_update(chapter_bs)
+    return build_update(chapter, update, intro)
 
 def lparchive2epub(url: str, file: str):
-    page = requests.get(url)
+    page = session.get(url)
     landing = BeautifulSoup(page.content, 'html.parser')
     book = epub.EpubBook()
     intro = Extractor.intro(url, landing)
@@ -150,11 +158,12 @@ def lparchive2epub(url: str, file: str):
 
     add_page(book, toc, spine, epub_intro)
 
-    for chapter in intro.chapters:
-        chapter_page = requests.get(chapter.original_href)
-        chapter_bs = BeautifulSoup(chapter_page.content, 'html.parser')
-        update = Extractor.get_update(chapter_bs)
-        page = build_update(chapter, update, intro)
+    builder = functools.partial(build_single_page, intro)
+
+    with Pool() as pool:
+        pages = pool.map(builder, intro.chapters)
+
+    for page in pages:
         add_page(book, toc, spine, page)
 
     book.toc = toc
