@@ -158,13 +158,12 @@ def lparchive2epub(url: str, file: str):
 
     add_page(book, toc, spine, epub_intro)
 
-    builder = functools.partial(build_single_page, intro)
+    page_builder = functools.partial(build_single_page, intro)
 
     with Pool() as pool:
-        pages = pool.map(builder, intro.chapters)
-
-    for page in pages:
-        add_page(book, toc, spine, page)
+        pages = pool.imap(page_builder, intro.chapters)
+        for page in pages:
+            add_page(book, toc, spine, page)
 
     book.toc = toc
 
