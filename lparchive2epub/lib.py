@@ -107,6 +107,7 @@ def build_intro(url_root: str, intro: Intro) -> Page:
     intro_chapter = epub.EpubHtml(title="Introduction", file_name="introduction.xhtml", lang=intro.language)
     intro_chapter.content = intro.intro
     images = []
+    # todo : optimize using pool as it's the first thing built.
     for img in intro.images:
         r = session.get(f"{url_root}/{img.src}")
         epub_img = EpubImage(uid=img.src, file_name=img.src, media_type=img.media_type, content=r.content)
