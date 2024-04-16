@@ -18,19 +18,19 @@ xcom = load_html("X-COM_ Terror from the Deep.html")
 
 def test_extractor_intro():
     b = BeautifulSoup(re1, "html.parser")
-    intro = Extractor.intro(b)
+    intro = Extractor.intro("", b)
     assert intro.title == "Resident Evil 1"
     assert intro.author == "The Dark Id"
     assert intro.language == "en"
 
     b = BeautifulSoup(headshoots, "html.parser")
-    intro = Extractor.intro(b)
+    intro = Extractor.intro("",b)
     assert intro.title == "Dwarf Fortress - Headshoots"
     assert intro.author == "Various"
     assert intro.language == "en"
 
     b = BeautifulSoup(xcom, "html.parser")
-    intro = Extractor.intro(b)
+    intro = Extractor.intro("", b)
     assert intro.title == "X-COM: Terror from the Deep"
     assert intro.author == "GuavaMoment"
     assert intro.language == "en"
@@ -38,7 +38,7 @@ def test_extractor_intro():
 
 def test_extractor_chapters():
     b = BeautifulSoup(re1, "html.parser")
-    chapters = Extractor.all_chapters(b)
+    chapters = Extractor.all_chapters("https://lparchive.org/Resident-Evil-1", b)
     assert len(chapters) == 58
     assert chapters[0] == Chapters(new_href="update_0.xhtml",
                                    original_href='https://lparchive.org/Resident-Evil-1/Update%201/', txt='Foreword:')
@@ -215,11 +215,11 @@ def test_extractor_chapters():
                                     txt='Episode XL: Paint it, Black')
 
     b = BeautifulSoup(headshoots, "html.parser")
-    chapters = Extractor.all_chapters(b)
+    chapters = Extractor.all_chapters("whatever", b)
     assert len(chapters) == 90
 
     b = BeautifulSoup(xcom, "html.parser")
-    chapters = Extractor.all_chapters(b)
+    chapters = Extractor.all_chapters("whatever", b)
     assert len(chapters) == 18
 
 
