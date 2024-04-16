@@ -1,14 +1,13 @@
 import functools
 from dataclasses import dataclass
+from multiprocessing import Pool
 from typing import List, Tuple
 
 import requests
 from bs4 import BeautifulSoup
 from ebooklib import epub
 from ebooklib.epub import EpubHtml, EpubImage, EpubBook
-from multiprocessing import Pool
-
-session = requests.Session()
+from requests import Session
 
 
 @dataclass(order=True)
@@ -104,7 +103,7 @@ class Page:
     images: List[EpubImage]
 
 
-def build_intro(url_root: str, intro: Intro) -> Page:
+def build_intro(session: Session, url_root: str, intro: Intro) -> Page:
     intro_chapter = epub.EpubHtml(title="Introduction", file_name="introduction.xhtml", lang=intro.language)
     intro_chapter.content = intro.intro
     images = []
@@ -116,7 +115,7 @@ def build_intro(url_root: str, intro: Intro) -> Page:
     return Page(intro_chapter, images)
 
 
-def build_update(chapter: Chapters, data: Update, intro: Intro) -> Page:
+def build_update(session: Session, chapter: Chapters, data: Update, intro: Intro) -> Page:
     update_chapter = epub.EpubHtml(title=chapter.txt, file_name=chapter.new_href,
                                    lang=intro.language)  # TODO: fix language
     update_chapter.content = data.content
@@ -138,14 +137,16 @@ def add_page(book: EpubBook, toc: List, spine: List, page: Page):
     spine.append(page.chapter)
 
 
-def build_single_page(intro: Intro, chapter: Chapters) -> Page:
+def build_single_page(session: Session, intro: Intro, chapter: Chapters) -> Page:
     chapter_page = session.get(chapter.original_href)
     chapter_bs = BeautifulSoup(chapter_page.content, 'html.parser')
     update = Extractor.get_update(chapter_bs)
-    return build_update(chapter, update, intro)
+    return build_update(session, chapter, update, intro)
 
 
 def lparchive2epub(url: str, file: str):
+    session = requests.Session()
+
     page = session.get(url)
     landing = BeautifulSoup(page.content, 'html.parser')
     book = epub.EpubBook()
@@ -158,11 +159,12 @@ def lparchive2epub(url: str, file: str):
 
     toc = []
     spine = ["nav"]
-    epub_intro = build_intro(url, intro)
+    epub_intro = build_intro(session, url, intro)
 
     add_page(book, toc, spine, epub_intro)
 
-    page_builder = functools.partial(build_single_page, intro)
+    page_builder = functools.partial(build_single_page, session)
+    page_builder = functools.partial(page_builder, intro)
 
     with Pool() as pool:
         pages = pool.imap(page_builder, intro.chapters)
