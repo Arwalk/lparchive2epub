@@ -8,10 +8,12 @@ from bs4 import BeautifulSoup
 from ebooklib import epub
 from ebooklib.epub import EpubHtml, EpubImage, EpubBook
 from requests import Session
+import bisect
 
 
 @dataclass(order=True)
 class Chapters:
+    num: int
     original_href: str
     txt: str
     new_href: str
@@ -20,13 +22,26 @@ class Chapters:
         return hash((self.original_href, self.txt))
 
     def __post_init__(self):
-        self.sort_index = self.original_href
+        self.sort_index = self.num
 
 
-@dataclass
+@dataclass(order=True)
 class Image:
+    num: int
     src: str
     media_type: str
+
+    def __post_init__(self):
+        self.sort_index = self.num
+
+
+@dataclass(order=True)
+class IndexedEpubImage:
+    num: int
+    data: EpubImage
+
+    def __post_init__(self):
+        self.sort_index = self.num
 
 
 @dataclass
@@ -77,9 +92,11 @@ class Extractor:
             if original_href.startswith("Update"):
                 original_href = f"{root_url}/{original_href}"
             return Chapters(
+                num=i,
                 original_href=original_href,
                 txt=str(c.string),
-                new_href=f"update_{i}.xhtml")
+                new_href=f"update_{i}.xhtml"
+            )
 
         chapters = list(map(build_chapter, enumerate(chapters)))
 
@@ -88,7 +105,7 @@ class Extractor:
     @staticmethod
     def all_images(content: BeautifulSoup) -> List[Image]:
         images = content.find_all("img")
-        return [Image(src=x['src'], media_type=x["src"][-3:]) for x in images]
+        return [Image(num=i, src=x['src'], media_type=x["src"][-3:]) for i, x in enumerate(images)]
 
     @staticmethod
     def get_update(p: BeautifulSoup) -> Update:
@@ -97,22 +114,32 @@ class Extractor:
         return Update(content=str(content), images=images)
 
 
-@dataclass
+@dataclass(order=True)
 class Page:
+    num: int
     chapter: EpubHtml
-    images: List[EpubImage]
+    images: List[IndexedEpubImage]
+
+    def __post_init__(self):
+        self.sort_index = self.num
 
 
-def build_intro(session: Session, url_root: str, intro: Intro) -> Page:
+def _get_image(session: Session, url_root: str, img: Image) -> IndexedEpubImage:
+    r = session.get(f"{url_root}/{img.src}")
+    return IndexedEpubImage(img.num, EpubImage(uid=img.src, file_name=img.src, media_type=img.media_type, content=r.content))
+
+
+def build_intro(pool: Pool, session: Session, url_root: str, intro: Intro) -> Page:
     intro_chapter = epub.EpubHtml(title="Introduction", file_name="introduction.xhtml", lang=intro.language)
     intro_chapter.content = intro.intro
     images = []
-    # todo : optimize using pool as it's the first thing built.
-    for img in intro.images:
-        r = session.get(f"{url_root}/{img.src}")
-        epub_img = EpubImage(uid=img.src, file_name=img.src, media_type=img.media_type, content=r.content)
-        images.append(epub_img)
-    return Page(intro_chapter, images)
+
+    builder = functools.partial(_get_image, session, url_root)
+
+    for i in pool.imap_unordered(builder, intro.images):
+        bisect.insort(images, i)
+
+    return Page(0, intro_chapter, images)
 
 
 def build_update(session: Session, chapter: Chapters, data: Update, intro: Intro) -> Page:
@@ -120,19 +147,17 @@ def build_update(session: Session, chapter: Chapters, data: Update, intro: Intro
                                    lang=intro.language)  # TODO: fix language
     update_chapter.content = data.content
 
-    def img_builder(img: Image) -> EpubImage:
-        r = session.get(f"{chapter.original_href}/{img.src}")
-        return EpubImage(uid=img.src, file_name=img.src, media_type=img.media_type, content=r.content)
+    img_builder = functools.partial(_get_image, session, chapter.original_href)
 
-    images: List[EpubImage] = list(map(img_builder, data.images))
+    images: List[IndexedEpubImage] = list(map(img_builder, data.images))
 
-    return Page(update_chapter, images)
+    return Page(chapter.num, update_chapter, images)
 
 
 def add_page(book: EpubBook, toc: List, spine: List, page: Page):
     book.add_item(page.chapter)
     for img in page.images:
-        book.add_item(img)
+        book.add_item(img.data)
     toc.append(epub.Link(page.chapter.file_name, page.chapter.title, page.chapter.id))
     spine.append(page.chapter)
 
@@ -148,6 +173,7 @@ class DummyUpdater:
 
     def __init__(self, *args, **kwargs):
         pass
+
 
 def lparchive2epub(update_manager, url: str, file: str):
     if update_manager is None:
@@ -167,19 +193,24 @@ def lparchive2epub(update_manager, url: str, file: str):
 
     toc = []
     spine = ["nav"]
-    epub_intro = build_intro(session, url, intro)
-
-    add_page(book, toc, spine, epub_intro)
-
-    page_builder = functools.partial(build_single_page, session)
-    page_builder = functools.partial(page_builder, intro)
-
     with Pool() as pool:
-        pages = pool.imap(page_builder, intro.chapters)
+
+        epub_intro = build_intro(pool, session, url, intro)
+
+        add_page(book, toc, spine, epub_intro)
+
+        page_builder = functools.partial(build_single_page, session)
+        page_builder = functools.partial(page_builder, intro)
+
+        pages_iterator = pool.imap_unordered(page_builder, intro.chapters)
+        pages = []
         with update_manager(total=len(intro.chapters)) as pbar:
-            for page in pages:
-                add_page(book, toc, spine, page)
+            for p in pages_iterator:
+                bisect.insort(pages, p)
                 pbar.update()
+
+    for p in pages:
+        add_page(book, toc, spine, p)
 
     book.toc = toc
 
