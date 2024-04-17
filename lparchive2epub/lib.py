@@ -9,6 +9,8 @@ from ebooklib import epub
 from ebooklib.epub import EpubHtml, EpubImage, EpubBook
 from requests import Session
 import bisect
+import urllib.parse
+import os
 
 
 @dataclass(order=True)
@@ -30,6 +32,7 @@ class Image:
     num: int
     src: str
     media_type: str
+    file_name: str
 
     def __post_init__(self):
         self.sort_index = self.num
@@ -73,7 +76,7 @@ class Extractor:
             a = content.find("a", text=c.txt)
             a['href'] = c.new_href
 
-        images = Extractor.all_images(content)
+        images = Extractor.all_images("introduction", content)
 
         return Intro(
             title=title, language=language, author=author, intro=str(content), images=images, chapters=chapters
@@ -103,15 +106,25 @@ class Extractor:
         return chapters
 
     @staticmethod
-    def all_images(content: BeautifulSoup) -> List[Image]:
+    def all_images(prefix: str, content: BeautifulSoup) -> List[Image]:
         images = content.find_all("img")
-        # todo : rename images so they can map later properly
-        return [Image(num=i, src=x['src'], media_type=x["src"][-3:]) for i, x in enumerate(images)]
+        r = []
+        for i, x in enumerate(images):
+            base_name = os.path.split(urllib.parse.urlparse(x['src']).path)[1]
+            new_filename = f"images/{prefix}_{i}_{base_name}"
+            r.append(Image(
+                num=i,
+                src=x['src'],
+                media_type=x["src"][-3:],
+                file_name=new_filename
+            ))
+            x['src'] = new_filename
+        return r
 
     @staticmethod
-    def get_update(p: BeautifulSoup) -> Update:
+    def get_update(prefix: str, p: BeautifulSoup) -> Update:
         content = p.find("div", id="content")
-        images = Extractor.all_images(content)
+        images = Extractor.all_images(prefix, content)
         return Update(content=str(content), images=images)
 
 
@@ -127,7 +140,8 @@ class Page:
 
 def _get_image(session: Session, url_root: str, img: Image) -> IndexedEpubImage:
     r = session.get(f"{url_root}/{img.src}")
-    return IndexedEpubImage(img.num, EpubImage(uid=img.src, file_name=img.src, media_type=img.media_type, content=r.content))
+    return IndexedEpubImage(img.num, EpubImage(uid=img.file_name, file_name=img.file_name, media_type=img.media_type,
+                                               content=r.content))
 
 
 def build_intro(pool: Pool, session: Session, url_root: str, intro: Intro) -> Page:
@@ -166,7 +180,7 @@ def add_page(book: EpubBook, toc: List, spine: List, page: Page):
 def build_single_page(session: Session, intro: Intro, chapter: Chapters) -> Page:
     chapter_page = session.get(chapter.original_href)
     chapter_bs = BeautifulSoup(chapter_page.content, 'html.parser')
-    update = Extractor.get_update(chapter_bs)
+    update = Extractor.get_update(str(chapter.num), chapter_bs)
     return build_update(session, chapter, update, intro)
 
 
@@ -223,5 +237,4 @@ def lparchive2epub(update_manager, url: str, file: str):
     epub.write_epub(file, book)
 
 # todo: add ongoing treatment to show that it's working
-# todo: add prefix to images (intro, chapter_{num})
 # todo: add style imported from page?
