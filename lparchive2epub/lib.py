@@ -238,3 +238,4 @@ def lparchive2epub(update_manager, url: str, file: str):
 
 # todo: add ongoing treatment to show that it's working
 # todo: add style imported from page?
+# todo: check for links like in headshoots
