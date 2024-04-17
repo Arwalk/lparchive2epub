@@ -111,7 +111,7 @@ class Extractor:
         r = []
         for i, x in enumerate(images):
             base_name = os.path.split(urllib.parse.urlparse(x['src']).path)[1]
-            new_filename = f"images/{prefix}_{i}_{base_name}"
+            new_filename = f"images/{prefix}/{i}_{base_name}"
             r.append(Image(
                 num=i,
                 src=x['src'],
