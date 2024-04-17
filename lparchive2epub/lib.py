@@ -105,6 +105,7 @@ class Extractor:
     @staticmethod
     def all_images(content: BeautifulSoup) -> List[Image]:
         images = content.find_all("img")
+        # todo : rename images so they can map later properly
         return [Image(num=i, src=x['src'], media_type=x["src"][-3:]) for i, x in enumerate(images)]
 
     @staticmethod
