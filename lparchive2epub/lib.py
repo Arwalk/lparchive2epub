@@ -189,12 +189,12 @@ class DummyUpdater:
     def __init__(self, *args, **kwargs):
         pass
 
+    #todo: everything
 
-def lparchive2epub(update_manager, url: str, file: str):
+
+def lparchive2epub(update_manager, session: Session, pool: Pool, url: str, file: str):
     if update_manager is None:
         update_manager = DummyUpdater
-
-    session = requests.Session()
 
     page = session.get(url)
     landing = BeautifulSoup(page.content, 'html.parser')
@@ -204,25 +204,26 @@ def lparchive2epub(update_manager, url: str, file: str):
     book.add_author(intro.author)
     book.set_title(intro.title)
     book.set_language(intro.language)
+    book.add_metadata("DC", "source", url)
     book.set_identifier(f"lparchive2epub-{hash(intro.title)}-{hash(intro.author)}-{hash(url)}")
 
     toc = []
     spine = ["nav"]
-    with Pool() as pool:
 
-        epub_intro = build_intro(pool, session, url, intro)
+    epub_intro = build_intro(pool, session, url, intro)
 
-        add_page(book, toc, spine, epub_intro)
+    add_page(book, toc, spine, epub_intro)
 
-        page_builder = functools.partial(build_single_page, session)
-        page_builder = functools.partial(page_builder, intro)
+    page_builder = functools.partial(build_single_page, session)
+    page_builder = functools.partial(page_builder, intro)
 
-        pages_iterator = pool.imap_unordered(page_builder, intro.chapters)
-        pages = []
-        with update_manager(total=len(intro.chapters)) as pbar:
-            for p in pages_iterator:
-                bisect.insort(pages, p)
-                pbar.update()
+    pages_iterator = pool.imap_unordered(page_builder, intro.chapters)
+    pages = []
+
+    with update_manager(total=len(intro.chapters)) as pbar:
+        for p in pages_iterator:
+            bisect.insort(pages, p)
+            pbar.update()
 
     for p in pages:
         add_page(book, toc, spine, p)
@@ -236,6 +237,4 @@ def lparchive2epub(update_manager, url: str, file: str):
 
     epub.write_epub(file, book)
 
-# todo: add ongoing treatment to show that it's working
-# todo: add style imported from page?
 # todo: check for links like in headshoots

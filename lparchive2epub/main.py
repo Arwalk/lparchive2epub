@@ -1,5 +1,9 @@
 from argparse import ArgumentParser, ArgumentTypeError
+from multiprocessing import Pool
 from urllib.parse import urlparse
+
+from requests import Session
+
 from lparchive2epub.lib import lparchive2epub
 from tqdm import tqdm
 
@@ -23,7 +27,9 @@ arg_parser.add_argument("output", metavar="OUTPUT_FILE", nargs=1, type=str)
 
 def main():
     args = arg_parser.parse_args()
-    lparchive2epub(tqdm, args.url[0], args.output[0])
+    session = Session()
+    with Pool() as pool:
+        lparchive2epub(tqdm, session, pool, args.url[0], args.output[0])
 
 
 if __name__ == '__main__':

@@ -3,6 +3,7 @@ import logging
 import os
 import re
 from argparse import ArgumentParser
+from multiprocessing import Pool
 
 import requests
 from bs4 import BeautifulSoup
@@ -42,11 +43,15 @@ if __name__ == '__main__':
 
     pbar = tqdm(total=len(urls))
 
-    for url in urls:
-        try:
-            lparchive2epub(tqdm, "https://lparchive.org/" + url,
-                           f"{args.output[0]}{os.path.sep}{url.replace('/', '')}.epub")
-        except Exception as e:
-            pbar.write(f"failed to download {url}")
-            logger.error(e)
-        pbar.update()
+    session = requests.Session()
+    session.get("https://lparchive.org/")  # loading up the session before hand
+
+    with Pool() as pool:
+        for url in urls:
+            try:
+                lparchive2epub(tqdm, session, pool, "https://lparchive.org/" + url,
+                               f"{args.output[0]}{os.path.sep}{url.replace('/', '')}.epub")
+            except Exception as e:
+                pbar.write(f"failed to download {url}")
+                logger.error(e)
+            pbar.update()
