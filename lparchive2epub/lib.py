@@ -217,9 +217,10 @@ def lparchive2epub(update_manager, session: Session, pool: Pool, url: str, file:
     page_builder = functools.partial(build_single_page, session)
     page_builder = functools.partial(page_builder, intro)
 
+    # pages takes a vastly inequal times to get, so it's faster to imap_unordered and do a simple bisect.insort
+    # gotta go fast, but also keep the page order.
     pages_iterator = pool.imap_unordered(page_builder, intro.chapters)
     pages = []
-
     with update_manager(total=len(intro.chapters)) as pbar:
         for p in pages_iterator:
             bisect.insort(pages, p)
