@@ -239,3 +239,4 @@ def lparchive2epub(update_manager, session: Session, pool: Pool, url: str, file:
     epub.write_epub(file, book)
 
 # todo: check for links like in headshoots
+# todo: deduplicate images when possible. 
