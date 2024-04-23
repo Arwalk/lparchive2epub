@@ -1,10 +1,11 @@
 [tool.poetry]
 name = "lparchive2epub"
-version = "1.0.0"
+version = "1.0.1"
 description = ""
 authors = ["Arwalk <siragentprovocateurarwalk@gmail.com>"]
-readme = "README.adoc"
+readme = "README.md"
 packages = [{include = "lparchive2epub"}]
+repository = "https://github.com/Arwalk/lparchive2epub"
 
 [tool.poetry.dependencies]
 python = "^3.12"
