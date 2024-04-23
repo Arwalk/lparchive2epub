@@ -29,7 +29,7 @@ if __name__ == '__main__':
 
     # now for some "magic"
     # there's a javascript embedded in the page that contains all the content to populate the table at the bottom
-    # All archived let's plays are mentionned there.
+    # All archived let's plays are mentioned there.
     # So with a bit of regex we can extract the json that gives us all the let's plays
     scripts = soup.find_all("script")
     toc = scripts[13]
@@ -37,13 +37,15 @@ if __name__ == '__main__':
     data = m.group(0).replace("tocdata=", "")[:-1].replace("'", "\"")
     as_json = json.loads(data)
     urls = [x['u'] for x in as_json]
-    # It's ugly, but it works. And i couldn't find a decent api to ask politely for this data somewhere else.
+    # It's ugly, but it works. And I couldn't find a decent api to ask politely for this data somewhere else.
 
     logging.basicConfig(filename=f"{args.output[0]}{os.path.sep}/errors.log", level=logging.DEBUG,
                         format='%(asctime)s %(levelname)s %(name)s %(message)s')
     logger = logging.getLogger("all_lp_archive_to_epub")
 
     pbar = tqdm(total=len(urls))
+
+    failed = []
 
     with Pool() as pool:
         for url in urls:
@@ -53,4 +55,10 @@ if __name__ == '__main__':
             except Exception as e:
                 pbar.write(f"failed to download {url}")
                 logger.error(e)
+                failed.append(url)
             pbar.update()
+
+    print(f"downloaded {len(urls) - len(failed)} out of {len(urls)}")
+    print(f"failed lps:")
+    for url in failed:
+        print(failed)
