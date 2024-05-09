@@ -1,16 +1,16 @@
 import functools
 from dataclasses import dataclass
-from multiprocessing import Pool
 from typing import List, Tuple
 
-import requests
+import aiohttp
 from bs4 import BeautifulSoup
 from ebooklib import epub
 from ebooklib.epub import EpubHtml, EpubImage, EpubBook
-from requests import Session
-import bisect
 import urllib.parse
 import os
+import asyncio
+
+from tqdm.asyncio import tqdm
 
 
 @dataclass(order=True)
@@ -138,33 +138,42 @@ class Page:
         self.sort_index = self.num
 
 
-def _get_image(session: Session, url_root: str, img: Image) -> IndexedEpubImage:
-    r = session.get(f"{url_root}/{img.src}")
-    return IndexedEpubImage(img.num, EpubImage(uid=img.file_name, file_name=img.file_name, media_type=img.media_type,
-                                               content=r.content))
+async def _get_image(session: aiohttp.ClientSession, url_root: str, img: Image) -> IndexedEpubImage:
+    async with session.get(f"{url_root}/{img.src}") as r:
+        return IndexedEpubImage(img.num, EpubImage(
+            uid=img.file_name,
+            file_name=img.file_name,
+            media_type=img.media_type,
+            content=await r.content.read()))
 
 
-def build_intro(pool: Pool, session: Session, url_root: str, intro: Intro) -> Page:
+async def build_intro(session: aiohttp.ClientSession, url_root: str, intro: Intro) -> Page:
     intro_chapter = epub.EpubHtml(title="Introduction", file_name="introduction.xhtml", lang=intro.language)
     intro_chapter.content = intro.intro
-    images = []
 
-    builder = functools.partial(_get_image, session, url_root)
+    tasks = []
+    for image in intro.images:
+        task = asyncio.ensure_future(_get_image(session, url_root, image))
+        tasks.append(task)
 
-    for i in pool.imap_unordered(builder, intro.images):
-        bisect.insort(images, i)
+    images = await asyncio.gather(*tasks)
 
     return Page(0, intro_chapter, images)
 
 
-def build_update(session: Session, chapter: Chapters, data: Update, intro: Intro) -> Page:
+async def build_update(session: aiohttp.ClientSession, chapter: Chapters, data: Update, intro: Intro) -> Page:
     update_chapter = epub.EpubHtml(title=chapter.txt, file_name=chapter.new_href,
                                    lang=intro.language)  # TODO: fix language
     update_chapter.content = data.content
 
     img_builder = functools.partial(_get_image, session, chapter.original_href)
 
-    images: List[IndexedEpubImage] = list(map(img_builder, data.images))
+    tasks = []
+    for image in data.images:
+        task = asyncio.ensure_future(img_builder(image))
+        tasks.append(task)
+
+    images = await asyncio.gather(*tasks)
 
     return Page(chapter.num, update_chapter, images)
 
@@ -177,11 +186,11 @@ def add_page(book: EpubBook, toc: List, spine: List, page: Page):
     spine.append(page.chapter)
 
 
-def build_single_page(session: Session, intro: Intro, chapter: Chapters) -> Page:
-    chapter_page = session.get(chapter.original_href)
-    chapter_bs = BeautifulSoup(chapter_page.content, 'html.parser')
+async def build_single_page(session: aiohttp.ClientSession(), intro: Intro, chapter: Chapters) -> Page:
+    chapter_page = await session.get(chapter.original_href)
+    chapter_bs = BeautifulSoup(await chapter_page.text(), 'html.parser')
     update = Extractor.get_update(str(chapter.num), chapter_bs)
-    return build_update(session, chapter, update, intro)
+    return await build_update(session, chapter, update, intro)
 
 
 class DummyUpdater:
@@ -192,51 +201,50 @@ class DummyUpdater:
     #todo: everything
 
 
-def lparchive2epub(update_manager, session: Session, pool: Pool, url: str, file: str):
-    if update_manager is None:
-        update_manager = DummyUpdater
+async def lparchive2epub(url: str, file: str):
+    async with aiohttp.ClientSession() as session:
+        page = await session.get(url)
+        landing = BeautifulSoup(await page.text(), 'html.parser')
 
-    page = session.get(url)
-    landing = BeautifulSoup(page.content, 'html.parser')
-    book = epub.EpubBook()
-    intro = Extractor.intro(url, landing)
+        book = epub.EpubBook()
+        intro = Extractor.intro(url, landing)
 
-    book.add_author(intro.author)
-    book.set_title(intro.title)
-    book.set_language(intro.language)
-    book.add_metadata("DC", "source", url)
-    book.set_identifier(f"lparchive2epub-{hash(intro.title)}-{hash(intro.author)}-{hash(url)}")
+        book.add_author(intro.author)
+        book.set_title(intro.title)
+        book.set_language(intro.language)
+        book.add_metadata("DC", "source", url)
+        book.set_identifier(f"lparchive2epub-{hash(intro.title)}-{hash(intro.author)}-{hash(url)}")
 
-    toc = []
-    spine = ["nav"]
+        toc = []
+        spine = ["nav"]
 
-    epub_intro = build_intro(pool, session, url, intro)
+        epub_intro = await build_intro(session, url, intro)
 
-    add_page(book, toc, spine, epub_intro)
+        add_page(book, toc, spine, epub_intro)
 
-    page_builder = functools.partial(build_single_page, session)
-    page_builder = functools.partial(page_builder, intro)
+        # pages takes a vastly inequal times to get, so it's faster to imap_unordered and do a simple bisect.insort
+        # gotta go fast, but also keep the page order.
 
-    # pages takes a vastly inequal times to get, so it's faster to imap_unordered and do a simple bisect.insort
-    # gotta go fast, but also keep the page order.
-    pages_iterator = pool.imap_unordered(page_builder, intro.chapters)
-    pages = []
-    with update_manager(total=len(intro.chapters)) as pbar:
-        for p in pages_iterator:
-            bisect.insort(pages, p)
-            pbar.update()
+        tasks = []
 
-    for p in pages:
-        add_page(book, toc, spine, p)
+        for chapter in intro.chapters:
+            task = asyncio.ensure_future(build_single_page(session, intro, chapter))
+            tasks.append(task)
 
-    book.toc = toc
+        pages = await tqdm.gather(*tasks)
+        pages = sorted(pages)
 
-    book.add_item(epub.EpubNcx())
-    book.add_item(epub.EpubNav())
+        for p in pages:
+            add_page(book, toc, spine, p)
 
-    book.spine = spine
+        book.toc = toc
 
-    epub.write_epub(file, book)
+        book.add_item(epub.EpubNcx())
+        book.add_item(epub.EpubNav())
+
+        book.spine = spine
+
+        epub.write_epub(file, book)
 
 # todo: check for links like in headshoots
-# todo: deduplicate images when possible. 
+# todo: deduplicate images when possible.

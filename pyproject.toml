@@ -10,9 +10,9 @@ repository = "https://github.com/Arwalk/lparchive2epub"
 [tool.poetry.dependencies]
 python = "^3.12"
 ebooklib = "^0.18"
-requests = "^2.31.0"
 beautifulsoup4 = "^4.12.2"
-tqdm = "^4.66.2"
+tqdm = "^4.66.4"
+aiohttp = "^3.9.5"
 
 [tool.poetry.scripts]
 lparchive2epub = 'lparchive2epub.main:main'

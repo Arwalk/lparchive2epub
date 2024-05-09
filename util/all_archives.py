@@ -1,31 +1,33 @@
+import asyncio
 import json
 import logging
 import os
 import re
 from argparse import ArgumentParser
-from multiprocessing import Pool
 
-import requests
 from bs4 import BeautifulSoup
 from tqdm import tqdm
 
 from lparchive2epub.lib import lparchive2epub
+from aiohttp import ClientSession
+from tqdm.asyncio import tqdm
 
-if __name__ == '__main__':
 
-    arg_parser = ArgumentParser(
-        prog="all_lp_archive_to_epub",
-        description="rock and roll"
-    )
+async def do_single(url, logger, failed):
+    try:
+        await lparchive2epub("https://lparchive.org/" + url,
+                             f"{args.output[0]}{os.path.sep}{url.replace('/', '')}.epub")
+    except Exception as e:
+        logger.error(e)
+        failed.append(url)
 
-    arg_parser.add_argument("output", metavar="OUTPUT_FILE", nargs=1, type=str)
 
-    args = arg_parser.parse_args()
-    session = requests.Session()
+async def do(arguments):
+    async with ClientSession() as session:
 
-    p = session.get("https://lparchive.org/")
+        p = await session.get("https://lparchive.org/")
 
-    soup = BeautifulSoup(p.text, "html.parser")
+        soup = BeautifulSoup(await p.text(), "html.parser")
 
     # now for some "magic"
     # there's a javascript embedded in the page that contains all the content to populate the table at the bottom
@@ -39,26 +41,31 @@ if __name__ == '__main__':
     urls = [x['u'] for x in as_json]
     # It's ugly, but it works. And I couldn't find a decent api to ask politely for this data somewhere else.
 
-    logging.basicConfig(filename=f"{args.output[0]}{os.path.sep}/errors.log", level=logging.DEBUG,
+    logging.basicConfig(filename=f"{arguments.output[0]}{os.path.sep}/errors.log", level=logging.DEBUG,
                         format='%(asctime)s %(levelname)s %(name)s %(message)s')
     logger = logging.getLogger("all_lp_archive_to_epub")
 
-    pbar = tqdm(total=len(urls))
+    tasks = []
 
     failed = []
 
-    with Pool() as pool:
-        for url in urls:
-            try:
-                lparchive2epub(tqdm, session, pool, "https://lparchive.org/" + url,
-                               f"{args.output[0]}{os.path.sep}{url.replace('/', '')}.epub")
-            except Exception as e:
-                pbar.write(f"failed to download {url}")
-                logger.error(e)
-                failed.append(url)
-            pbar.update()
+    for url in urls:
+        task = asyncio.ensure_future(do_single(url, logger, failed))
+        tasks.append(task)
 
+    await tqdm.gather(*tasks)
     print(f"downloaded {len(urls) - len(failed)} out of {len(urls)}")
     print(f"failed lps:")
     for url in failed:
-        print(failed)
+        print(url)
+
+
+if __name__ == '__main__':
+    arg_parser = ArgumentParser(
+        prog="all_lp_archive_to_epub",
+        description="rock and roll"
+    )
+
+    arg_parser.add_argument("output", metavar="OUTPUT_FILE", nargs=1, type=str)
+
+    args = arg_parser.parse_args()
