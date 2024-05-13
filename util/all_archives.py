@@ -1,33 +1,55 @@
 import asyncio
 import json
 import logging
+import multiprocessing
 import os
 import re
 from argparse import ArgumentParser
 
+import aiohttp
 from bs4 import BeautifulSoup
-from tqdm import tqdm
 
 from lparchive2epub.lib import lparchive2epub
 from aiohttp import ClientSession
 from tqdm.asyncio import tqdm
 
-
-async def do_single(url, logger, failed):
-    try:
-        await lparchive2epub("https://lparchive.org/" + url,
-                             f"{args.output[0]}{os.path.sep}{url.replace('/', '')}.epub")
-    except Exception as e:
-        logger.error(e)
-        failed.append(url)
+processes = multiprocessing.cpu_count()
 
 
-async def do(arguments):
+async def do_single(arguments, url, pbar, failed):
+    logger = logging.getLogger("all_lp_archive_to_epub")
+    exc = None
+    for i in range(5):
+        try:
+            await lparchive2epub("https://lparchive.org/" + url,
+                                 f"{arguments.output[0]}{os.path.sep}{url.replace('/', '')}.epub",
+                                 with_pbar=False)
+        except (aiohttp.client_exceptions.ServerDisconnectedError, TimeoutError, RuntimeError) as disconnected:
+            exc = disconnected
+            await asyncio.sleep(5)
+        except Exception as e:
+            exc = e
+        else:
+            pbar.update(1)
+            return None
+
+    pbar.write(f"failed to download {url} : {str(exc)}")
+    logger.error("error:", exc_info=exc)
+    failed.append(f"url: {url}, exc: {exc}")
+    pbar.update(1)
+    return url, exc
+
+
+async def get_frontpage():
     async with ClientSession() as session:
-
         p = await session.get("https://lparchive.org/")
 
         soup = BeautifulSoup(await p.text(), "html.parser")
+    return soup
+
+
+async def do(arguments):
+    soup = await get_frontpage()
 
     # now for some "magic"
     # there's a javascript embedded in the page that contains all the content to populate the table at the bottom
@@ -43,21 +65,19 @@ async def do(arguments):
 
     logging.basicConfig(filename=f"{arguments.output[0]}{os.path.sep}/errors.log", level=logging.DEBUG,
                         format='%(asctime)s %(levelname)s %(name)s %(message)s')
-    logger = logging.getLogger("all_lp_archive_to_epub")
-
-    tasks = []
 
     failed = []
+    tasks = []
 
-    for url in urls:
-        task = asyncio.ensure_future(do_single(url, logger, failed))
-        tasks.append(task)
+    connector = aiohttp.TCPConnector(limit=int(100 / processes / 2))
 
-    await tqdm.gather(*tasks)
-    print(f"downloaded {len(urls) - len(failed)} out of {len(urls)}")
-    print(f"failed lps:")
+    with tqdm(total=len(urls)) as pbar:
+        for url in urls:
+            await do_single(arguments, url, pbar, failed)
+
     for url in failed:
         print(url)
+    print(f"downloaded {len(urls) - len(failed)} out of {len(urls)}")
 
 
 if __name__ == '__main__':
@@ -69,3 +89,4 @@ if __name__ == '__main__':
     arg_parser.add_argument("output", metavar="OUTPUT_FILE", nargs=1, type=str)
 
     args = arg_parser.parse_args()
+    asyncio.run(do(args))

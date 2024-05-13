@@ -12,6 +12,8 @@ import asyncio
 
 from tqdm.asyncio import tqdm
 
+from contextlib import nullcontext
+
 
 @dataclass(order=True)
 class Chapters:
@@ -201,50 +203,58 @@ class DummyUpdater:
     #todo: everything
 
 
-async def lparchive2epub(url: str, file: str):
-    async with aiohttp.ClientSession() as session:
-        page = await session.get(url)
-        landing = BeautifulSoup(await page.text(), 'html.parser')
+async def lparchive2epub(url: str, file: str, root_session: [aiohttp.ClientSession | None] = None, with_pbar: bool = True):
+    if root_session is None:
+        root_session = aiohttp.ClientSession()
+    async with root_session as session:
+        await do(url, file, session, with_pbar)
 
-        book = epub.EpubBook()
-        intro = Extractor.intro(url, landing)
 
-        book.add_author(intro.author)
-        book.set_title(intro.title)
-        book.set_language(intro.language)
-        book.add_metadata("DC", "source", url)
-        book.set_identifier(f"lparchive2epub-{hash(intro.title)}-{hash(intro.author)}-{hash(url)}")
+async def do(url: str, file: str, session: aiohttp.ClientSession, with_pbar: bool):
+    page = await session.get(url)
+    landing = BeautifulSoup(await page.text(), 'html.parser')
 
-        toc = []
-        spine = ["nav"]
+    book = epub.EpubBook()
+    intro = Extractor.intro(url, landing)
 
-        epub_intro = await build_intro(session, url, intro)
+    book.add_author(intro.author)
+    book.set_title(intro.title)
+    book.set_language(intro.language)
+    book.add_metadata("DC", "source", url)
+    book.set_identifier(f"lparchive2epub-{hash(intro.title)}-{hash(intro.author)}-{hash(url)}")
 
-        add_page(book, toc, spine, epub_intro)
+    toc = []
+    spine = ["nav"]
 
-        # pages takes a vastly inequal times to get, so it's faster to imap_unordered and do a simple bisect.insort
-        # gotta go fast, but also keep the page order.
+    epub_intro = await build_intro(session, url, intro)
 
-        tasks = []
+    add_page(book, toc, spine, epub_intro)
 
-        for chapter in intro.chapters:
-            task = asyncio.ensure_future(build_single_page(session, intro, chapter))
-            tasks.append(task)
+    # pages takes a vastly inequal times to get, so it's faster to imap_unordered and do a simple bisect.insort
+    # gotta go fast, but also keep the page order.
 
-        pages = await tqdm.gather(*tasks)
-        pages = sorted(pages)
+    tasks = []
 
-        for p in pages:
-            add_page(book, toc, spine, p)
+    for chapter in intro.chapters:
+        task = asyncio.ensure_future(build_single_page(session, intro, chapter))
+        tasks.append(task)
 
-        book.toc = toc
+    gatherer = tqdm.gather if with_pbar else asyncio.gather
 
-        book.add_item(epub.EpubNcx())
-        book.add_item(epub.EpubNav())
+    pages = await gatherer(*tasks)
+    pages = sorted(pages)
 
-        book.spine = spine
+    for p in pages:
+        add_page(book, toc, spine, p)
 
-        epub.write_epub(file, book)
+    book.toc = toc
+
+    book.add_item(epub.EpubNcx())
+    book.add_item(epub.EpubNav())
+
+    book.spine = spine
+
+    epub.write_epub(file, book)
 
 # todo: check for links like in headshoots
 # todo: deduplicate images when possible.
