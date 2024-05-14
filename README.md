@@ -27,6 +27,10 @@ Poetry, python 3.12
 
 python 3.12
 
+## Installation
+
+`pip install lparchive2epub`
+
 ## Known limitations
 
 - Similar images present in multiple pages in the let's play are duplicated, bloating the file. Though recurring images are usually smileys, so not too big.
