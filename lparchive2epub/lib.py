@@ -13,17 +13,17 @@ import asyncio
 from tqdm.asyncio import tqdm
 
 from contextlib import nullcontext
-
+from hashlib import blake2b
 
 @dataclass(order=True)
 class Chapters:
     num: int
     original_href: str
-    txt: str
+    txt: BeautifulSoup
     new_href: str
 
     def __hash__(self):
-        return hash((self.original_href, self.txt))
+        return hash((self.original_href, str(self.txt.string)))
 
     def __post_init__(self):
         self.sort_index = self.num
@@ -34,7 +34,7 @@ class Image:
     num: int
     src: str
     media_type: str
-    file_name: str
+    tag: BeautifulSoup
 
     def __post_init__(self):
         self.sort_index = self.num
@@ -43,6 +43,9 @@ class Image:
 @dataclass(order=True)
 class IndexedEpubImage:
     num: int
+    hash: str
+    old_name: str
+    new_name: str
     data: EpubImage
 
     def __post_init__(self):
@@ -54,14 +57,14 @@ class Intro:
     title: str
     language: str
     author: str
-    intro: str
+    intro: BeautifulSoup
     images: List[Image]
     chapters: List[Chapters]
 
 
 @dataclass
 class Update:
-    content: str
+    content: BeautifulSoup
     images: List[Image]
 
 
@@ -75,13 +78,13 @@ class Extractor:
         content = p.find("div", id="content")
         chapters = Extractor.all_chapters(url, p)
         for c in chapters:
-            a = content.find("a", text=c.txt)
+            a = content.find("a", text=str(c.txt.string))
             a['href'] = c.new_href
 
         images = Extractor.all_images("introduction", content)
 
         return Intro(
-            title=title, language=language, author=author, intro=str(content), images=images, chapters=chapters
+            title=title, language=language, author=author, intro=content, images=images, chapters=chapters
         )
 
     @staticmethod
@@ -99,7 +102,7 @@ class Extractor:
             return Chapters(
                 num=i,
                 original_href=original_href,
-                txt=str(c.string),
+                txt=c,
                 new_href=f"update_{i}.xhtml"
             )
 
@@ -112,22 +115,19 @@ class Extractor:
         images = content.find_all("img")
         r = []
         for i, x in enumerate(images):
-            base_name = os.path.split(urllib.parse.urlparse(x['src']).path)[1]
-            new_filename = f"images/{prefix}/{i}_{base_name}"
             r.append(Image(
                 num=i,
                 src=x['src'],
                 media_type=x["src"][-3:],
-                file_name=new_filename
+                tag=x
             ))
-            x['src'] = new_filename
         return r
 
     @staticmethod
     def get_update(prefix: str, p: BeautifulSoup) -> Update:
         content = p.find("div", id="content")
         images = Extractor.all_images(prefix, content)
-        return Update(content=str(content), images=images)
+        return Update(content=content, images=images)
 
 
 @dataclass(order=True)
@@ -142,16 +142,27 @@ class Page:
 
 async def _get_image(session: aiohttp.ClientSession, url_root: str, img: Image) -> IndexedEpubImage:
     async with session.get(f"{url_root}/{img.src}") as r:
-        return IndexedEpubImage(img.num, EpubImage(
-            uid=img.file_name,
-            file_name=img.file_name,
-            media_type=img.media_type,
-            content=await r.content.read()))
+        media_type = img.media_type
+        content = await r.content.read()
+        hasher = blake2b()
+        hasher.update(content)
+        img_hash = hasher.hexdigest()
+        new_name = f"images/{img_hash}.{media_type}"
+        return IndexedEpubImage(
+            img.num,
+            img_hash,
+            img.tag['src'],
+            new_name,
+            EpubImage(
+                uid=img_hash,
+                file_name=new_name,
+                media_type=media_type,
+                content=content)
+        )
 
 
 async def build_intro(session: aiohttp.ClientSession, url_root: str, intro: Intro) -> Page:
     intro_chapter = epub.EpubHtml(title="Introduction", file_name="introduction.xhtml", lang=intro.language)
-    intro_chapter.content = intro.intro
 
     tasks = []
     for image in intro.images:
@@ -160,13 +171,22 @@ async def build_intro(session: aiohttp.ClientSession, url_root: str, intro: Intr
 
     images = await asyncio.gather(*tasks)
 
+    for image in images:
+        intro.intro = replace_img_name(intro.intro, image)
+
+    intro_chapter.content = str(intro.intro)
+
     return Page(0, intro_chapter, images)
 
+def replace_img_name(content: BeautifulSoup, image: IndexedEpubImage) -> BeautifulSoup:
+    to_change = (x for x in content.find_all("img") if x["src"] == image.old_name)
+    for item in to_change:
+        item["src"] = image.new_name
+    return content
 
 async def build_update(session: aiohttp.ClientSession, chapter: Chapters, data: Update, intro: Intro) -> Page:
-    update_chapter = epub.EpubHtml(title=chapter.txt, file_name=chapter.new_href,
+    update_chapter = epub.EpubHtml(title=str(chapter.txt.string), file_name=chapter.new_href,
                                    lang=intro.language)  # TODO: fix language
-    update_chapter.content = data.content
 
     img_builder = functools.partial(_get_image, session, chapter.original_href)
 
@@ -177,13 +197,20 @@ async def build_update(session: aiohttp.ClientSession, chapter: Chapters, data: 
 
     images = await asyncio.gather(*tasks)
 
+    for image in images:
+        data.content = replace_img_name(data.content, image)
+
+    update_chapter.content = str(data.content)
+
     return Page(chapter.num, update_chapter, images)
 
 
-def add_page(book: EpubBook, toc: List, spine: List, page: Page):
+def add_page(known_images: dict, book: EpubBook, toc: List, spine: List, page: Page):
     book.add_item(page.chapter)
     for img in page.images:
-        book.add_item(img.data)
+        if img.hash not in known_images["hashes"]:
+            book.add_item(img.data)
+            known_images["hashes"].append(img.hash)
     toc.append(epub.Link(page.chapter.file_name, page.chapter.title, page.chapter.id))
     spine.append(page.chapter)
 
@@ -248,7 +275,11 @@ async def do(url: str, file: str, session: aiohttp.ClientSession, with_pbar: boo
 
     epub_intro = await build_intro(session, url, intro)
 
-    add_page(book, toc, spine, epub_intro)
+    known_images = {
+        "hashes": [],
+    }
+
+    add_page(known_images, book, toc, spine, epub_intro)
 
     # pages takes a vastly inequal times to get, so it's faster to imap_unordered and do a simple bisect.insort
     # gotta go fast, but also keep the page order.
@@ -265,7 +296,7 @@ async def do(url: str, file: str, session: aiohttp.ClientSession, with_pbar: boo
     pages = sorted(pages)
 
     for p in pages:
-        add_page(book, toc, spine, p)
+        add_page(known_images, book, toc, spine, p)
 
     book.toc = toc
 
