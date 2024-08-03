@@ -217,7 +217,8 @@ tags_to_clean = [
     "st1:country-region",
     "st1:placename",
     "st1:placetype",
-    "st1:state"
+    "st1:state",
+    "o:p"
 ]
 
 
