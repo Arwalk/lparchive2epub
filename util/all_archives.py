@@ -67,16 +67,13 @@ async def do(arguments):
                         format='%(asctime)s %(levelname)s %(name)s %(message)s')
 
     failed = []
-    tasks = []
-
-    connector = aiohttp.TCPConnector(limit=int(100 / processes / 2))
 
     with tqdm(total=len(urls)) as pbar:
         for url in urls:
             await do_single(arguments, url, pbar, failed)
 
     for url in failed:
-        print(url)
+        print(json.dumps(url))
     print(f"downloaded {len(urls) - len(failed)} out of {len(urls)}")
 
 

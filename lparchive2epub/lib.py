@@ -190,7 +190,7 @@ def add_page(book: EpubBook, toc: List, spine: List, page: Page):
 
 async def build_single_page(session: aiohttp.ClientSession(), intro: Intro, chapter: Chapters) -> Page:
     chapter_page = await session.get(chapter.original_href)
-    chapter_bs = BeautifulSoup(await chapter_page.text(), 'html.parser')
+    chapter_bs = get_cleaned_html(await chapter_page.text())
     update = Extractor.get_update(str(chapter.num), chapter_bs)
     return await build_update(session, chapter, update, intro)
 
@@ -203,16 +203,35 @@ class DummyUpdater:
     #todo: everything
 
 
-async def lparchive2epub(url: str, file: str, root_session: [aiohttp.ClientSession | None] = None, with_pbar: bool = True):
+async def lparchive2epub(url: str, file: str, root_session: [aiohttp.ClientSession | None] = None,
+                         with_pbar: bool = True):
     if root_session is None:
         root_session = aiohttp.ClientSession()
     async with root_session as session:
         await do(url, file, session, with_pbar)
 
 
+tags_to_clean = [
+    "st1:place",
+    "st1:city",
+    "st1:country-region",
+    "st1:placename",
+    "st1:placetype",
+    "st1:state"
+]
+
+
+def get_cleaned_html(page: str) -> BeautifulSoup:
+    xml_version = BeautifulSoup(page, "html.parser")
+    for tag in tags_to_clean:
+        while found := xml_version.find(tag):
+            found.unwrap()
+    return BeautifulSoup(str(xml_version), "html.parser")
+
+
 async def do(url: str, file: str, session: aiohttp.ClientSession, with_pbar: bool):
     page = await session.get(url)
-    landing = BeautifulSoup(await page.text(), 'html.parser')
+    landing = get_cleaned_html(await page.text())
 
     book = epub.EpubBook()
     intro = Extractor.intro(url, landing)
