@@ -154,9 +154,9 @@ async def _get_image(session: aiohttp.ClientSession, url_root: str, img: Image) 
             img.tag['src'],
             new_name,
             EpubImage(
-                uid=img_hash,
+                uid=f"i{img_hash}",
                 file_name=new_name,
-                media_type=media_type,
+                media_type=f"image/{media_type}",
                 content=content)
         )
 
