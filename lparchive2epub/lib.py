@@ -1,19 +1,16 @@
+import asyncio
 import functools
 from dataclasses import dataclass
+from hashlib import blake2b
 from typing import List, Tuple
 
 import aiohttp
 from bs4 import BeautifulSoup
 from ebooklib import epub
 from ebooklib.epub import EpubHtml, EpubImage, EpubBook
-import urllib.parse
-import os
-import asyncio
-
 from tqdm.asyncio import tqdm
 
-from contextlib import nullcontext
-from hashlib import blake2b
+from style import get_style_item
 
 @dataclass(order=True)
 class Chapters:
@@ -99,6 +96,8 @@ class Extractor:
             original_href = c.get("href", None)
             if original_href.startswith("Update"):
                 original_href = f"{root_url}/{original_href}"
+            if original_href.endswith("/"):
+                original_href = original_href[:-1]
             return Chapters(
                 num=i,
                 original_href=original_href,
@@ -163,7 +162,7 @@ async def _get_image(session: aiohttp.ClientSession, url_root: str, img: Image) 
 
 async def build_intro(session: aiohttp.ClientSession, url_root: str, intro: Intro) -> Page:
     intro_chapter = epub.EpubHtml(title="Introduction", file_name="introduction.xhtml", lang=intro.language)
-
+    intro_chapter.add_item(get_style_item())
     tasks = []
     for image in intro.images:
         task = asyncio.ensure_future(_get_image(session, url_root, image))
@@ -187,6 +186,7 @@ def replace_img_name(content: BeautifulSoup, image: IndexedEpubImage) -> Beautif
 async def build_update(session: aiohttp.ClientSession, chapter: Chapters, data: Update, intro: Intro) -> Page:
     update_chapter = epub.EpubHtml(title=str(chapter.txt.string), file_name=chapter.new_href,
                                    lang=intro.language)  # TODO: fix language
+    update_chapter.add_item(get_style_item())
 
     img_builder = functools.partial(_get_image, session, chapter.original_href)
 
@@ -232,6 +232,8 @@ class DummyUpdater:
 
 async def lparchive2epub(url: str, file: str, root_session: [aiohttp.ClientSession | None] = None,
                          with_pbar: bool = True):
+    if url.endswith("/"):
+        url = url[:-1]
     if root_session is None:
         root_session = aiohttp.ClientSession()
     async with root_session as session:
@@ -304,6 +306,8 @@ async def do(url: str, file: str, session: aiohttp.ClientSession, with_pbar: boo
     book.add_item(epub.EpubNav())
 
     book.spine = spine
+
+    book.add_item(get_style_item())
 
     epub.write_epub(file, book)
 
