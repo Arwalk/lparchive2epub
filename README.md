@@ -33,7 +33,7 @@ python 3.12
 
 ## Known limitations
 
-- Similar images present in multiple pages in the let's play are duplicated, bloating the file. Though recurring images are usually smileys, so not too big.
+- ~~Similar images present in multiple pages in the let's play are duplicated, bloating the file. Though recurring images are usually smileys, so not too big.~~ Now handled!
 - Links to images are not properly saved.
 - LPs that are mostly link to YouTube videos are not very interesting to transform to epub
 - Some LPs completely fail to be downloaded.
