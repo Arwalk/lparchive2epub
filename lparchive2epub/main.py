@@ -1,11 +1,9 @@
 import asyncio
 from argparse import ArgumentParser, ArgumentTypeError
-
 from urllib.parse import urlparse
 
-
 from lparchive2epub.lib import lparchive2epub
-from tqdm import asyncio as tqdm
+
 
 def is_lparchive_url(arg):
     url = urlparse(arg)

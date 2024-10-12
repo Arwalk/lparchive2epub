@@ -215,7 +215,7 @@ def add_page(known_images: dict, book: EpubBook, toc: List, spine: List, page: P
     spine.append(page.chapter)
 
 
-async def build_single_page(session: aiohttp.ClientSession(), intro: Intro, chapter: Chapters) -> Page:
+async def build_single_page(session: aiohttp.ClientSession, intro: Intro, chapter: Chapters) -> Page:
     chapter_page = await session.get(chapter.original_href)
     chapter_bs = get_cleaned_html(await chapter_page.text())
     update = Extractor.get_update(str(chapter.num), chapter_bs)

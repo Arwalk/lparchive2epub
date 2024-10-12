@@ -1,6 +1,6 @@
 [tool.poetry]
 name = "lparchive2epub"
-version = "1.1.0"
+version = "1.2.1"
 description = ""
 authors = ["Arwalk <siragentprovocateurarwalk@gmail.com>"]
 readme = "README.md"
