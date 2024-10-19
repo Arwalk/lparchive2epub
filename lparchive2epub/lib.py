@@ -10,7 +10,7 @@ from ebooklib import epub
 from ebooklib.epub import EpubHtml, EpubImage, EpubBook
 from tqdm.asyncio import tqdm
 
-from style import get_style_item
+from lparchive2epub.style import get_style_item
 
 @dataclass(order=True)
 class Chapters:
