@@ -25,7 +25,7 @@ Poetry, python 3.12
 
 ### Users
 
-python 3.12
+python >= 3.12
 
 ## Installation
 
