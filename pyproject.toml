@@ -25,6 +25,8 @@ build-backend = "poetry.core.masonry.api"
 pytest = "^7.4.4"
 coverage = "^7.4.0"
 
+[tool.poetry-pyinstaller-plugin.scripts]
+lparchive2epub = { source = "lparchive2epub/main.py", type = "onefile", bundle = true, console = true }
 
 [tool.pytest.ini_options]
 addopts = [
