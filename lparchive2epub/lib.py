@@ -20,7 +20,7 @@ class Chapters:
     new_href: str
 
     def __hash__(self):
-        return hash((self.original_href, str(self.txt.string)))
+        return hash((self.original_href, str(self.txt.text)))
 
     def __post_init__(self):
         self.sort_index = self.num
@@ -75,10 +75,10 @@ class Extractor:
         content = p.find("div", id="content")
         chapters = Extractor.all_chapters(url, p)
         for c in chapters:
-            a = content.find("a", text=str(c.txt.string))
+            a = content.find("a", string=str(c.txt))
             a['href'] = c.new_href
 
-        images = Extractor.all_images("introduction", content)
+        images = Extractor.all_images(content)
 
         return Intro(
             title=title, language=language, author=author, intro=content, images=images, chapters=chapters
@@ -101,7 +101,7 @@ class Extractor:
             return Chapters(
                 num=i,
                 original_href=original_href,
-                txt=c,
+                txt=c.text,
                 new_href=f"update_{i}.xhtml"
             )
 
@@ -110,7 +110,7 @@ class Extractor:
         return chapters
 
     @staticmethod
-    def all_images(prefix: str, content: BeautifulSoup) -> List[Image]:
+    def all_images(content: BeautifulSoup) -> List[Image]:
         images = content.find_all("img")
         r = []
         for i, x in enumerate(images):
@@ -125,7 +125,7 @@ class Extractor:
     @staticmethod
     def get_update(prefix: str, p: BeautifulSoup) -> Update:
         content = p.find("div", id="content")
-        images = Extractor.all_images(prefix, content)
+        images = Extractor.all_images(content)
         return Update(content=content, images=images)
 
 
@@ -184,7 +184,7 @@ def replace_img_name(content: BeautifulSoup, image: IndexedEpubImage) -> Beautif
     return content
 
 async def build_update(session: aiohttp.ClientSession, chapter: Chapters, data: Update, intro: Intro) -> Page:
-    update_chapter = epub.EpubHtml(title=str(chapter.txt.string), file_name=chapter.new_href,
+    update_chapter = epub.EpubHtml(title=str(chapter.txt), file_name=chapter.new_href,
                                    lang=intro.language)  # TODO: fix language
     update_chapter.add_item(get_style_item())
 
