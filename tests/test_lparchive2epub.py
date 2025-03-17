@@ -291,7 +291,7 @@ def test_all_images():
     b = BeautifulSoup(headshoots, "html.parser")
     content = b.find("div", id="content")
     images = Extractor.all_images(content)
-    assert len(images) == 10
+    assert len(images) == 16
 
     b = BeautifulSoup(xcom, "html.parser")
     content = b.find("div", id="content")
