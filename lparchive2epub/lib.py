@@ -111,8 +111,11 @@ class Extractor:
 
     @staticmethod
     def all_images(content: BeautifulSoup) -> List[Image]:
+        # Get direct image tags
         images = content.find_all("img")
         r = []
+        
+        # Add direct images
         for i, x in enumerate(images):
             r.append(Image(
                 num=i,
@@ -120,6 +123,19 @@ class Extractor:
                 media_type=x["src"][-3:],
                 tag=x
             ))
+        
+        # Find image links - typically "Click here for full image" links
+        image_links = content.find_all("a", href=lambda x: x and (x.endswith('.jpg') or x.endswith('.png') or x.endswith('.gif')))
+        
+        # Add linked images to be saved, but don't modify the HTML structure
+        for i, link in enumerate(image_links, start=len(r)):
+            r.append(Image(
+                num=i,
+                src=link['href'],
+                media_type=link['href'][-3:],
+                tag=link  # Use the link tag itself
+            ))
+
         return r
 
     @staticmethod
@@ -140,7 +156,10 @@ class Page:
 
 
 async def _get_image(session: aiohttp.ClientSession, url_root: str, img: Image) -> IndexedEpubImage:
-    async with session.get(f"{url_root}/{img.src}") as r:
+    # Get the image URL from either src (for img tags) or href (for a tags)
+    img_url = img.tag.get('src') or img.tag.get('href')
+    
+    async with session.get(f"{url_root}/{img_url}") as r:
         media_type = img.media_type
         content = await r.content.read()
         hasher = blake2b()
@@ -150,7 +169,7 @@ async def _get_image(session: aiohttp.ClientSession, url_root: str, img: Image) 
         return IndexedEpubImage(
             img.num,
             img_hash,
-            img.tag['src'],
+            img_url,  # Use the original URL as old_name
             new_name,
             EpubImage(
                 uid=f"i{img_hash}",
@@ -178,9 +197,16 @@ async def build_intro(session: aiohttp.ClientSession, url_root: str, intro: Intr
     return Page(0, intro_chapter, images)
 
 def replace_img_name(content: BeautifulSoup, image: IndexedEpubImage) -> BeautifulSoup:
-    to_change = (x for x in content.find_all("img") if x["src"] == image.old_name)
-    for item in to_change:
+    # Handle img tags
+    to_change_imgs = (x for x in content.find_all("img") if x["src"] == image.old_name)
+    for item in to_change_imgs:
         item["src"] = image.new_name
+    
+    # Handle linked images
+    to_change_links = (x for x in content.find_all("a") if x.get("href", "") == image.old_name)
+    for item in to_change_links:
+        item["href"] = image.new_name
+    
     return content
 
 async def build_update(session: aiohttp.ClientSession, chapter: Chapters, data: Update, intro: Intro) -> Page:

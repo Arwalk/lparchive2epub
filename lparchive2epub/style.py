@@ -718,4 +718,10 @@ tt, pre, .mono {
 /*  .color */
 /*    color: $green */
 /* */
+.linked-fullsize-image {
+    max-width: 100%;
+    height: auto;
+    display: block;
+    margin: 1em 0;
+}
 """
