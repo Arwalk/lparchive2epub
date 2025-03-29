@@ -65,9 +65,19 @@ class Update:
     images: List[Image]
 
 
+LP_SPECIFIC_NAMES = {
+    "Dwarf-Fortress-Boatmurdered": ["Introduction"],
+}
+
 class Extractor:
 
-    knownUpdateNames = ["Introduction", "Update"]
+    @staticmethod
+    def get_known_update_names(url: str) -> List[str]:
+        knownUpdateNames = ["Update"]
+        extension = next((x for x in LP_SPECIFIC_NAMES.keys() if x in url), None)
+        if extension:
+            knownUpdateNames.extend(LP_SPECIFIC_NAMES[extension])
+        return knownUpdateNames
 
     @staticmethod
     def intro(url: str, p: BeautifulSoup) -> Intro:
@@ -91,7 +101,8 @@ class Extractor:
         content = p.find("div", id="content")
 
         chapters = content.find_all("a")
-        chapters = (x for x in chapters if any(a in x.get("href", None) for a in Extractor.knownUpdateNames))
+        known_update_names = Extractor.get_known_update_names(root_url)
+        chapters = (x for x in chapters if any(a in x.get("href", None) for a in known_update_names))
 
         def build_chapter(chap: Tuple[int, BeautifulSoup]) -> Chapters:
             i, c = chap
