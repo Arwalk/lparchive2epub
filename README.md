@@ -31,6 +31,12 @@ python >= 3.12
 
 `pip install lparchive2epub`
 
+To have it installed in its own separate environment, you can use https://github.com/pypa/pipx
+
+`pipx install lparchive2epub`
+
+A standalone executable is available for releases on windows. See the releases page.
+
 ## Known limitations
 
 - ~~Similar images present in multiple pages in the let's play are duplicated, bloating the file. Though recurring images are usually smileys, so not too big.~~ Now handled!
