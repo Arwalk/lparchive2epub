@@ -67,6 +67,8 @@ class Update:
 
 class Extractor:
 
+    knownUpdateNames = ["Introduction", "Update"]
+
     @staticmethod
     def intro(url: str, p: BeautifulSoup) -> Intro:
         title = p.title.text
@@ -89,13 +91,12 @@ class Extractor:
         content = p.find("div", id="content")
 
         chapters = content.find_all("a")
-        chapters = (x for x in chapters if "Update" in x.get("href", None))
+        chapters = (x for x in chapters if any(a in x.get("href", None) for a in Extractor.knownUpdateNames))
 
         def build_chapter(chap: Tuple[int, BeautifulSoup]) -> Chapters:
             i, c = chap
             original_href = c.get("href", None)
-            if original_href.startswith("Update"):
-                original_href = f"{root_url}/{original_href}"
+            original_href = f"{root_url}/{original_href}"
             if original_href.endswith("/"):
                 original_href = original_href[:-1]
             return Chapters(
