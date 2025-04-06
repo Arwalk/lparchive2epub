@@ -22,8 +22,7 @@ async def do_single(arguments, url, pbar, failed):
     for i in range(5):
         try:
             await lparchive2epub("https://lparchive.org/" + url,
-                                 f"{arguments.output[0]}{os.path.sep}{url.replace('/', '')}.epub",
-                                 with_pbar=False)
+                                 f"{arguments.output[0]}{os.path.sep}{url.replace('/', '')}.epub")
         except (aiohttp.client_exceptions.ServerDisconnectedError, TimeoutError, RuntimeError) as disconnected:
             exc = disconnected
             await asyncio.sleep(5)

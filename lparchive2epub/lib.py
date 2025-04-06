@@ -170,7 +170,6 @@ class Page:
 async def _get_image(session: aiohttp.ClientSession, url_root: str, img: Image) -> IndexedEpubImage:
     # Get the image URL from either src (for img tags) or href (for a tags)
     img_url = img.tag.get('src') or img.tag.get('href')
-    
     async with session.get(f"{url_root}/{img_url}") as r:
         media_type = img.media_type
         content = await r.content.read()
@@ -268,14 +267,13 @@ class DummyUpdater:
     #todo: everything
 
 
-async def lparchive2epub(url: str, file: str, root_session: [aiohttp.ClientSession | None] = None,
-                         with_pbar: bool = True):
+async def lparchive2epub(url: str, file: str, root_session: aiohttp.ClientSession | None = None, writer=tqdm.write):
     if url.endswith("/"):
         url = url[:-1]
     if root_session is None:
         root_session = aiohttp.ClientSession()
     async with root_session as session:
-        await do(url, file, session, with_pbar)
+        await do(url, file, session, writer)
 
 
 tags_to_clean = [
@@ -297,22 +295,20 @@ def get_cleaned_html(page: str) -> BeautifulSoup:
     return BeautifulSoup(str(xml_version), "html.parser")
 
 
-async def do(url: str, file: str, session: aiohttp.ClientSession, with_pbar: bool):
+async def do(url: str, file: str, session: aiohttp.ClientSession, writer):
+    writer(f"extracting lp from {url}")
+    writer("getting landing page")
     page = await session.get(url)
+
     landing = get_cleaned_html(await page.text())
 
     book = epub.EpubBook()
     intro = Extractor.intro(url, landing)
 
-    book.add_author(intro.author)
-    book.set_title(intro.title)
-    book.set_language(intro.language)
-    book.add_metadata("DC", "source", url)
-    book.set_identifier(f"lparchive2epub-{hash(intro.title)}-{hash(intro.author)}-{hash(url)}")
-
     toc = []
     spine = ["nav"]
 
+    writer("building intro")
     epub_intro = await build_intro(session, url, intro)
 
     known_images = {
@@ -326,18 +322,20 @@ async def do(url: str, file: str, session: aiohttp.ClientSession, with_pbar: boo
 
     tasks = []
 
+    writer("building chapters / updates")
     for chapter in intro.chapters:
         task = asyncio.ensure_future(build_single_page(session, intro, chapter))
         tasks.append(task)
 
-    gatherer = tqdm.gather if with_pbar else asyncio.gather
-
-    pages = await gatherer(*tasks)
+    pages = await tqdm.gather(*tasks, desc="Gathering and building pages")
     pages = sorted(pages)
 
-    for p in pages:
+    tasks = []
+
+    for p in tqdm(pages, desc="Adding pages to book"):
         add_page(known_images, book, toc, spine, p)
 
+    writer("preparing book structure")
     book.toc = toc
 
     book.add_item(epub.EpubNcx())
@@ -347,6 +345,14 @@ async def do(url: str, file: str, session: aiohttp.ClientSession, with_pbar: boo
 
     book.add_item(get_style_item())
 
+    book.add_author(intro.author)
+    book.set_title(intro.title)
+    book.set_language(intro.language)
+    book.add_metadata("DC", "source", url)
+    book.set_identifier(f"lparchive2epub-{hash(intro.title)}-{hash(intro.author)}-{hash(url)}")
+
+
+    writer("Writing book file")
     epub.write_epub(file, book)
 
 # todo: check for links like in headshoots
