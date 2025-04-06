@@ -317,7 +317,7 @@ async def do(url: str, file: str, session: aiohttp.ClientSession, writer):
 
     add_page(known_images, book, toc, spine, epub_intro)
 
-    # pages takes a vastly inequal times to get, so it's faster to imap_unordered and do a simple bisect.insort
+    # pages takes a vastly inequal times to get, so it's faster to gather and sort
     # gotta go fast, but also keep the page order.
 
     tasks = []
