@@ -354,6 +354,3 @@ async def do(url: str, file: str, session: aiohttp.ClientSession, writer):
 
     writer("Writing book file")
     epub.write_epub(file, book)
-
-# todo: check for links like in headshoots
-# todo: deduplicate images when possible.
