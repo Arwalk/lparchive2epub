@@ -79,6 +79,25 @@ FIND_ANCHOR_LINKS = re.compile(r"(#)[^/.]+$")
 class Extractor:
 
     @staticmethod
+    def fix_links(content, chapters, current_chapter):
+        all_links = [x for x in content.find_all("a") if x.get("href", None)]
+        for link in all_links:
+            link["href"] = link["href"].replace("../", "")
+
+        if current_chapter:
+            for link_to_asset in (x for x in all_links if FIND_FILES.search(x.get("href"))):
+                link_to_asset["href"] = current_chapter.original_href + link_to_asset["href"]
+
+        for c in chapters:
+            links = content.find_all("a", href=re.compile(c.original_href_slug))
+            to_update = (x for x in links if not FIND_FILES.search(x.get("href")))
+            for link_to_update in to_update:
+                link_to_update["href"] = link_to_update["href"].replace(c.original_href_slug, c.new_href + "/")
+            asset_links = (x for x in links if FIND_FILES.search(x.get("href")))
+            for link_to_asset in asset_links:
+                link_to_asset["href"] = link_to_asset["href"].replace(c.original_href_slug, c.original_href + "/")
+
+    @staticmethod
     def get_known_update_names(url: str) -> List[str]:
         knownUpdateNames = ["Update"]
         extension = next((x for x in LP_SPECIFIC_NAMES.keys() if x in url), None)
@@ -93,14 +112,7 @@ class Extractor:
         language = "en"
         content = p.find("div", id="content")
         chapters = Extractor.all_chapters(url, p)
-        for c in chapters:
-            links = content.find_all("a", href=re.compile(c.original_href_slug))
-            to_update = (x for x in links if not FIND_FILES.search(x.get("href")))
-            for link_to_update in to_update:
-                link_to_update["href"] = link_to_update["href"].replace(c.original_href_slug, c.new_href + "/")
-            asset_links = (x for x in links if FIND_FILES.search(x.get("href")))
-            for link_to_asset in asset_links:
-                link_to_asset["href"] = link_to_asset["href"].replace(c.original_href_slug, c.original_href + "/")
+        Extractor.fix_links(content, chapters, None)
 
         images = Extractor.all_images(content)
 
@@ -173,9 +185,10 @@ class Extractor:
         return r
 
     @staticmethod
-    def get_update(prefix: str, p: BeautifulSoup) -> Update:
+    def get_update(chapters: List[Chapters], p: BeautifulSoup, chapter: Chapters) -> Update:
         content = p.find("div", id="content")
         images = Extractor.all_images(content)
+        Extractor.fix_links(content, chapters, chapter)
         return Update(content=content, images=images)
 
 
@@ -276,10 +289,10 @@ def add_page(known_images: dict, book: EpubBook, toc: List, spine: List, page: P
     spine.append(page.chapter)
 
 
-async def build_single_page(session: aiohttp.ClientSession, intro: Intro, chapter: Chapters) -> Page:
+async def build_single_page(session: aiohttp.ClientSession, intro: Intro, chapter: Chapters, all_chapters: List[Chapters]) -> Page:
     chapter_page = await session.get(chapter.original_href)
     chapter_bs = get_cleaned_html(await chapter_page.text())
-    update = Extractor.get_update(str(chapter.num), chapter_bs)
+    update = Extractor.get_update(all_chapters, chapter_bs, chapter)
     return await build_update(session, chapter, update, intro)
 
 
@@ -348,7 +361,7 @@ async def do(url: str, file: str, session: aiohttp.ClientSession, writer):
 
     writer("building chapters / updates")
     for chapter in intro.chapters:
-        task = asyncio.ensure_future(build_single_page(session, intro, chapter))
+        task = asyncio.ensure_future(build_single_page(session, intro, chapter, intro.chapters))
         tasks.append(task)
 
     pages = await tqdm.gather(*tasks, desc="Gathering and building pages")
