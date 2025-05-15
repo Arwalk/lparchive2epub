@@ -23,7 +23,6 @@ html, body, div, span, applet, object, iframe, h1, h2, h3, h4, h5, h6, p, blockq
 
 /* optimal sizing see http://demosthenes.info/blog/578/Crafting-Optimal-Type-Sizes-For-Web-Pages */
 /* kobo and nook dislike this */
-/* */
 /*html */
 /*  font-size: 62.5% */
 /*body */
@@ -581,23 +580,20 @@ tt, pre, .mono {
 /*  /* Kindle Keyboard w/ KF8 */
 /*  .kk */
 /*    color: $green */
-/* */
+
 /*/* @media (min-width: 768px) and (height: 1024px) and (amzn-kf8) */
 /*@media (min-width: 748px) and (min-height: 1004px) and (amzn-kf8) */
 /*  /* Kindle Paperwhite */
 /*  .kpw */
 /*    color: $green */
-/* */
 /*@media (width: 600px) and (height: 1024px) and (amzn-kf8) */
 /*  /* Kindle Fire */
 /*  .kf */
 /*    color: $green */
-/* */
 /*/* Retina iPad */
 /*@media (-webkit-min-device-pixel-ratio: 1.5), (min-device-pixel-ratio: 1.5) */
 /*  .retina */
 /*    color: $green */
-/* */
 @media amzn-kf8 {
   span.dropcapold {
     font-size: 300%;
@@ -713,11 +709,9 @@ tt, pre, .mono {
 /*@media (monochrome) */
 /*  .monochrome */
 /*    color: $green */
-/* */
 /*@media (color) */
 /*  .color */
 /*    color: $green */
-/* */
 .linked-fullsize-image {
     max-width: 100%;
     height: auto;
