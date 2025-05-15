@@ -68,6 +68,7 @@ class Update:
 
 LP_SPECIFIC_NAMES = {
     "Dwarf-Fortress-Boatmurdered": ["Introduction"],
+    "Arcanum": ["Intro", "Epilogue"],
 }
 
 FIND_EXT = re.compile(r"([#.])[^/.]+$")
