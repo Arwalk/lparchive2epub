@@ -70,6 +70,7 @@ class Update:
 LP_SPECIFIC_NAMES = {
     "Dwarf-Fortress-Boatmurdered": ["Introduction"],
     "Arcanum": ["Intro", "Epilogue"],
+    "Martian-Dreams": ["Cast"]
 }
 
 FIND_FILES = re.compile(r"([.])[^/.]+$")
