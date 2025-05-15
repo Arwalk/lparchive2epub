@@ -19,6 +19,7 @@ class Chapters:
     original_href: str
     txt: BeautifulSoup
     new_href: str
+    original_href_slug: str
 
     def __hash__(self):
         return hash((self.original_href, str(self.txt.text)))
@@ -71,7 +72,8 @@ LP_SPECIFIC_NAMES = {
     "Arcanum": ["Intro", "Epilogue"],
 }
 
-FIND_EXT = re.compile(r"([#.])[^/.]+$")
+FIND_FILES = re.compile(r"([.])[^/.]+$")
+FIND_ANCHOR_LINKS = re.compile(r"(#)[^/.]+$")
 
 
 class Extractor:
@@ -92,8 +94,13 @@ class Extractor:
         content = p.find("div", id="content")
         chapters = Extractor.all_chapters(url, p)
         for c in chapters:
-            a = content.find("a", string=str(c.txt))
-            a['href'] = c.new_href
+            links = content.find_all("a", href=re.compile(c.original_href_slug))
+            to_update = (x for x in links if not FIND_FILES.search(x.get("href")))
+            for link_to_update in to_update:
+                link_to_update["href"] = link_to_update["href"].replace(c.original_href_slug, c.new_href + "/")
+            asset_links = (x for x in links if FIND_FILES.search(x.get("href")))
+            for link_to_asset in asset_links:
+                link_to_asset["href"] = link_to_asset["href"].replace(c.original_href_slug, c.original_href + "/")
 
         images = Extractor.all_images(content)
 
@@ -108,19 +115,21 @@ class Extractor:
         chapters = content.find_all("a")
         known_update_names = Extractor.get_known_update_names(root_url)
         chapters = (x for x in chapters if any(a in x.get("href", None) for a in known_update_names))
-        chapters = (x for x in chapters if not FIND_EXT.search(x.get("href")))
+        chapters = (x for x in chapters if not FIND_FILES.search(x.get("href")))
+        chapters = (x for x in chapters if not FIND_ANCHOR_LINKS.search(x.get("href")))
 
         def build_chapter(chap: Tuple[int, BeautifulSoup]) -> Chapters:
             i, c = chap
-            original_href = c.get("href", None)
-            original_href = f"{root_url}/{original_href}"
+            original_href_slug = c.get("href", None)
+            original_href = f"{root_url}/{original_href_slug}"
             if original_href.endswith("/"):
                 original_href = original_href[:-1]
             return Chapters(
                 num=i,
                 original_href=original_href,
                 txt=c.text,
-                new_href=f"update_{i}.xhtml"
+                new_href=f"update_{i}.xhtml",
+                original_href_slug=original_href_slug,
             )
 
         chapters = list(map(build_chapter, enumerate(chapters)))
