@@ -136,18 +136,24 @@ class Extractor:
 
         return chapters
 
+
     @staticmethod
     def all_images(content: BeautifulSoup) -> List[Image]:
         # Get direct image tags
         images = content.find_all("img")
         r = []
 
+        def get_media_type(base : str) -> str:
+            if "jpg" in base:
+                base = base.replace("jpg", "jpeg")
+            return base
+
         # Add direct images
         for i, x in enumerate(images):
             r.append(Image(
                 num=i,
                 src=x['src'],
-                media_type=x["src"][-3:],
+                media_type=get_media_type(x["src"][-3:]),
                 tag=x
             ))
 
@@ -160,7 +166,7 @@ class Extractor:
             r.append(Image(
                 num=i,
                 src=link['href'],
-                media_type=link['href'][-3:],
+                media_type=get_media_type(link['href'][-3:]),
                 tag=link  # Use the link tag itself
             ))
 
