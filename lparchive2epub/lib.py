@@ -3,7 +3,7 @@ import functools
 from dataclasses import dataclass
 from hashlib import blake2b
 from typing import List, Tuple
-
+import re
 import aiohttp
 from bs4 import BeautifulSoup
 from ebooklib import epub
@@ -11,6 +11,7 @@ from ebooklib.epub import EpubHtml, EpubImage, EpubBook
 from tqdm.asyncio import tqdm
 
 from lparchive2epub.style import get_style_item
+
 
 @dataclass(order=True)
 class Chapters:
@@ -69,6 +70,9 @@ LP_SPECIFIC_NAMES = {
     "Dwarf-Fortress-Boatmurdered": ["Introduction"],
 }
 
+FIND_EXT = re.compile(r"([#.])[^/.]+$")
+
+
 class Extractor:
 
     @staticmethod
@@ -103,6 +107,7 @@ class Extractor:
         chapters = content.find_all("a")
         known_update_names = Extractor.get_known_update_names(root_url)
         chapters = (x for x in chapters if any(a in x.get("href", None) for a in known_update_names))
+        chapters = (x for x in chapters if not FIND_EXT.search(x.get("href")))
 
         def build_chapter(chap: Tuple[int, BeautifulSoup]) -> Chapters:
             i, c = chap
@@ -126,7 +131,7 @@ class Extractor:
         # Get direct image tags
         images = content.find_all("img")
         r = []
-        
+
         # Add direct images
         for i, x in enumerate(images):
             r.append(Image(
@@ -135,10 +140,11 @@ class Extractor:
                 media_type=x["src"][-3:],
                 tag=x
             ))
-        
+
         # Find image links - typically "Click here for full image" links
-        image_links = content.find_all("a", href=lambda x: x and (x.endswith('.jpg') or x.endswith('.png') or x.endswith('.gif')))
-        
+        image_links = content.find_all("a", href=lambda x: x and (
+                    x.endswith('.jpg') or x.endswith('.png') or x.endswith('.gif')))
+
         # Add linked images to be saved, but don't modify the HTML structure
         for i, link in enumerate(image_links, start=len(r)):
             r.append(Image(
@@ -207,18 +213,20 @@ async def build_intro(session: aiohttp.ClientSession, url_root: str, intro: Intr
 
     return Page(0, intro_chapter, images)
 
+
 def replace_img_name(content: BeautifulSoup, image: IndexedEpubImage) -> BeautifulSoup:
     # Handle img tags
     to_change_imgs = (x for x in content.find_all("img") if x["src"] == image.old_name)
     for item in to_change_imgs:
         item["src"] = image.new_name
-    
+
     # Handle linked images
     to_change_links = (x for x in content.find_all("a") if x.get("href", "") == image.old_name)
     for item in to_change_links:
         item["href"] = image.new_name
-    
+
     return content
+
 
 async def build_update(session: aiohttp.ClientSession, chapter: Chapters, data: Update, intro: Intro) -> Page:
     update_chapter = epub.EpubHtml(title=str(chapter.txt), file_name=chapter.new_href,
@@ -350,7 +358,6 @@ async def do(url: str, file: str, session: aiohttp.ClientSession, writer):
     book.set_language(intro.language)
     book.add_metadata("DC", "source", url)
     book.set_identifier(f"lparchive2epub-{hash(intro.title)}-{hash(intro.author)}-{hash(url)}")
-
 
     writer("Writing book file")
     epub.write_epub(file, book)
