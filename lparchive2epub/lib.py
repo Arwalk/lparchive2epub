@@ -80,14 +80,18 @@ FIND_ANCHOR_LINKS = re.compile(r"(#)[^/.]+$")
 class Extractor:
 
     @staticmethod
-    def fix_links(content, chapters, current_chapter):
+    def fix_links(content, chapters, current_url: str):
+        if not current_url.endswith("/"):
+            current_url += "/"
+
         all_links = [x for x in content.find_all("a") if x.get("href", None)]
         for link in all_links:
             link["href"] = link["href"].replace("../", "")
 
-        if current_chapter:
-            for link_to_asset in (x for x in all_links if FIND_FILES.search(x.get("href"))):
-                link_to_asset["href"] = current_chapter.original_href + link_to_asset["href"]
+        local_assets = (x for x in all_links if FIND_FILES.search(x.get("href")) and "/" not in x.get("href"))
+
+        for link_to_asset in local_assets:
+            link_to_asset["href"] = current_url + link_to_asset["href"]
 
         for c in chapters:
             links = content.find_all("a", href=re.compile(c.original_href_slug))
@@ -113,7 +117,7 @@ class Extractor:
         language = "en"
         content = p.find("div", id="content")
         chapters = Extractor.all_chapters(url, p)
-        Extractor.fix_links(content, chapters, None)
+        Extractor.fix_links(content, chapters, url)
 
         images = Extractor.all_images(content)
 
@@ -126,10 +130,16 @@ class Extractor:
         content = p.find("div", id="content")
 
         chapters = content.find_all("a")
+
         known_update_names = Extractor.get_known_update_names(root_url)
-        chapters = (x for x in chapters if any(a in x.get("href", None) for a in known_update_names))
-        chapters = (x for x in chapters if not FIND_FILES.search(x.get("href")))
-        chapters = (x for x in chapters if not FIND_ANCHOR_LINKS.search(x.get("href")))
+        chapters = (x for x in chapters if any(a in x.get("href", "") for a in known_update_names))
+        chapters = (x for x in chapters if not FIND_FILES.search(x.get("href", "")))
+        chapters = (x for x in chapters if not FIND_ANCHOR_LINKS.search(x.get("href", "")))
+
+        chapters = list(chapters)
+
+        if not chapters:
+            return []
 
         def build_chapter(chap: Tuple[int, BeautifulSoup]) -> Chapters:
             i, c = chap
@@ -189,7 +199,7 @@ class Extractor:
     def get_update(chapters: List[Chapters], p: BeautifulSoup, chapter: Chapters) -> Update:
         content = p.find("div", id="content")
         images = Extractor.all_images(content)
-        Extractor.fix_links(content, chapters, chapter)
+        Extractor.fix_links(content, chapters, chapter.original_href)
         return Update(content=content, images=images)
 
 
