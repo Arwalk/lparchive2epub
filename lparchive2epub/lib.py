@@ -146,8 +146,8 @@ class Extractor:
             i, c = chap
             original_href_slug = c.get("href", None)
             original_href = f"{root_url}/{original_href_slug}"
-            if original_href.endswith("/"):
-                original_href = original_href[:-1]
+            if not original_href.endswith("/"):
+                original_href += "/"
             return Chapters(
                 num=i,
                 original_href=original_href,
