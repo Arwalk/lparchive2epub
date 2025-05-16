@@ -164,6 +164,7 @@ class Extractor:
     def all_images(content: BeautifulSoup) -> List[Image]:
         # Get direct image tags
         images = content.find_all("img")
+        images = (x for x in images if x.get("src", None) is not None)
         r = []
 
         def get_media_type(base : str) -> str:
