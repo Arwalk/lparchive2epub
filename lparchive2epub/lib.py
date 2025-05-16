@@ -133,6 +133,7 @@ class Extractor:
 
         known_update_names = Extractor.get_known_update_names(root_url)
         chapters = (x for x in chapters if any(a in x.get("href", "") for a in known_update_names))
+        chapters = (x for x in chapters if "lparchive.org" not in x.get("href", ""))
         chapters = (x for x in chapters if not FIND_FILES.search(x.get("href", "")))
         chapters = (x for x in chapters if not FIND_ANCHOR_LINKS.search(x.get("href", "")))
 
