@@ -9,9 +9,15 @@ from bs4 import BeautifulSoup
 from ebooklib import epub
 from ebooklib.epub import EpubHtml, EpubImage, EpubBook
 from tqdm.asyncio import tqdm
+import datetime
+
 
 from lparchive2epub.style import get_style_item
 
+def get_blake2b_hash(content: bytes) -> str:
+    hasher = blake2b()
+    hasher.update(content)
+    return hasher.hexdigest()
 
 @dataclass(order=True)
 class Chapters:
@@ -34,6 +40,7 @@ class Image:
     src: str
     media_type: str
     tag: BeautifulSoup
+    url: str
 
     def __post_init__(self):
         self.sort_index = self.num
@@ -59,6 +66,7 @@ class Intro:
     intro: BeautifulSoup
     images: List[Image]
     chapters: List[Chapters]
+    published_on: str
 
 
 @dataclass
@@ -119,10 +127,13 @@ class Extractor:
         chapters = Extractor.all_chapters(url, p)
         Extractor.fix_links(content, chapters, url)
 
-        images = Extractor.all_images(content)
+        images = Extractor.all_images(content, url)
+
+        archival = p.find("li", id="archival")
+        published_on = archival.find("strong").text
 
         return Intro(
-            title=title, language=language, author=author, intro=content, images=images, chapters=chapters
+            title=title, language=language, author=author, intro=content, images=images, chapters=chapters, published_on=published_on
         )
 
     @staticmethod
@@ -162,16 +173,27 @@ class Extractor:
 
 
     @staticmethod
-    def all_images(content: BeautifulSoup) -> List[Image]:
+    def all_images(content: BeautifulSoup, root_url: str) -> List[Image]:
         # Get direct image tags
         images = content.find_all("img")
         images = (x for x in images if x.get("src", None) is not None)
         r = []
 
+        root = str(root_url)
+        if root.endswith("/"):
+            root = root[:-1]
+
         def get_media_type(base : str) -> str:
             if "jpg" in base:
                 base = base.replace("jpg", "jpeg")
             return base
+        
+        def get_full_url(src: str) -> str:
+            if root_url in src:
+                return src
+            if "http://" in src or "https://" in src:
+                return src
+            return f"{root}/{src}"
 
         # Add direct images
         for i, x in enumerate(images):
@@ -179,7 +201,8 @@ class Extractor:
                 num=i,
                 src=x['src'],
                 media_type=get_media_type(x["src"][-3:]),
-                tag=x
+                tag=x,
+                url=get_full_url(x["src"])
             ))
 
         # Find image links - typically "Click here for full image" links
@@ -192,7 +215,8 @@ class Extractor:
                 num=i,
                 src=link['href'],
                 media_type=get_media_type(link['href'][-3:]),
-                tag=link  # Use the link tag itself
+                tag=link,  # Use the link tag itself
+                url=get_full_url(link['href'])
             ))
 
         return r
@@ -200,7 +224,7 @@ class Extractor:
     @staticmethod
     def get_update(chapters: List[Chapters], p: BeautifulSoup, chapter: Chapters) -> Update:
         content = p.find("div", id="content")
-        images = Extractor.all_images(content)
+        images = Extractor.all_images(content, chapter.original_href)
         Extractor.fix_links(content, chapters, chapter.original_href)
         return Update(content=content, images=images)
 
@@ -215,15 +239,15 @@ class Page:
         self.sort_index = self.num
 
 
-async def _get_image(session: aiohttp.ClientSession, url_root: str, img: Image) -> IndexedEpubImage:
+async def _get_image(session: aiohttp.ClientSession, img: Image) -> IndexedEpubImage:
     # Get the image URL from either src (for img tags) or href (for a tags)
-    img_url = img.tag.get('src') or img.tag.get('href')
-    async with session.get(f"{url_root}/{img_url}") as r:
+    img_url = img.url
+    async with session.get(img_url) as r:
+        if r.status != 200:
+            raise RuntimeError(f"Failed to get image {img_url}, img_url: {img_url}, status code: {r.status}")
         media_type = img.media_type
         content = await r.content.read()
-        hasher = blake2b()
-        hasher.update(content)
-        img_hash = hasher.hexdigest()
+        img_hash = get_blake2b_hash(content)
         new_name = f"images/{img_hash}.{media_type}"
         return IndexedEpubImage(
             img.num,
@@ -243,7 +267,7 @@ async def build_intro(session: aiohttp.ClientSession, url_root: str, intro: Intr
     intro_chapter.add_item(get_style_item())
     tasks = []
     for image in intro.images:
-        task = asyncio.ensure_future(_get_image(session, url_root, image))
+        task = asyncio.ensure_future(_get_image(session, image))
         tasks.append(task)
 
     images = await asyncio.gather(*tasks)
@@ -275,7 +299,7 @@ async def build_update(session: aiohttp.ClientSession, chapter: Chapters, data: 
                                    lang=intro.language)  # TODO: fix language
     update_chapter.add_item(get_style_item())
 
-    img_builder = functools.partial(_get_image, session, chapter.original_href)
+    img_builder = functools.partial(_get_image, session)
 
     tasks = []
     for image in data.images:
@@ -399,7 +423,11 @@ async def do(url: str, file: str, session: aiohttp.ClientSession, writer):
     book.set_title(intro.title)
     book.set_language(intro.language)
     book.add_metadata("DC", "source", url)
-    book.set_identifier(f"lparchive2epub-{hash(intro.title)}-{hash(intro.author)}-{hash(url)}")
+    book.add_metadata("DC", "identifier", f"lparchive2epub-{hash(intro.title)}-{hash(intro.author)}-{hash(url)}")
+
+    book.set_identifier(f"lparchive2epub-{get_blake2b_hash(intro.title.encode("utf-8"))}-{get_blake2b_hash(intro.author.encode("utf-8"))}-{get_blake2b_hash(url.encode("utf-8"))}")
+
+    mtime = datetime.datetime.strptime(intro.published_on, "%b %d, %Y")
 
     writer("Writing book file")
-    epub.write_epub(file, book)
+    epub.write_epub(file, book, options = {"mtime": mtime})

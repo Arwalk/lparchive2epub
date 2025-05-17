@@ -1,7 +1,10 @@
-from lparchive2epub.lib import Extractor, Chapters
+from lparchive2epub.lib import Extractor, Chapters, lparchive2epub, BeautifulSoup
 from importlib.resources import files
 import tests.resources as resources
-from lparchive2epub.lib import BeautifulSoup
+import pytest
+import tempfile
+from blake3 import blake3
+from aiohttp_client_cache import CachedSession, SQLiteBackend
 
 
 def load_html(path: str):
@@ -355,3 +358,15 @@ def test_all_images():
     content = b.find("div", id="content")
     images = Extractor.all_images(content)
     assert len(images) == 1
+
+@pytest.mark.asyncio
+async def test_lparchive2epub(lp, b3sum):
+    if not lp or not b3sum:
+        pytest.skip("no tests were collected")
+    url = f"https://lparchive.org/{lp}"
+    with tempfile.NamedTemporaryFile() as temp_file:
+        await lparchive2epub(url, temp_file.name, CachedSession(cache=SQLiteBackend('test_cache')))
+        file_hasher = blake3(max_threads=blake3.AUTO)
+        file_hasher.update_mmap(temp_file.name)
+        file_hash = file_hasher.hexdigest()
+        assert file_hash == b3sum

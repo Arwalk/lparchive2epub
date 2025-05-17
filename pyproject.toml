@@ -9,10 +9,10 @@ repository = "https://github.com/Arwalk/lparchive2epub"
 
 [tool.poetry.dependencies]
 python = "^3.12"
-ebooklib = "^0.18"
 beautifulsoup4 = "^4.12.2"
 tqdm = "^4.66.4"
 aiohttp = "^3.9.5"
+ebooklib = {git = "https://github.com/Arwalk/ebooklib.git"}
 
 [tool.poetry.scripts]
 lparchive2epub = 'lparchive2epub.main:main'
@@ -22,8 +22,11 @@ requires = ["poetry-core"]
 build-backend = "poetry.core.masonry.api"
 
 [tool.poetry.group.dev.dependencies]
-pytest = "^7.4.4"
+pytest = "^8.2"
 coverage = "^7.4.0"
+pytest-asyncio = "^0.26.0"
+blake3 = "^1.0.4"
+aiohttp-client-cache = {extras = ["all"], version = "^0.13.0"}
 
 [tool.poetry-pyinstaller-plugin.scripts]
 lparchive2epub = { source = "lparchive2epub/main.py", type = "onefile", bundle = true, console = true }
