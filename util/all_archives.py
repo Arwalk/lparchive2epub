@@ -12,25 +12,32 @@ from bs4 import BeautifulSoup
 from lparchive2epub.lib import lparchive2epub
 from aiohttp import ClientSession
 from tqdm.asyncio import tqdm
+from aiohttp_client_cache import CachedSession, SQLiteBackend, FileBackend
 
 processes = multiprocessing.cpu_count()
 
 
-async def do_single(arguments, url, pbar, failed):
+async def do_single(arguments, url, pbar, failed, cache_path):
     logger = logging.getLogger("all_lp_archive_to_epub")
     exc = None
-    for i in range(5):
-        try:
-            await lparchive2epub("https://lparchive.org/" + url,
-                                 f"{arguments.output[0]}{os.path.sep}{url.replace('/', '')}.epub")
-        except (aiohttp.client_exceptions.ServerDisconnectedError, TimeoutError, RuntimeError) as disconnected:
-            exc = disconnected
-            await asyncio.sleep(5)
-        except Exception as e:
-            exc = e
-        else:
-            pbar.update(1)
-            return None
+    cache = SQLiteBackend(f"{cache_path}{os.path.sep}{url.replace('/', '')}", expire_after=-1, autoclose=False)
+    conn = aiohttp.TCPConnector(force_close=True)
+    connection = CachedSession(cache=cache, connector=conn)
+    try:
+        await lparchive2epub("https://lparchive.org" + url,
+                                f"{arguments.output[0]}{os.path.sep}{url.replace('/', '')}.epub",
+                                connection)
+    except (aiohttp.client_exceptions.ServerDisconnectedError, TimeoutError, RuntimeError) as disconnected:
+        exc = disconnected
+        await asyncio.sleep(5)
+    except Exception as e:
+        exc = e
+    else:
+        pbar.update(1)
+        return None
+    finally:
+        await connection.close()
+        await cache.close()
 
     pbar.write(f"failed to download {url} : {str(exc)}")
     logger.error("error:", exc_info=exc)
@@ -62,14 +69,19 @@ async def do(arguments):
     urls = [x['u'] for x in as_json]
     # It's ugly, but it works. And I couldn't find a decent api to ask politely for this data somewhere else.
 
-    logging.basicConfig(filename=f"{arguments.output[0]}{os.path.sep}/errors.log", level=logging.DEBUG,
+    logging.basicConfig(filename=f"{arguments.output[0]}{os.path.sep}/errors.log", level=logging.WARN,
                         format='%(asctime)s %(levelname)s %(name)s %(message)s')
 
     failed = []
 
+    cache_path = arguments.cache_path
+    if not cache_path:
+        cache_path = f"{arguments.output[0]}{os.path.sep}/cache"
+
+
     with tqdm(total=len(urls)) as pbar:
         for url in urls:
-            await do_single(arguments, url, pbar, failed)
+           r =  await do_single(arguments, url, pbar, failed, cache_path)
 
     for url in failed:
         print(json.dumps(url))
@@ -83,6 +95,8 @@ if __name__ == '__main__':
     )
 
     arg_parser.add_argument("output", metavar="OUTPUT_FILE", nargs=1, type=str)
+    arg_parser.add_argument("--cache_path", metavar="CACHE_PATH", type=str, help="Path to SQLite cache file")
+
 
     args = arg_parser.parse_args()
     asyncio.run(do(args))

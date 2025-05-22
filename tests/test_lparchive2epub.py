@@ -346,27 +346,29 @@ def test_extractor_chapters():
 def test_all_images():
     b = BeautifulSoup(re1, "html.parser")
     content = b.find("div", id="content")
-    images = Extractor.all_images(content)
+    images = Extractor.all_images(content, "https://lparchive.org/Resident-Evil-1/")
     assert len(images) == 0
 
     b = BeautifulSoup(headshoots, "html.parser")
     content = b.find("div", id="content")
-    images = Extractor.all_images(content)
+    images = Extractor.all_images(content, "https://lparchive.org/Dwarf-Fortress-Headshoots/")
     assert len(images) == 16
 
     b = BeautifulSoup(xcom, "html.parser")
     content = b.find("div", id="content")
-    images = Extractor.all_images(content)
+    images = Extractor.all_images(content, "https://lparchive.org/X-COM-Terror-from-the-Deep/")
     assert len(images) == 1
 
 @pytest.mark.asyncio
 async def test_lparchive2epub(lp, b3sum):
     if not lp or not b3sum:
         pytest.skip("no tests were collected")
+    cache = SQLiteBackend(f"cache/{lp}", autoclose=False, expire_after=None)
     url = f"https://lparchive.org/{lp}"
     with tempfile.NamedTemporaryFile() as temp_file:
-        await lparchive2epub(url, temp_file.name, CachedSession(cache=SQLiteBackend('test_cache')))
+        await lparchive2epub(url, temp_file.name, CachedSession(cache=cache))
         file_hasher = blake3(max_threads=blake3.AUTO)
         file_hasher.update_mmap(temp_file.name)
         file_hash = file_hasher.hexdigest()
         assert file_hash == b3sum
+    await cache.close()

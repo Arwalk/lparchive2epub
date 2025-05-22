@@ -7,4 +7,6 @@
 dist/*
 build/*
 .DS_Store
-test_cache.sqlite*
+*.sqlite
+cache/*
+cache

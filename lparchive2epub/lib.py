@@ -10,7 +10,7 @@ from ebooklib import epub
 from ebooklib.epub import EpubHtml, EpubImage, EpubBook
 from tqdm.asyncio import tqdm
 import datetime
-
+from urllib.parse import urljoin, urlparse, urlunparse
 
 from lparchive2epub.style import get_style_item
 
@@ -188,12 +188,28 @@ class Extractor:
                 base = base.replace("jpg", "jpeg")
             return base
         
+        def remove_extra_dots(url):
+            parsed = list(urlparse(url))
+            dirs = []
+            for name in parsed[2].split("/"):
+                if name == "..":
+                    if len(dirs) > 1:
+                        dirs.pop()
+                else:
+                    dirs.append(name)
+            parsed[2] = "/".join(dirs)
+            return urlunparse(parsed)
+
         def get_full_url(src: str) -> str:
             if root_url in src:
-                return src
-            if "http://" in src or "https://" in src:
-                return src
-            return f"{root}/{src}"
+                full = src
+            elif "http://" in src or "https://" in src:
+                full = src
+            else:
+                full = f"{root}/{src}"
+            if ".." in full:
+                full = remove_extra_dots(full)
+            return full
 
         # Add direct images
         for i, x in enumerate(images):
@@ -293,6 +309,10 @@ def replace_img_name(content: BeautifulSoup, image: IndexedEpubImage) -> Beautif
 
     return content
 
+def batch(iterable, n=1):
+    l = len(iterable)
+    for ndx in range(0, l, n):
+        yield iterable[ndx:min(ndx + n, l)]
 
 async def build_update(session: aiohttp.ClientSession, chapter: Chapters, data: Update, intro: Intro) -> Page:
     update_chapter = epub.EpubHtml(title=str(chapter.txt), file_name=chapter.new_href,
@@ -301,12 +321,16 @@ async def build_update(session: aiohttp.ClientSession, chapter: Chapters, data: 
 
     img_builder = functools.partial(_get_image, session)
 
-    tasks = []
-    for image in data.images:
-        task = asyncio.ensure_future(img_builder(image))
-        tasks.append(task)
+    images = []
+    
+    for chunk in batch(data.images, 10):
+        tasks = []
+        for image in chunk:
+            task = asyncio.ensure_future(img_builder(image))
+            tasks.append(task)
 
-    images = await asyncio.gather(*tasks)
+        images.extend(await asyncio.gather(*tasks))
+
 
     for image in images:
         data.content = replace_img_name(data.content, image)
@@ -326,11 +350,13 @@ def add_page(known_images: dict, book: EpubBook, toc: List, spine: List, page: P
     spine.append(page.chapter)
 
 
-async def build_single_page(session: aiohttp.ClientSession, intro: Intro, chapter: Chapters, all_chapters: List[Chapters]) -> Page:
+async def build_single_page(session: aiohttp.ClientSession, intro: Intro, chapter: Chapters, all_chapters: List[Chapters], pbar) -> Page:
     chapter_page = await session.get(chapter.original_href)
     chapter_bs = get_cleaned_html(await chapter_page.text())
     update = Extractor.get_update(all_chapters, chapter_bs, chapter)
-    return await build_update(session, chapter, update, intro)
+    r = await build_update(session, chapter, update, intro)
+    pbar.update(1)
+    return r
 
 
 class DummyUpdater:
@@ -397,14 +423,19 @@ async def do(url: str, file: str, session: aiohttp.ClientSession, writer):
     tasks = []
 
     writer("building chapters / updates")
-    for chapter in intro.chapters:
-        task = asyncio.ensure_future(build_single_page(session, intro, chapter, intro.chapters))
-        tasks.append(task)
+    
 
-    pages = await tqdm.gather(*tasks, desc="Gathering and building pages")
+    pages = []
+
+    with tqdm(total=len(intro.chapters), desc="Gathering and building pages") as pbar:
+        for chunk in batch(intro.chapters, 10):
+            for chapter in chunk:
+                task = asyncio.ensure_future(build_single_page(session, intro, chapter, intro.chapters, pbar))
+                tasks.append(task)
+
+        pages.extend(await asyncio.gather(*tasks))
+
     pages = sorted(pages)
-
-    tasks = []
 
     for p in tqdm(pages, desc="Adding pages to book"):
         add_page(known_images, book, toc, spine, p)
