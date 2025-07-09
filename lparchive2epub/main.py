@@ -2,6 +2,8 @@ import asyncio
 from argparse import ArgumentParser, ArgumentTypeError
 from urllib.parse import urlparse
 
+from aiohttp_client_cache import CacheBackend, CachedSession
+
 from lparchive2epub.lib import lparchive2epub
 
 
@@ -21,11 +23,18 @@ arg_parser = ArgumentParser(
 
 arg_parser.add_argument("url", metavar="URL", nargs=1, type=is_lparchive_url)
 arg_parser.add_argument("output", metavar="OUTPUT_FILE", nargs=1, type=str)
+arg_parser.add_argument("--no-cache", action="store_true", help="Don't cache url calls")
 
+async def amain(args):
+    if args.no_cache:
+        cache = None
+    else:
+        cache = CachedSession(cache=CacheBackend())
+    await lparchive2epub(args.url[0], args.output[0], cache)
 
 def main():
     args = arg_parser.parse_args()
-    asyncio.run(lparchive2epub(args.url[0], args.output[0]))
+    asyncio.run(amain(args))
 
 
 if __name__ == '__main__':
