@@ -12,8 +12,8 @@ python = "^3.12"
 beautifulsoup4 = "^4.12.2"
 tqdm = "^4.66.4"
 aiohttp = "^3.9.5"
-ebooklib = {git = "https://github.com/Arwalk/ebooklib.git"}
 aiohttp-client-cache = {extras = ["all"], version = "^0.13.0"}
+ebooklib = "^0.19"
 
 [tool.poetry.scripts]
 lparchive2epub = 'lparchive2epub.main:main'

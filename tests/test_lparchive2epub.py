@@ -361,6 +361,7 @@ def test_all_images():
 
 @pytest.mark.asyncio
 async def test_lparchive2epub(lp, b3sum):
+    pytest.skip("Unable to run until ebooklib update")
     if not lp or not b3sum:
         pytest.skip("no tests were collected")
     cache = SQLiteBackend(f"cache/{lp}", autoclose=False, expire_after=None)
