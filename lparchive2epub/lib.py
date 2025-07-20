@@ -41,6 +41,7 @@ class Image:
     media_type: str
     tag: BeautifulSoup
     url: str
+    root_url: str
 
     def __post_init__(self):
         self.sort_index = self.num
@@ -52,6 +53,7 @@ class IndexedEpubImage:
     hash: str
     old_name: str
     new_name: str
+    root_url: str
     data: EpubImage
 
     def __post_init__(self):
@@ -171,23 +173,8 @@ class Extractor:
 
         return chapters
 
-
     @staticmethod
-    def all_images(content: BeautifulSoup, root_url: str) -> List[Image]:
-        # Get direct image tags
-        images = content.find_all("img")
-        images = (x for x in images if x.get("src", None) is not None)
-        r = []
-
-        root = str(root_url)
-        if root.endswith("/"):
-            root = root[:-1]
-
-        def get_media_type(base : str) -> str:
-            if "jpg" in base:
-                base = base.replace("jpg", "jpeg")
-            return base
-        
+    def get_full_url(root_url: str, src: str) -> str:
         def remove_extra_dots(url):
             parsed = list(urlparse(url))
             dirs = []
@@ -200,16 +187,32 @@ class Extractor:
             parsed[2] = "/".join(dirs)
             return urlunparse(parsed)
 
-        def get_full_url(src: str) -> str:
-            if root_url in src:
-                full = src
-            elif "http://" in src or "https://" in src:
-                full = src
-            else:
-                full = f"{root}/{src}"
-            if ".." in full:
-                full = remove_extra_dots(full)
-            return full
+        root = str(root_url)
+        if root.endswith("/"):
+            root = root[:-1]
+
+        if root_url in src:
+            full = src
+        elif "http://" in src or "https://" in src:
+            full = src
+        else:
+            full = f"{root}/{src}"
+        if ".." in full:
+            full = remove_extra_dots(full)
+        return full
+
+
+    @staticmethod
+    def all_images(content: BeautifulSoup, root_url: str) -> List[Image]:
+        # Get direct image tags
+        images = content.find_all("img")
+        images = (x for x in images if x.get("src", None) is not None)
+        r = []
+
+        def get_media_type(base : str) -> str:
+            if "jpg" in base:
+                base = base.replace("jpg", "jpeg")
+            return base
 
         # Add direct images
         for i, x in enumerate(images):
@@ -218,7 +221,8 @@ class Extractor:
                 src=x['src'],
                 media_type=get_media_type(x["src"][-3:]),
                 tag=x,
-                url=get_full_url(x["src"])
+                url=Extractor.get_full_url(root_url, x["src"]),
+                root_url=root_url
             ))
 
         # Find image links - typically "Click here for full image" links
@@ -232,7 +236,8 @@ class Extractor:
                 src=link['href'],
                 media_type=get_media_type(link['href'][-3:]),
                 tag=link,  # Use the link tag itself
-                url=get_full_url(link['href'])
+                url=Extractor.get_full_url(root_url, link['href']),
+                root_url=root_url
             ))
 
         return r
@@ -270,6 +275,7 @@ async def _get_image(session: aiohttp.ClientSession, img: Image) -> IndexedEpubI
             img_hash,
             img_url,  # Use the original URL as old_name
             new_name,
+            img.root_url,
             EpubImage(
                 uid=f"i{img_hash}",
                 file_name=new_name,
@@ -298,7 +304,7 @@ async def build_intro(session: aiohttp.ClientSession, url_root: str, intro: Intr
 
 def replace_img_name(content: BeautifulSoup, image: IndexedEpubImage) -> BeautifulSoup:
     # Handle img tags
-    to_change_imgs = (x for x in content.find_all("img") if x["src"] == image.old_name)
+    to_change_imgs = (x for x in content.find_all("img") if Extractor.get_full_url(image.root_url, x["src"]) == image.old_name)
     for item in to_change_imgs:
         item["src"] = image.new_name
 
