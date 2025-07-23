@@ -1,18 +1,20 @@
 import asyncio
+import datetime
 import functools
+import re
 from dataclasses import dataclass
 from hashlib import blake2b
 from typing import List, Tuple
-import re
+from urllib.parse import urlparse, urlunparse
+
 import aiohttp
 from bs4 import BeautifulSoup
 from ebooklib import epub
 from ebooklib.epub import EpubHtml, EpubImage, EpubBook
 from tqdm.asyncio import tqdm
-import datetime
-from urllib.parse import urljoin, urlparse, urlunparse
 
 from lparchive2epub.style import get_style_item
+
 
 def get_blake2b_hash(content: bytes) -> str:
     hasher = blake2b()
