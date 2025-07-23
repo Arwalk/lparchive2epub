@@ -5,7 +5,7 @@ import re
 from dataclasses import dataclass
 from hashlib import blake2b
 from typing import List, Tuple
-from urllib.parse import urlparse, urlunparse
+from urllib.parse import urlparse, urlunparse, unquote
 
 import aiohttp
 from bs4 import BeautifulSoup
@@ -163,10 +163,11 @@ class Extractor:
             original_href = f"{root_url}/{original_href_slug}"
             if not original_href.endswith("/"):
                 original_href += "/"
+            txt = c.text if c.text else unquote(original_href_slug[:-1])
             return Chapters(
                 num=i,
                 original_href=original_href,
-                txt=c.text,
+                txt=txt,
                 new_href=f"update_{i}.xhtml",
                 original_href_slug=original_href_slug,
             )
