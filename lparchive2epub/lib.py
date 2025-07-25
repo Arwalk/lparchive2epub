@@ -392,15 +392,6 @@ async def build_single_page(session: aiohttp.ClientSession, intro: Intro, chapte
 
     return await get_resource_with_retries(session, chapter.original_href, get)
 
-
-class DummyUpdater:
-
-    def __init__(self, *args, **kwargs):
-        pass
-
-    #todo: everything
-
-
 async def lparchive2epub(url: str, file: str, root_session: aiohttp.ClientSession | None = None, writer=tqdm.write):
     if url.endswith("/"):
         url = url[:-1]
