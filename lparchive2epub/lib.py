@@ -262,13 +262,35 @@ class Page:
     def __post_init__(self):
         self.sort_index = self.num
 
+async def _default_get(r):
+    return r
+
+async def get_resource_with_retries(session, url, action=_default_get, max_retries=5):
+    retry_count = 0
+    last_exception = None
+
+    while retry_count < max_retries:
+        try:
+            async with session.get(url) as r:
+                if r.status != 200:
+                    raise RuntimeError(f"Failed to get resource {url}, status code: {r.status}")
+                return await action(r)
+        except Exception as e:
+            last_exception = e
+            retry_count += 1
+            if retry_count < max_retries:
+                # Exponential backoff: 2^retry_count * 100ms (0.2s, 0.4s, 0.8s, 1.6s)
+                wait_time = (2 ** retry_count) * 0.1
+                await asyncio.sleep(wait_time)
+    raise RuntimeError(f"Failed to get resource {url} after {max_retries} retries: {last_exception}")
+
+
 
 async def _get_image(session: aiohttp.ClientSession, img: Image) -> IndexedEpubImage:
     # Get the image URL from either src (for img tags) or href (for a tags)
     img_url = img.url
-    async with session.get(img_url) as r:
-        if r.status != 200:
-            raise RuntimeError(f"Failed to get image {img_url}, img_url: {img_url}, status code: {r.status}")
+
+    async def get(r):
         media_type = img.media_type
         content = await r.content.read()
         img_hash = get_blake2b_hash(content)
@@ -286,6 +308,7 @@ async def _get_image(session: aiohttp.ClientSession, img: Image) -> IndexedEpubI
                 content=content)
         )
 
+    return await get_resource_with_retries(session, img_url, get)
 
 async def build_intro(session: aiohttp.ClientSession, url_root: str, intro: Intro) -> Page:
     intro_chapter = epub.EpubHtml(title="Introduction", file_name="introduction.xhtml", lang=intro.language)
@@ -331,7 +354,7 @@ async def build_update(session: aiohttp.ClientSession, chapter: Chapters, data: 
     img_builder = functools.partial(_get_image, session)
 
     images = []
-    
+
     for chunk in batch(data.images, 10):
         tasks = []
         for image in chunk:
@@ -360,12 +383,14 @@ def add_page(known_images: dict, book: EpubBook, toc: List, spine: List, page: P
 
 
 async def build_single_page(session: aiohttp.ClientSession, intro: Intro, chapter: Chapters, all_chapters: List[Chapters], pbar) -> Page:
-    chapter_page = await session.get(chapter.original_href)
-    chapter_bs = get_cleaned_html(await chapter_page.text())
-    update = Extractor.get_update(all_chapters, chapter_bs, chapter)
-    r = await build_update(session, chapter, update, intro)
-    pbar.update(1)
-    return r
+    async def get(r):
+        chapter_bs = get_cleaned_html(await r.text())
+        update = Extractor.get_update(all_chapters, chapter_bs, chapter)
+        u = await build_update(session, chapter, update, intro)
+        pbar.update(1)
+        return u
+
+    return await get_resource_with_retries(session, chapter.original_href, get)
 
 
 class DummyUpdater:
@@ -407,7 +432,7 @@ def get_cleaned_html(page: str) -> BeautifulSoup:
 async def do(url: str, file: str, session: aiohttp.ClientSession, writer):
     writer(f"extracting lp from {url}")
     writer("getting landing page")
-    page = await session.get(url)
+    page = await get_resource_with_retries(session, url)
 
     landing = get_cleaned_html(await page.text())
 
@@ -432,7 +457,7 @@ async def do(url: str, file: str, session: aiohttp.ClientSession, writer):
     tasks = []
 
     writer("building chapters / updates")
-    
+
 
     pages = []
 
