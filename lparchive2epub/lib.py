@@ -265,13 +265,19 @@ class Page:
 async def _default_get(r):
     return r
 
-async def get_resource_with_retries(session, url, action=_default_get, max_retries=5):
+
+CURL_HEADERS = {
+    "user-agent": "curl/8.1.1",
+    "accept": "*/*"
+}
+
+async def get_resource_with_retries(session: aiohttp.ClientSession, url, action=_default_get, max_retries=5):
     retry_count = 0
     last_exception = None
 
     while retry_count < max_retries:
         try:
-            async with session.get(url) as r:
+            async with session.get(url, headers=CURL_HEADERS) as r:
                 if r.status != 200:
                     raise RuntimeError(f"Failed to get resource {url}, status code: {r.status}")
                 return await action(r)
@@ -279,8 +285,8 @@ async def get_resource_with_retries(session, url, action=_default_get, max_retri
             last_exception = e
             retry_count += 1
             if retry_count < max_retries:
-                # Exponential backoff: 2^retry_count * 100ms (0.2s, 0.4s, 0.8s, 1.6s)
-                wait_time = (2 ** retry_count) * 0.1
+                # Exponential backoff: 2^retry_count * 1s (2s, 4s, 8s, 16s)
+                wait_time = (2 ** retry_count) * 1
                 await asyncio.sleep(wait_time)
     raise RuntimeError(f"Failed to get resource {url} after {max_retries} retries: {last_exception}")
 
