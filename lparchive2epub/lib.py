@@ -1,6 +1,7 @@
 import asyncio
 import datetime
 import functools
+import os
 import re
 from dataclasses import dataclass
 from hashlib import blake2b
@@ -14,6 +15,12 @@ from ebooklib.epub import EpubHtml, EpubImage, EpubBook
 from tqdm.asyncio import tqdm
 
 from lparchive2epub.style import get_style_item
+
+# Concurrency limit for worker queues
+try:
+    CONCURRENCY_LIMIT = max(1, int(os.environ.get("LP2E_CONCURRENCY", "10")))
+except Exception:
+    CONCURRENCY_LIMIT = 10
 
 
 def get_blake2b_hash(content: bytes) -> str:
@@ -359,16 +366,34 @@ async def build_update(session: aiohttp.ClientSession, chapter: Chapters, data: 
 
     img_builder = functools.partial(_get_image, session)
 
-    images = []
+    # Queue-based worker pool to cap concurrency
+    q: asyncio.Queue = asyncio.Queue()
+    images: list[IndexedEpubImage] = []
 
-    for chunk in batch(data.images, 10):
-        tasks = []
-        for image in chunk:
-            task = asyncio.ensure_future(img_builder(image))
-            tasks.append(task)
+    async def worker():
+        while True:
+            try:
+                img = await q.get()
+                try:
+                    res = await img_builder(img)
+                    replace_img_name(data.content, res)
+                    images.append(res)
+                finally:
+                    q.task_done()
+            except asyncio.CancelledError:
+                break
 
-        images.extend(await asyncio.gather(*tasks))
+    workers = [asyncio.create_task(worker()) for _ in range(CONCURRENCY_LIMIT)]
 
+    # Enqueue images with their indices
+    for image in data.images:
+        await q.put(image)
+
+    # Wait for completion and shutdown workers
+    await q.join()
+    for w in workers:
+        w.cancel()
+    await asyncio.gather(*workers, return_exceptions=True)
 
     for image in images:
         data.content = replace_img_name(data.content, image)
@@ -451,22 +476,36 @@ async def do(url: str, file: str, session: aiohttp.ClientSession, writer):
     # pages takes a vastly inequal times to get, so it's faster to gather and sort
     # gotta go fast, but also keep the page order.
 
-    tasks = []
-
     writer("building chapters / updates")
 
-
-    pages = []
+    pages_indexed: list[tuple[int, Page]] = []
 
     with tqdm(total=len(intro.chapters), desc="Gathering and building pages") as pbar:
-        for chunk in batch(intro.chapters, 10):
-            for chapter in chunk:
-                task = asyncio.ensure_future(build_single_page(session, intro, chapter, intro.chapters, pbar))
-                tasks.append(task)
+        q: asyncio.Queue = asyncio.Queue()
 
-        pages.extend(await asyncio.gather(*tasks))
+        async def worker():
+            while True:
+                try:
+                    i, chapter = await q.get()
+                    try:
+                        page = await build_single_page(session, intro, chapter, intro.chapters, pbar)
+                        pages_indexed.append((i, page))
+                    finally:
+                        q.task_done()
+                except asyncio.CancelledError:
+                    break
 
-    pages = sorted(pages)
+        workers = [asyncio.create_task(worker()) for _ in range(CONCURRENCY_LIMIT)]
+
+        for i, chapter in enumerate(intro.chapters):
+            await q.put((i, chapter))
+
+        await q.join()
+        for w in workers:
+            w.cancel()
+        await asyncio.gather(*workers, return_exceptions=True)
+
+    pages = [p for _, p in sorted(pages_indexed, key=lambda x: x[0])]
 
     for p in tqdm(pages, desc="Adding pages to book"):
         add_page(known_images, book, toc, spine, p)
