@@ -17,11 +17,8 @@ from tqdm.asyncio import tqdm
 from lparchive2epub.style import get_style_item
 
 # Concurrency limit for worker queues
-try:
-    CONCURRENCY_LIMIT = max(1, int(os.environ.get("LP2E_CONCURRENCY", "10")))
-except Exception:
-    CONCURRENCY_LIMIT = 10
-
+CONCURRENCY_LIMIT_PAGES = 25
+CONCURRENCY_LIMIT_IMAGES = 10
 
 def get_blake2b_hash(content: bytes) -> str:
     hasher = blake2b()
@@ -383,7 +380,7 @@ async def build_update(session: aiohttp.ClientSession, chapter: Chapters, data: 
             except asyncio.CancelledError:
                 break
 
-    workers = [asyncio.create_task(worker()) for _ in range(CONCURRENCY_LIMIT)]
+    workers = [asyncio.create_task(worker()) for _ in range(CONCURRENCY_LIMIT_IMAGES)]
 
     # Enqueue images with their indices
     for image in data.images:
@@ -393,10 +390,8 @@ async def build_update(session: aiohttp.ClientSession, chapter: Chapters, data: 
     await q.join()
     for w in workers:
         w.cancel()
-    await asyncio.gather(*workers, return_exceptions=True)
 
-    for image in images:
-        data.content = replace_img_name(data.content, image)
+    await asyncio.gather(*workers, return_exceptions=True)
 
     update_chapter.content = str(data.content)
 
@@ -495,7 +490,7 @@ async def do(url: str, file: str, session: aiohttp.ClientSession, writer):
                 except asyncio.CancelledError:
                     break
 
-        workers = [asyncio.create_task(worker()) for _ in range(CONCURRENCY_LIMIT)]
+        workers = [asyncio.create_task(worker()) for _ in range(CONCURRENCY_LIMIT_PAGES)]
 
         for i, chapter in enumerate(intro.chapters):
             await q.put((i, chapter))
