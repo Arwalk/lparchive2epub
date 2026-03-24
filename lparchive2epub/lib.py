@@ -267,7 +267,7 @@ class Page:
         self.sort_index = self.num
 
 async def _default_get(r):
-    return r
+    return await r.text()
 
 
 CURL_HEADERS = {
@@ -467,9 +467,9 @@ def get_cleaned_html(page: str) -> BeautifulSoup:
 async def do(url: str, file: str, session: aiohttp.ClientSession, writer):
     writer(f"extracting lp from {url}")
     writer("getting landing page")
-    page = await get_resource_with_retries(session, url)
+    page_text = await get_resource_with_retries(session, url)
 
-    landing = get_cleaned_html(await page.text())
+    landing = get_cleaned_html(page_text)
 
     book = epub.EpubBook()
     intro = Extractor.intro(url, landing)
