@@ -461,7 +461,7 @@ def get_cleaned_html(page: str) -> BeautifulSoup:
     for tag in tags_to_clean:
         while found := xml_version.find(tag):
             found.unwrap()
-    return BeautifulSoup(str(xml_version), "html.parser")
+    return xml_version
 
 
 async def do(url: str, file: str, session: aiohttp.ClientSession, writer):
