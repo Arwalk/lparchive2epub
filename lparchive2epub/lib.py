@@ -296,9 +296,18 @@ async def get_resource_with_retries(session: aiohttp.ClientSession, url, action=
 
 
 
-async def _get_image(session: aiohttp.ClientSession, img: Image) -> IndexedEpubImage:
+async def _get_image(session: aiohttp.ClientSession, img: Image, registry: dict = None) -> IndexedEpubImage:
     # Get the image URL from either src (for img tags) or href (for a tags)
     img_url = img.url
+
+    if registry is not None:
+        if img_url in registry:
+            return await registry[img_url]
+        loop = asyncio.get_running_loop()
+        future = loop.create_future()
+        registry[img_url] = future
+    else:
+        future = None
 
     async def get(r):
         media_type = img.media_type
@@ -318,14 +327,23 @@ async def _get_image(session: aiohttp.ClientSession, img: Image) -> IndexedEpubI
                 content=content)
         )
 
-    return await get_resource_with_retries(session, img_url, get)
+    try:
+        res = await get_resource_with_retries(session, img_url, get)
+        if future:
+            future.set_result(res)
+        return res
+    except Exception as e:
+        if future:
+            future.set_exception(e)
+            del registry[img_url]
+        raise
 
-async def build_intro(session: aiohttp.ClientSession, url_root: str, intro: Intro) -> Page:
+async def build_intro(session: aiohttp.ClientSession, url_root: str, intro: Intro, registry: dict = None) -> Page:
     intro_chapter = epub.EpubHtml(title="Introduction", file_name="introduction.xhtml", lang=intro.language)
     intro_chapter.add_item(get_style_item())
     tasks = []
     for image in intro.images:
-        task = asyncio.ensure_future(_get_image(session, image))
+        task = asyncio.ensure_future(_get_image(session, image, registry))
         tasks.append(task)
 
     images = await asyncio.gather(*tasks)
@@ -356,12 +374,12 @@ def batch(iterable, n=1):
     for ndx in range(0, l, n):
         yield iterable[ndx:min(ndx + n, l)]
 
-async def build_update(session: aiohttp.ClientSession, chapter: Chapters, data: Update, intro: Intro) -> Page:
+async def build_update(session: aiohttp.ClientSession, chapter: Chapters, data: Update, intro: Intro, registry: dict = None) -> Page:
     update_chapter = epub.EpubHtml(title=str(chapter.txt), file_name=chapter.new_href,
                                    lang=intro.language)  # TODO: fix language
     update_chapter.add_item(get_style_item())
 
-    img_builder = functools.partial(_get_image, session)
+    img_builder = functools.partial(_get_image, session, registry=registry)
 
     # Queue-based worker pool to cap concurrency
     q: asyncio.Queue = asyncio.Queue()
@@ -408,11 +426,11 @@ def add_page(known_images: dict, book: EpubBook, toc: List, spine: List, page: P
     spine.append(page.chapter)
 
 
-async def build_single_page(session: aiohttp.ClientSession, intro: Intro, chapter: Chapters, all_chapters: List[Chapters], pbar) -> Page:
+async def build_single_page(session: aiohttp.ClientSession, intro: Intro, chapter: Chapters, all_chapters: List[Chapters], pbar, registry: dict = None) -> Page:
     async def get(r):
         chapter_bs = get_cleaned_html(await r.text())
         update = Extractor.get_update(all_chapters, chapter_bs, chapter)
-        u = await build_update(session, chapter, update, intro)
+        u = await build_update(session, chapter, update, intro, registry)
         pbar.update(1)
         return u
 
@@ -460,7 +478,8 @@ async def do(url: str, file: str, session: aiohttp.ClientSession, writer):
     spine = ["nav"]
 
     writer("building intro")
-    epub_intro = await build_intro(session, url, intro)
+    image_registry = {}
+    epub_intro = await build_intro(session, url, intro, image_registry)
 
     known_images = {
         "hashes": [],
@@ -483,7 +502,7 @@ async def do(url: str, file: str, session: aiohttp.ClientSession, writer):
                 try:
                     i, chapter = await q.get()
                     try:
-                        page = await build_single_page(session, intro, chapter, intro.chapters, pbar)
+                        page = await build_single_page(session, intro, chapter, intro.chapters, pbar, image_registry)
                         pages_indexed.append((i, page))
                     finally:
                         q.task_done()
