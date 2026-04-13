@@ -1,36 +1,48 @@
-[tool.poetry]
+[project]
 name = "lparchive2epub"
 version = "1.4.2"
 description = ""
-authors = ["Arwalk <siragentprovocateurarwalk@gmail.com>"]
+authors = [{ name = "Arwalk", email = "siragentprovocateurarwalk@gmail.com" }]
+requires-python = ">=3.12,<4"
 readme = "README.md"
-packages = [{include = "lparchive2epub"}]
-repository = "https://github.com/Arwalk/lparchive2epub"
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+]
+dependencies = [
+    "beautifulsoup4>=4.12.2,<5",
+    "tqdm>=4.66.4,<5",
+    "aiohttp>=3.9.5,<4",
+    "aiohttp-client-cache[all]>=0.14",
+    "ebooklib>=0.20",
+]
 
-[tool.poetry.dependencies]
-python = "^3.12"
-beautifulsoup4 = "^4.12.2"
-tqdm = "^4.66.4"
-aiohttp = "^3.9.5"
-aiohttp-client-cache = {extras = ["all"], version = "^0.13.0"}
-ebooklib = "^0.19"
+[project.urls]
+Repository = "https://github.com/Arwalk/lparchive2epub"
 
-[tool.poetry.scripts]
-lparchive2epub = 'lparchive2epub.main:main'
+[project.scripts]
+lparchive2epub = "lparchive2epub.main:main"
+
+[dependency-groups]
+dev = [
+    "pytest>=9,<10",
+    "coverage>=7.4.0,<8",
+    "pytest-asyncio>=0.26.0",
+    "blake3>=1.0.4,<2",
+]
+
+[tool.uv]
+default-groups = "all"
+
+[tool.uv.build-backend]
+module-name = ["lparchive2epub"]
+module-root = ""
 
 [build-system]
-requires = ["poetry-core"]
-build-backend = "poetry.core.masonry.api"
-
-[tool.poetry.group.dev.dependencies]
-pytest = "^8.2"
-coverage = "^7.4.0"
-pytest-asyncio = "^0.26.0"
-blake3 = "^1.0.4"
-aiohttp-client-cache = {extras = ["all"], version = "^0.13.0"}
-
-[tool.poetry-pyinstaller-plugin.scripts]
-lparchive2epub = { source = "lparchive2epub/main.py", type = "onefile", bundle = true, console = true }
+requires = ["uv_build>=0.11.6,<0.12.0"]
+build-backend = "uv_build"
 
 [tool.pytest.ini_options]
 addopts = [
