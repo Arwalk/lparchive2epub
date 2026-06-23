@@ -21,7 +21,7 @@ The repository also contains the script `util/all_archives.py` that tries to scr
 
 ### Dev
 
-Poetry, python 3.12
+uv, python 3.12
 
 ### Users
 
