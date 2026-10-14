@@ -92,6 +92,22 @@ LP_SPECIFIC_NAMES = {
 FIND_FILES = re.compile(r"([.])[^/.]+$")
 FIND_ANCHOR_LINKS = re.compile(r"(#)[^/.]+$")
 
+# Typos in the scheme part of a URL found in some LPs: "hhttp://", "htttp://", "http:/", "http//"...
+FIXABLE_SCHEME = re.compile(r"^h+t+p+(s?)\s*(?::/*|//+)", re.IGNORECASE)
+HAS_SCHEME = re.compile(r"^[a-zA-Z][a-zA-Z0-9+.-]*:")
+
+
+def normalize_url(url: str) -> str | None:
+    """Repair common typos in an absolute URL. Returns None if the URL can't be made into a valid http(s) URL."""
+    url = url.strip().replace("\\", "/")
+    url = FIXABLE_SCHEME.sub(lambda m: f"http{m.group(1).lower()}://", url, count=1)
+    if url.startswith("//"):
+        url = "https:" + url
+    parsed = urlparse(url)
+    if parsed.scheme.lower() in ("http", "https") and parsed.netloc:
+        return url
+    return None
+
 
 class Extractor:
 
@@ -181,7 +197,7 @@ class Extractor:
         return chapters
 
     @staticmethod
-    def get_full_url(root_url: str, src: str) -> str:
+    def get_full_url(root_url: str, src: str) -> str | None:
         def remove_extra_dots(url):
             parsed = list(urlparse(url))
             dirs = []
@@ -198,9 +214,12 @@ class Extractor:
         if root.endswith("/"):
             root = root[:-1]
 
-        if root_url in src:
-            full = src
-        elif "http://" in src or "https://" in src:
+        src = src.strip()
+        if FIXABLE_SCHEME.match(src) or src.startswith("//") or HAS_SCHEME.match(src):
+            full = normalize_url(src)
+            if full is None:
+                return None
+        elif root_url in src:
             full = src
         else:
             full = f"{root}/{src}"
@@ -275,6 +294,27 @@ CURL_HEADERS = {
     "accept": "*/*"
 }
 
+class NonRetryableError(RuntimeError):
+    """A failure that will not go away by trying again (malformed URL, 404...)."""
+
+
+@dataclass
+class SkippedResource:
+    page: str
+    url: str
+    reason: str
+
+
+class StrictModeError(RuntimeError):
+    pass
+
+
+ISSUES_URL = "https://github.com/Arwalk/lparchive2epub/issues/new"
+
+# Client errors that may succeed later: request timeout, too many requests
+RETRYABLE_CLIENT_STATUSES = {408, 429}
+
+
 async def get_resource_with_retries(session: aiohttp.ClientSession, url, action=_default_get, max_retries=5):
     retry_count = 0
     last_exception = None
@@ -282,9 +322,15 @@ async def get_resource_with_retries(session: aiohttp.ClientSession, url, action=
     while retry_count < max_retries:
         try:
             async with session.get(url, headers=CURL_HEADERS) as r:
+                if 400 <= r.status < 500 and r.status not in RETRYABLE_CLIENT_STATUSES:
+                    raise NonRetryableError(f"Failed to get resource {url}, status code: {r.status}")
                 if r.status != 200:
                     raise RuntimeError(f"Failed to get resource {url}, status code: {r.status}")
                 return await action(r)
+        except NonRetryableError:
+            raise
+        except aiohttp.InvalidURL as e:
+            raise NonRetryableError(f"Invalid URL {url}: {e}") from e
         except Exception as e:
             last_exception = e
             retry_count += 1
@@ -299,6 +345,8 @@ async def get_resource_with_retries(session: aiohttp.ClientSession, url, action=
 async def _get_image(session: aiohttp.ClientSession, img: Image, registry: dict = None) -> IndexedEpubImage:
     # Get the image URL from either src (for img tags) or href (for a tags)
     img_url = img.url
+    if img_url is None:
+        raise NonRetryableError(f"Malformed URL that could not be repaired: {img.src}")
 
     if registry is not None:
         if img_url in registry:
@@ -335,10 +383,16 @@ async def _get_image(session: aiohttp.ClientSession, img: Image, registry: dict 
     except Exception as e:
         if future:
             future.set_exception(e)
+            # Mark the exception as retrieved, so asyncio doesn't complain if nobody else awaits it
+            future.exception()
             del registry[img_url]
         raise
 
-async def build_intro(session: aiohttp.ClientSession, url_root: str, intro: Intro, registry: dict = None) -> Page:
+def _skipped(img: Image, e: Exception) -> SkippedResource:
+    return SkippedResource(page=img.root_url, url=img.src, reason=str(e) or type(e).__name__)
+
+
+async def build_intro(session: aiohttp.ClientSession, url_root: str, intro: Intro, registry: dict = None, failures: list[SkippedResource] = None) -> Page:
     intro_chapter = epub.EpubHtml(title="Introduction", file_name="introduction.xhtml", lang=intro.language)
     intro_chapter.add_item(get_style_item())
     tasks = []
@@ -346,7 +400,15 @@ async def build_intro(session: aiohttp.ClientSession, url_root: str, intro: Intr
         task = asyncio.ensure_future(_get_image(session, image, registry))
         tasks.append(task)
 
-    images = await asyncio.gather(*tasks)
+    results = await asyncio.gather(*tasks, return_exceptions=True)
+
+    images = []
+    for img, res in zip(intro.images, results):
+        if isinstance(res, Exception):
+            if failures is not None:
+                failures.append(_skipped(img, res))
+        else:
+            images.append(res)
 
     for image in images:
         intro.intro = replace_img_name(intro.intro, image)
@@ -363,7 +425,7 @@ def replace_img_name(content: BeautifulSoup, image: IndexedEpubImage) -> Beautif
         item["src"] = image.new_name
 
     # Handle linked images
-    to_change_links = (x for x in content.find_all("a") if x.get("href", "") == image.old_name)
+    to_change_links = (x for x in content.find_all("a") if x.get("href") and Extractor.get_full_url(image.root_url, x["href"]) == image.old_name)
     for item in to_change_links:
         item["href"] = image.new_name
 
@@ -374,7 +436,7 @@ def batch(iterable, n=1):
     for ndx in range(0, l, n):
         yield iterable[ndx:min(ndx + n, l)]
 
-async def build_update(session: aiohttp.ClientSession, chapter: Chapters, data: Update, intro: Intro, registry: dict = None) -> Page:
+async def build_update(session: aiohttp.ClientSession, chapter: Chapters, data: Update, intro: Intro, registry: dict = None, failures: list[SkippedResource] = None) -> Page:
     update_chapter = epub.EpubHtml(title=str(chapter.txt), file_name=chapter.new_href,
                                    lang=intro.language)  # TODO: fix language
     update_chapter.add_item(get_style_item())
@@ -393,6 +455,10 @@ async def build_update(session: aiohttp.ClientSession, chapter: Chapters, data: 
                     res = await img_builder(img)
                     replace_img_name(data.content, res)
                     images.append(res)
+                except Exception as e:
+                    # Missing images are not worth failing the whole book: keep the original link
+                    if failures is not None:
+                        failures.append(_skipped(img, e))
                 finally:
                     q.task_done()
             except asyncio.CancelledError:
@@ -426,23 +492,23 @@ def add_page(known_images: dict, book: EpubBook, toc: List, spine: List, page: P
     spine.append(page.chapter)
 
 
-async def build_single_page(session: aiohttp.ClientSession, intro: Intro, chapter: Chapters, all_chapters: List[Chapters], pbar, registry: dict = None) -> Page:
+async def build_single_page(session: aiohttp.ClientSession, intro: Intro, chapter: Chapters, all_chapters: List[Chapters], pbar, registry: dict = None, failures: list[SkippedResource] = None) -> Page:
     async def get(r):
         chapter_bs = get_cleaned_html(await r.text())
         update = Extractor.get_update(all_chapters, chapter_bs, chapter)
-        u = await build_update(session, chapter, update, intro, registry)
+        u = await build_update(session, chapter, update, intro, registry, failures)
         pbar.update(1)
         return u
 
     return await get_resource_with_retries(session, chapter.original_href, get)
 
-async def lparchive2epub(url: str, file: str, root_session: aiohttp.ClientSession | None = None, writer=tqdm.write):
+async def lparchive2epub(url: str, file: str, root_session: aiohttp.ClientSession | None = None, writer=tqdm.write, strict: bool = False):
     if url.endswith("/"):
         url = url[:-1]
     if root_session is None:
         root_session = aiohttp.ClientSession()
     async with root_session as session:
-        await do(url, file, session, writer)
+        await do(url, file, session, writer, strict)
 
 
 tags_to_clean = [
@@ -464,7 +530,25 @@ def get_cleaned_html(page: str) -> BeautifulSoup:
     return xml_version
 
 
-async def do(url: str, file: str, session: aiohttp.ClientSession, writer):
+def format_failures_report(url: str, failures: list[SkippedResource], outcome: str) -> str:
+    unique = list(dict.fromkeys((f.page, f.url, f.reason) for f in failures))
+    separator = "-" * 72
+    lines = [
+        separator,
+        f"lparchive2epub: {len(unique)} resource(s) could not be retrieved while extracting {url}",
+    ]
+    for page, res_url, reason in unique:
+        lines.append(f"  - page:   {page}")
+        lines.append(f"    url:    {res_url}")
+        lines.append(f"    reason: {reason}")
+    lines.append(separator)
+    lines.append(outcome)
+    lines.append(f"Please open an issue at {ISSUES_URL} and paste the output between the lines above,")
+    lines.append("so these cases can be handled in a future release.")
+    return "\n".join(lines)
+
+
+async def do(url: str, file: str, session: aiohttp.ClientSession, writer, strict: bool = False):
     writer(f"extracting lp from {url}")
     writer("getting landing page")
     page_text = await get_resource_with_retries(session, url)
@@ -479,7 +563,8 @@ async def do(url: str, file: str, session: aiohttp.ClientSession, writer):
 
     writer("building intro")
     image_registry = {}
-    epub_intro = await build_intro(session, url, intro, image_registry)
+    failures: list[SkippedResource] = []
+    epub_intro = await build_intro(session, url, intro, image_registry, failures)
 
     known_images = {
         "hashes": [],
@@ -502,7 +587,7 @@ async def do(url: str, file: str, session: aiohttp.ClientSession, writer):
                 try:
                     i, chapter = await q.get()
                     try:
-                        page = await build_single_page(session, intro, chapter, intro.chapters, pbar, image_registry)
+                        page = await build_single_page(session, intro, chapter, intro.chapters, pbar, image_registry, failures)
                         pages_indexed.append((i, page))
                     finally:
                         q.task_done()
@@ -520,6 +605,10 @@ async def do(url: str, file: str, session: aiohttp.ClientSession, writer):
         await asyncio.gather(*workers, return_exceptions=True)
 
     pages = [p for _, p in sorted(pages_indexed, key=lambda x: x[0])]
+
+    if failures and strict:
+        raise StrictModeError(format_failures_report(
+            url, failures, "No book was written (--strict). Run again without --strict to build it anyway."))
 
     for p in tqdm(pages, desc="Adding pages to book"):
         add_page(known_images, book, toc, spine, p)
@@ -546,3 +635,6 @@ async def do(url: str, file: str, session: aiohttp.ClientSession, writer):
 
     writer("Writing book file")
     epub.write_epub(file, book, options = {"mtime": mtime})
+
+    if failures:
+        writer(format_failures_report(url, failures, "Those resources were left as external links in the book."))

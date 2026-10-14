@@ -1,4 +1,6 @@
-from lparchive2epub.lib import Extractor, Chapters, lparchive2epub, BeautifulSoup
+import asyncio
+import aiohttp
+from lparchive2epub.lib import Extractor, Chapters, lparchive2epub, BeautifulSoup, normalize_url, build_update, Update, Intro, format_failures_report, ISSUES_URL
 from importlib.resources import files
 import tests.resources as resources
 import pytest
@@ -373,3 +375,56 @@ async def test_lparchive2epub(lp, b3sum):
         file_hash = file_hasher.hexdigest()
         assert file_hash == b3sum
     await cache.close()
+
+
+@pytest.mark.parametrize(("url", "expected"), [
+    ("hhttp://lpix.org/2495492/purski.png", "http://lpix.org/2495492/purski.png"),
+    ("htttps://example.com/a.png", "https://example.com/a.png"),
+    ("HTTP://example.com/a.png", "http://example.com/a.png"),
+    ("http:/example.com/a.png", "http://example.com/a.png"),
+    ("http//example.com/a.png", "http://example.com/a.png"),
+    ("http:///example.com/a.png", "http://example.com/a.png"),
+    ("//example.com/a.png", "https://example.com/a.png"),
+    ("  http://example.com/a.png ", "http://example.com/a.png"),
+    ("https://example.com/a.png", "https://example.com/a.png"),
+    ("ftp://example.com/a.png", None),
+    ("javascript:void(0)", None),
+    ("hhttp://", None),
+])
+def test_normalize_url(url, expected):
+    assert normalize_url(url) == expected
+
+
+def test_get_full_url():
+    root = "https://lparchive.org/Shin-Megami-Tensei-Devil-Summoner/Update%2011/"
+    assert Extractor.get_full_url(root, "hhttp://lpix.org/2495492/purski.png") == "http://lpix.org/2495492/purski.png"
+    assert Extractor.get_full_url(root, "1.png") == f"{root}1.png"
+    assert Extractor.get_full_url(root, "../1.png") == "https://lparchive.org/Shin-Megami-Tensei-Devil-Summoner/1.png"
+    assert Extractor.get_full_url(root, "mailto:someone@example.com") is None
+
+
+@pytest.mark.asyncio
+async def test_build_update_skips_unreachable_images():
+    root = "https://lparchive.org/Some-LP/Update%201/"
+    html = ('<div id="content"><a href="ftp://example.com/broken.png">full image</a>'
+            '<img src="hhttp://"/></div>')
+    content = BeautifulSoup(html, "html.parser").find("div", id="content")
+    images = Extractor.all_images(content, root)
+    chapter = Chapters(num=1, original_href=root, txt="Update 1", new_href="update_1.xhtml",
+                       original_href_slug="Update%201/")
+    intro = Intro(title="t", language="en", author="a", intro=None, images=[], chapters=[chapter], published_on="")
+    failures = []
+
+    async with aiohttp.ClientSession() as session:
+        page = await asyncio.wait_for(
+            build_update(session, chapter, Update(content=content, images=images), intro, {}, failures),
+            timeout=5)
+
+    assert page.images == []
+    assert sorted(f.url for f in failures) == ["ftp://example.com/broken.png", "hhttp://"]
+    assert all(f.page == root for f in failures)
+    assert 'href="ftp://example.com/broken.png"' in page.chapter.content
+
+    report = format_failures_report("https://lparchive.org/Some-LP", failures + failures, "outcome")
+    assert report.count("url:    ftp://example.com/broken.png") == 1
+    assert ISSUES_URL in report
