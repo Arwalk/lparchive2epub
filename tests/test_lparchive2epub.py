@@ -8,7 +8,7 @@ import zipfile
 from urllib.parse import unquote
 
 import aiohttp
-from lparchive2epub.lib import Extractor, Chapters, lparchive2epub, BeautifulSoup, normalize_url, build_update, Update, Intro, format_failures_report, ISSUES_URL, do, StrictModeError, MissingUpdatesError, ExtractionError, OutputError, check_output_path, detect_image_type, NotFoundError, NetworkError, RetriesExhaustedError, NotALetsPlayError, normalize_lp_url, EXIT_NOT_FOUND, EXIT_NETWORK, EXIT_OUTPUT, EXIT_INTERRUPTED
+from lparchive2epub.lib import Extractor, Chapters, lparchive2epub, BeautifulSoup, normalize_url, build_update, Update, Intro, format_failures_report, ISSUES_URL, do, StrictModeError, MissingUpdatesError, ExtractionError, OutputError, check_output_path, detect_image_type, NotFoundError, NetworkError, RetriesExhaustedError, NotALetsPlayError, normalize_lp_url, fetch_with_retries, Fetched, EXIT_NOT_FOUND, EXIT_NETWORK, EXIT_OUTPUT, EXIT_INTERRUPTED
 import lparchive2epub.lib as lib
 from lparchive2epub import main as cli
 from importlib.resources import files
@@ -958,3 +958,42 @@ async def test_non_lp_page_fails_cleanly_through_do():
         with pytest.raises(NotALetsPlayError):
             await do(url, f"{d}/book.epub", session, lambda *_: None)
         assert os.listdir(d) == []
+
+
+@pytest.mark.asyncio
+async def test_fetch_with_retries_returns_body_and_decodes_text():
+    url = "https://lparchive.org/X-COM-Terror-from-the-Deep"
+    session = _FakeSession("never-matches", responses={url: _FakeResponse(200, "caf\u00e9".encode("utf-8"), "text/html; charset=utf-8")})
+    fetched = await fetch_with_retries(session, url)
+    assert isinstance(fetched, Fetched)
+    assert fetched.body == "caf\u00e9".encode("utf-8") and fetched.text() == "caf\u00e9"
+    assert fetched.content_type == "text/html; charset=utf-8"
+    assert session.requested == [url]
+
+
+@pytest.mark.asyncio
+async def test_transient_server_errors_are_retried_but_processing_errors_are_not(monkeypatch):
+    monkeypatch.setattr(lib, "RETRY_BACKOFF_BASE", 0)
+    url = "https://lparchive.org/X-COM-Terror-from-the-Deep"
+    flaky_chapter = f"{url}/Update%2003/"
+    broken_chapter = f"{url}/Update%2007/"
+    session = _FakeSession("never-matches", responses={flaky_chapter: _FakeResponse(503, b"down")})
+
+    real_get_update = lib.Extractor.get_update
+
+    def get_update(chapters, p, chapter):
+        if chapter.original_href == broken_chapter:
+            raise KeyError("simulated parsing bug")
+        return real_get_update(chapters, p, chapter)
+
+    monkeypatch.setattr(lib.Extractor, "get_update", staticmethod(get_update))
+    with tempfile.TemporaryDirectory() as d:
+        with pytest.raises(MissingUpdatesError) as exc_info:
+            await asyncio.wait_for(do(url, f"{d}/book.epub", session, lambda *_: None), timeout=10)
+
+    assert session.requested.count(flaky_chapter) == 5      # network-ish failure: all retries used
+    assert session.requested.count(broken_chapter) == 1     # processing failure: downloaded once, no retry
+    report = str(exc_info.value)
+    assert "2 update(s) could not be retrieved" in report
+    assert "after 5 retries" in report and "status code: 503" in report
+    assert "KeyError: 'simulated parsing bug'" in report

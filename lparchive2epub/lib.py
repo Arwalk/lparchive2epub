@@ -330,8 +330,16 @@ class Page:
     def __post_init__(self):
         self.sort_index = self.num
 
-async def _default_get(r):
-    return await r.text()
+@dataclass
+class Fetched:
+    """A successfully downloaded resource. Processing it happens outside the retry loop."""
+    url: str
+    body: bytes
+    content_type: str | None
+    encoding: str
+
+    def text(self) -> str:
+        return self.body.decode(self.encoding, errors="replace")
 
 
 CURL_HEADERS = {
@@ -496,7 +504,12 @@ RETRYABLE_CLIENT_STATUSES = {408, 429}
 RETRY_BACKOFF_BASE = 1.0
 
 
-async def get_resource_with_retries(session: aiohttp.ClientSession, url, action=_default_get, max_retries=5):
+async def fetch_with_retries(session: aiohttp.ClientSession, url: str, max_retries: int = 5) -> Fetched:
+    """Download `url` (status 200 and the whole body), retrying on network trouble and 5xx/408/429.
+
+    Only the download is retried. Whatever the caller does with the bytes afterwards (parsing,
+    image sniffing...) runs outside this loop, so a bug there fails once and fast instead of
+    re-downloading the resource five times with 30 s of backoff."""
     retry_count = 0
     last_exception = None
 
@@ -507,7 +520,11 @@ async def get_resource_with_retries(session: aiohttp.ClientSession, url, action=
                     raise NonRetryableError(f"Failed to get resource {url}, status code: {r.status}", url, r.status)
                 if r.status != 200:
                     raise FetchError(f"Failed to get resource {url}, status code: {r.status}", url, r.status)
-                return await action(r)
+                body = await r.read()
+                headers = getattr(r, "headers", None) or {}
+                get_encoding = getattr(r, "get_encoding", None)
+                encoding = get_encoding() if callable(get_encoding) else "utf-8"
+                return Fetched(url, body, headers.get("Content-Type"), encoding or "utf-8")
         except NonRetryableError:
             raise
         except aiohttp.InvalidURL as e:
@@ -537,12 +554,11 @@ async def _get_image(session: aiohttp.ClientSession, img: Image, registry: dict 
     else:
         future = None
 
-    async def get(r):
-        content = await r.content.read()
-        content_type = r.headers.get("Content-Type") if getattr(r, "headers", None) else None
-        detected = detect_image_type(content, img_url, content_type)
+    def build(fetched: Fetched) -> IndexedEpubImage:
+        content = fetched.body
+        detected = detect_image_type(content, img_url, fetched.content_type)
         if detected is None:
-            declared = (content_type or "unknown type").split(";")[0].strip()
+            declared = (fetched.content_type or "unknown type").split(";")[0].strip()
             raise NonRetryableError(f"Not an image: the server answered with {declared} ({len(content)} bytes)",
                                     img_url)
         media_type, extension = detected
@@ -562,7 +578,7 @@ async def _get_image(session: aiohttp.ClientSession, img: Image, registry: dict 
         )
 
     try:
-        res = await get_resource_with_retries(session, img_url, get)
+        res = build(await fetch_with_retries(session, img_url))
         if future:
             future.set_result(res)
         return res
@@ -574,8 +590,15 @@ async def _get_image(session: aiohttp.ClientSession, img: Image, registry: dict 
             del registry[img_url]
         raise
 
+def _describe(e: Exception) -> str:
+    """Fetch errors are self-explanatory; anything else is unexpected, so say what kind of error it was."""
+    if isinstance(e, FetchError):
+        return str(e)
+    return f"{type(e).__name__}: {e}" if str(e) else type(e).__name__
+
+
 def _skipped(img: Image, e: Exception) -> SkippedResource:
-    return SkippedResource(page=img.root_url, url=img.src, reason=str(e) or type(e).__name__)
+    return SkippedResource(page=img.root_url, url=img.src, reason=_describe(e))
 
 
 async def build_intro(session: aiohttp.ClientSession, url_root: str, intro: Intro, registry: dict = None, failures: list[SkippedResource] = None) -> Page:
@@ -694,14 +717,12 @@ def add_page(known_images: set, book: EpubBook, toc: List, spine: List, page: Pa
 
 
 async def build_single_page(session: aiohttp.ClientSession, intro: Intro, chapter: Chapters, all_chapters: List[Chapters], pbar, registry: dict = None, failures: list[SkippedResource] = None) -> Page:
-    async def get(r):
-        chapter_bs = get_cleaned_html(await r.text())
-        update = Extractor.get_update(all_chapters, chapter_bs, chapter)
-        u = await build_update(session, chapter, update, intro, registry, failures)
-        pbar.update(1)
-        return u
-
-    return await get_resource_with_retries(session, chapter.original_href, get)
+    fetched = await fetch_with_retries(session, chapter.original_href)
+    chapter_bs = get_cleaned_html(fetched.text())
+    update = Extractor.get_update(all_chapters, chapter_bs, chapter)
+    page = await build_update(session, chapter, update, intro, registry, failures)
+    pbar.update(1)
+    return page
 
 def build_placeholder_page(chapter: Chapters, intro: Intro, error: Exception) -> Page:
     """Stand-in for a chapter that could not be retrieved, so the book keeps its structure."""
@@ -784,7 +805,7 @@ async def do(url: str, file: str, session: aiohttp.ClientSession, writer, strict
     writer(f"extracting lp from {url}")
     writer("getting landing page")
     try:
-        page_text = await get_resource_with_retries(session, url)
+        page_text = (await fetch_with_retries(session, url)).text()
     except (FetchError, aiohttp.ClientError, OSError) as e:
         raise landing_page_error(url, e) from e
 
@@ -848,7 +869,7 @@ async def do(url: str, file: str, session: aiohttp.ClientSession, writer, strict
 
     if missing_updates:
         missing_updates.sort(key=lambda x: x[0])
-        missing = [SkippedResource(page=c.original_href, url=c.original_href, reason=str(e) or type(e).__name__)
+        missing = [SkippedResource(page=c.original_href, url=c.original_href, reason=_describe(e))
                    for _, c, e in missing_updates]
         if not allow_missing_updates:
             raise MissingUpdatesError(format_failures_report(
