@@ -4,6 +4,7 @@ import functools
 import mimetypes
 import os
 import re
+import zipfile
 from dataclasses import dataclass
 from hashlib import blake2b
 from typing import List, Tuple
@@ -419,17 +420,32 @@ def check_output_path(file: str):
 
 
 def write_book(file: str, book: EpubBook, mtime: datetime.datetime):
-    """Write the book through a temporary file, so a failure never leaves a truncated epub behind."""
+    """Write the book through a temporary file, so a failure never leaves a truncated epub behind.
+
+    ebooklib only uses `mtime` for the dcterms:modified metadata and stamps every zip entry with the
+    current time, which would make two builds of the same LP differ. The archive is rewritten with
+    `mtime` on every entry so the output is byte-identical from one run to the next."""
     partial = file + ".part"
     try:
         epub.write_epub(partial, book, options={"mtime": mtime, "raise_exceptions": True})
-        os.replace(partial, file)
+        _rewrite_with_fixed_timestamps(partial, file, mtime)
     except OSError as e:
+        raise OutputError(f"Cannot write the book to {file}: {e.strerror or e}") from e
+    finally:
         try:
             os.remove(partial)
         except OSError:
             pass
-        raise OutputError(f"Cannot write the book to {file}: {e.strerror or e}") from e
+
+
+def _rewrite_with_fixed_timestamps(src: str, dst: str, mtime: datetime.datetime):
+    date_time = max(mtime, datetime.datetime(1980, 1, 1)).timetuple()[:6]  # zip can't store dates before 1980
+    with zipfile.ZipFile(src) as zin, zipfile.ZipFile(dst, "w") as zout:
+        for info in zin.infolist():
+            fixed = zipfile.ZipInfo(info.filename, date_time=date_time)
+            fixed.compress_type = info.compress_type
+            fixed.external_attr = info.external_attr
+            zout.writestr(fixed, zin.read(info.filename))
 
 
 ISSUES_URL = "https://github.com/Arwalk/lparchive2epub/issues/new"
@@ -545,7 +561,7 @@ async def build_intro(session: aiohttp.ClientSession, url_root: str, intro: Intr
 
     intro_chapter.content = str(intro.intro)
 
-    return Page(0, intro_chapter, images)
+    return Page(0, intro_chapter, in_document_order(intro.images, images))
 
 
 def replace_img_name(content: BeautifulSoup, image: IndexedEpubImage) -> BeautifulSoup:
@@ -609,15 +625,30 @@ async def build_update(session: aiohttp.ClientSession, chapter: Chapters, data: 
 
     update_chapter.content = str(data.content)
 
-    return Page(chapter.num, update_chapter, images)
+    return Page(chapter.num, update_chapter, in_document_order(data.images, images))
 
 
-def add_page(known_images: dict, book: EpubBook, toc: List, spine: List, page: Page):
+def in_document_order(wanted: List[Image], fetched: List[IndexedEpubImage]) -> List[IndexedEpubImage]:
+    """Order downloaded images as they appear on the page, not as the downloads happened to finish.
+
+    The book's manifest follows this order, so it must not depend on network timing; otherwise two
+    runs on the same LP give two different files."""
+    by_url = {img.old_name: img for img in fetched}
+    ordered, seen = [], set()
+    for image in wanted:
+        img = by_url.get(image.url)
+        if img is not None and img.old_name not in seen:
+            seen.add(img.old_name)
+            ordered.append(img)
+    return ordered
+
+
+def add_page(known_images: set, book: EpubBook, toc: List, spine: List, page: Page):
     book.add_item(page.chapter)
     for img in page.images:
-        if img.hash not in known_images["hashes"]:
+        if img.hash not in known_images:
             book.add_item(img.data)
-            known_images["hashes"].append(img.hash)
+            known_images.add(img.hash)
     toc.append(epub.Link(page.chapter.file_name, page.chapter.title, page.chapter.id))
     spine.append(page.chapter)
 
@@ -729,9 +760,7 @@ async def do(url: str, file: str, session: aiohttp.ClientSession, writer, strict
     missing_updates: list[tuple[int, Chapters, Exception]] = []
     epub_intro = await build_intro(session, url, intro, image_registry, failures)
 
-    known_images = {
-        "hashes": [],
-    }
+    known_images: set[str] = set()
 
     add_page(known_images, book, toc, spine, epub_intro)
 
@@ -812,8 +841,7 @@ async def do(url: str, file: str, session: aiohttp.ClientSession, writer, strict
     book.set_title(intro.title)
     book.set_language(intro.language)
     book.add_metadata("DC", "source", url)
-    book.add_metadata("DC", "identifier", f"lparchive2epub-{hash(intro.title)}-{hash(intro.author)}-{hash(url)}")
-
+    # Stable across runs: Python's hash() must not be used here, it is randomised per process.
     book.set_identifier(f"lparchive2epub-{get_blake2b_hash(intro.title.encode("utf-8"))}-{get_blake2b_hash(intro.author.encode("utf-8"))}-{get_blake2b_hash(url.encode("utf-8"))}")
 
     mtime = datetime.datetime.strptime(intro.published_on, "%b %d, %Y")

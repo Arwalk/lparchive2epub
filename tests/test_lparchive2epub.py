@@ -1,5 +1,8 @@
 import asyncio
+import hashlib
+import io
 import os
+import random
 import re
 import zipfile
 from urllib.parse import unquote
@@ -823,3 +826,63 @@ def test_cli_unexpected_error_asks_for_a_bug_report(monkeypatch, capsys):
     assert "unexpected error: AttributeError" in err
     assert ISSUES_URL in err
     assert "Traceback" in err  # kept on purpose: it is what the bug report needs
+
+
+class _JitteryResponse(_FakeResponse):
+    """Answers after a random delay, so downloads finish in a different order every run."""
+
+    def __init__(self, status, body, rng, content_type=None):
+        super().__init__(status, body, content_type)
+        self._rng = rng
+
+    async def read(self):
+        await asyncio.sleep(self._rng.random() * 0.02)
+        return self._body
+
+    async def text(self):
+        await asyncio.sleep(self._rng.random() * 0.02)
+        return self._body.decode("utf-8", errors="replace")
+
+
+class _JitterySession(_FakeSession):
+    """Chapters with several distinct images each, some shared between chapters; random latency."""
+
+    def __init__(self, seed: int):
+        super().__init__("never-matches")
+        self.rng = random.Random(seed)
+
+    def get(self, url, **kwargs):
+        self.requested.append(url)
+        if url.rstrip("/") == "https://lparchive.org/X-COM-Terror-from-the-Deep":
+            return _JitteryResponse(200, xcom, self.rng)
+        m = re.search(r"Update%20(\d+)/$", url)
+        if m:
+            n = int(m.group(1))
+            imgs = "".join(f'<img src="{n}-{i}.png"/>' for i in range(6)) + '<img src="../shared.png"/>'
+            return _JitteryResponse(200, f'<div id="content"><h3>Update {n}</h3>{imgs}</div>'.encode(), self.rng)
+        # distinct content per image URL, so every image gets its own hash
+        return _JitteryResponse(200, PNG_BYTES + url.encode(), self.rng)
+
+
+async def _build_with_seed(seed: int) -> bytes:
+    url = "https://lparchive.org/X-COM-Terror-from-the-Deep"
+    with tempfile.TemporaryDirectory() as d:
+        out = f"{d}/book.epub"
+        await asyncio.wait_for(do(url, out, _JitterySession(seed), lambda *_: None), timeout=60)
+        with open(out, "rb") as f:
+            return f.read()
+
+
+@pytest.mark.asyncio
+async def test_output_is_byte_identical_whatever_the_download_order():
+    first, second, third = [await _build_with_seed(seed) for seed in (1, 2, 3)]
+    assert hashlib.sha256(first).hexdigest() == hashlib.sha256(second).hexdigest() == hashlib.sha256(third).hexdigest()
+    with zipfile.ZipFile(io.BytesIO(first)) as z:
+        opf = z.read("EPUB/content.opf").decode()
+        images = re.findall(r'href="images/[^"]+"', opf)
+        # zip entries are stamped with the LP's archival date, not the build time
+        assert {info.date_time for info in z.infolist()} == {(2010, 5, 14, 0, 0, 0)}
+        assert z.infolist()[0].filename == "mimetype" and z.infolist()[0].compress_type == zipfile.ZIP_STORED
+        assert z.testzip() is None
+    assert len(images) == 18 * 6 + 1 + 1  # 6 per chapter, one shared, one in the intro
+    assert "lparchive2epub-" in opf and opf.count("<dc:identifier") == 1
