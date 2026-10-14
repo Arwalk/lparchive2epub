@@ -17,6 +17,7 @@ dependencies = [
     "aiohttp>=3.9.5,<4",
     "aiohttp-client-cache[all]>=0.14",
     "ebooklib>=0.20",
+    "pillow>=10",
 ]
 
 [project.urls]

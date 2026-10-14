@@ -3,7 +3,9 @@
 this tool (and library) aims at helping people extracting full epubs of Let's Plays from https://lparchive.org/
 
 ```
-usage: lparchive2epub [-h] [--no-cache] [--strict] [--allow-missing-updates] URL OUTPUT_FILE
+usage: lparchive2epub [-h] [--no-cache] [--strict] [--allow-missing-updates]
+                      [--max-image-size PIXELS] [--jpeg-quality 1-100]
+                      URL OUTPUT_FILE
 
 A tool to transform a Let's Play from lparchive.org to epub format.
 
@@ -21,6 +23,14 @@ options:
                Build the book even if some updates can't be retrieved,
                replacing them with a placeholder page (by default this is an
                error and no book is written)
+  --max-image-size PIXELS
+               Shrink images wider or taller than PIXELS to fit, and re-encode
+               them (JPEG at --jpeg-quality, PNG optimised, WebP/BMP
+               converted). Off by default: images are kept as served. 1600
+               suits e-readers, 2500 high-resolution tablets
+  --jpeg-quality 1-100
+               JPEG quality used when --max-image-size re-encodes an image
+               (default: 85)
 ```
 
 The repository also contains the script `util/all_archives.py` that tries to scrape all LPs from lparchive.
@@ -48,6 +58,15 @@ A standalone executable is available for releases on windows. See the releases p
 ## Building standalone
 
 `uv run --with pyinstaller pyinstaller --onefile --name lparchive2epub lparchive2epub/main.py`
+
+## Image size
+
+By default every image is embedded exactly as lparchive.org serves it, which is the right choice for
+tablets and for archiving. Some LPs carry very large pictures (a single 17 MB photo is not unheard of)
+that make e-ink readers crawl or crash. `--max-image-size 1600` shrinks anything larger than 1600
+pixels on its longest edge, re-encodes JPEGs at `--jpeg-quality` (85 by default), optimises PNGs and
+converts WebP and BMP, which many readers can't display, to PNG or JPEG. Animated GIFs are left as they
+are. A summary of the saving is printed before the book is written.
 
 ## Exit codes
 

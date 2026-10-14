@@ -4,7 +4,8 @@ import traceback
 from argparse import ArgumentParser, ArgumentTypeError
 from aiohttp_client_cache import CacheBackend, CachedSession
 
-from lparchive2epub.lib import lparchive2epub, ExtractionError, ISSUES_URL, EXIT_FAILURE, EXIT_INTERRUPTED, normalize_lp_url
+from lparchive2epub.lib import lparchive2epub, ExtractionError, ISSUES_URL, EXIT_FAILURE, EXIT_INTERRUPTED, normalize_lp_url, \
+    ImageProcessing
 
 
 def is_lparchive_url(arg):
@@ -30,13 +31,39 @@ arg_parser.add_argument("--allow-missing-updates", action="store_true",
                         help="Build the book even if some updates can't be retrieved, replacing them with a "
                              "placeholder page (by default this is an error and no book is written)")
 
+
+def positive_int(arg):
+    try:
+        value = int(arg)
+    except ValueError:
+        raise ArgumentTypeError(f"{arg} is not a whole number") from None
+    if value < 1:
+        raise ArgumentTypeError(f"{arg} must be at least 1")
+    return value
+
+
+def jpeg_quality(arg):
+    value = positive_int(arg)
+    if value > 100:
+        raise ArgumentTypeError(f"{arg} must be between 1 and 100")
+    return value
+
+
+arg_parser.add_argument("--max-image-size", metavar="PIXELS", type=positive_int,
+                        help="Shrink images wider or taller than PIXELS to fit, and re-encode them (JPEG at "
+                             "--jpeg-quality, PNG optimised, WebP/BMP converted). Off by default: images are kept "
+                             "as served. 1600 suits e-readers, 2500 high-resolution tablets")
+arg_parser.add_argument("--jpeg-quality", metavar="1-100", type=jpeg_quality, default=85,
+                        help="JPEG quality used when --max-image-size re-encodes an image (default: 85)")
+
 async def amain(args):
     if args.no_cache:
         cache = None
     else:
         cache = CachedSession(cache=CacheBackend())
+    processing = ImageProcessing(args.max_image_size, args.jpeg_quality) if args.max_image_size else None
     await lparchive2epub(args.url[0], args.output[0], cache, strict=args.strict,
-                         allow_missing_updates=args.allow_missing_updates)
+                         allow_missing_updates=args.allow_missing_updates, image_processing=processing)
 
 def main(argv=None):
     args = arg_parser.parse_args(argv)

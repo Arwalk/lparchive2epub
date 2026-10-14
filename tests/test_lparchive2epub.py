@@ -9,7 +9,7 @@ import zipfile
 from urllib.parse import unquote
 
 import aiohttp
-from lparchive2epub.lib import Extractor, Chapters, lparchive2epub, BeautifulSoup, normalize_url, build_update, Update, Intro, format_failures_report, ISSUES_URL, do, StrictModeError, MissingUpdatesError, ExtractionError, OutputError, check_output_path, detect_image_type, NotFoundError, NetworkError, RetriesExhaustedError, NotALetsPlayError, normalize_lp_url, fetch_with_retries, Fetched, get_cleaned_html, compose_description, parse_lp_date, EXIT_NOT_FOUND, EXIT_NETWORK, EXIT_OUTPUT, EXIT_INTERRUPTED
+from lparchive2epub.lib import Extractor, Chapters, lparchive2epub, BeautifulSoup, normalize_url, build_update, Update, Intro, format_failures_report, ISSUES_URL, do, StrictModeError, MissingUpdatesError, ExtractionError, OutputError, check_output_path, detect_image_type, NotFoundError, NetworkError, RetriesExhaustedError, NotALetsPlayError, normalize_lp_url, fetch_with_retries, Fetched, get_cleaned_html, compose_description, parse_lp_date, reduce_image, ImageProcessing, detect_image_type as _dit, EXIT_NOT_FOUND, EXIT_NETWORK, EXIT_OUTPUT, EXIT_INTERRUPTED
 import lparchive2epub.lib as lib
 from lparchive2epub import main as cli
 from importlib.resources import files
@@ -1163,3 +1163,142 @@ async def test_book_carries_dublin_core_metadata_from_the_landing_page():
     assert "<dc:relation>http://forums.somethingawful.com/showthread.php?threadid=3220122</dc:relation>" in opf
     assert f"<dc:source>{url}</dc:source>" in opf
     assert 'property="dcterms:modified">2010-05-14T00:00:00Z' in opf
+
+
+def _make_image(fmt: str, size=(3000, 1000), mode="RGB", **save_kwargs) -> bytes:
+    from PIL import Image as PILImage, ImageDraw
+    image = PILImage.new(mode, size, (200, 30, 30) if mode == "RGB" else (200, 30, 30, 128) if mode == "RGBA" else 128)
+    draw = ImageDraw.Draw(image)
+    for x in range(0, size[0], 97):  # some structure, so JPEG has something to encode
+        draw.line([(x, 0), (size[0] - x, size[1])], fill=(10, 10, 200) if mode == "RGB" else (10, 10, 200, 255) if mode == "RGBA" else 20, width=5)
+    out = io.BytesIO()
+    image.save(out, fmt, **save_kwargs)
+    return out.getvalue()
+
+
+def _dimensions(data: bytes):
+    from PIL import Image as PILImage
+    return PILImage.open(io.BytesIO(data)).size
+
+
+def test_reduce_image_shrinks_and_reencodes_as_promised():
+    settings = ImageProcessing(max_size=1600, jpeg_quality=80)
+
+    big_jpeg = _make_image("JPEG", (3000, 1000), quality=95)
+    data, media_type, ext = reduce_image(big_jpeg, "image/jpeg", settings)
+    assert (media_type, ext) == ("image/jpeg", "jpg")
+    assert _dimensions(data) == (1600, 533) and len(data) < len(big_jpeg)
+
+    small_jpeg = _make_image("JPEG", (800, 600))
+    assert reduce_image(small_jpeg, "image/jpeg", settings) is None  # fits: never re-encoded (generation loss)
+
+    # a noisy picture, like a photo: flat synthetic images compress better before resizing than after
+    from PIL import Image as PILImage
+    noise = PILImage.frombytes("RGBA", (2000, 2500), random.Random(0).randbytes(2000 * 2500 * 4))
+    buffer = io.BytesIO()
+    noise.save(buffer, "PNG")
+    big_png = buffer.getvalue()
+    data, media_type, ext = reduce_image(big_png, "image/png", settings)
+    assert (media_type, ext) == ("image/png", "png")
+    assert _dimensions(data) == (1280, 1600) and len(data) < len(big_png)
+
+    small_png = _make_image("PNG", (300, 200), optimize=True)
+    assert reduce_image(small_png, "image/png", settings) is None   # already optimised and fits: untouched
+
+    webp = _make_image("WEBP", (400, 300))
+    data, media_type, ext = reduce_image(webp, "image/webp", settings)
+    assert (media_type, ext) == ("image/jpeg", "jpg") and _dimensions(data) == (400, 300)
+
+    webp_alpha = _make_image("WEBP", (400, 300), mode="RGBA")
+    data, media_type, ext = reduce_image(webp_alpha, "image/webp", settings)
+    assert (media_type, ext) == ("image/png", "png")
+
+    bmp = _make_image("BMP", (400, 300))
+    data, media_type, ext = reduce_image(bmp, "image/bmp", settings)
+    assert (media_type, ext) == ("image/jpeg", "jpg") and len(data) < len(bmp)
+
+    assert reduce_image(GIF_BYTES, "image/gif", settings) is None          # GIFs are never touched
+    assert reduce_image(b"\x89PNG\r\n\x1a\ncorrupted", "image/png", settings) is None  # undecodable: kept
+
+
+def test_reduce_image_leaves_animated_gifs_alone_even_when_asked_about_png():
+    from PIL import Image as PILImage
+    frames = [PILImage.new("P", (2000, 2000), i) for i in range(3)]
+    out = io.BytesIO()
+    frames[0].save(out, "GIF", save_all=True, append_images=frames[1:])
+    assert reduce_image(out.getvalue(), "image/gif", ImageProcessing(1600)) is None
+
+
+def test_reduce_image_applies_exif_orientation():
+    from PIL import Image as PILImage
+    image = PILImage.new("RGB", (3000, 1000), (0, 0, 0))
+    exif = PILImage.Exif()
+    exif[0x0112] = 6  # rotate 90 degrees clockwise
+    out = io.BytesIO()
+    image.save(out, "JPEG", exif=exif)
+    data, _, _ = reduce_image(out.getvalue(), "image/jpeg", ImageProcessing(1600))
+    assert _dimensions(data) == (533, 1600)
+
+
+@pytest.mark.asyncio
+async def test_max_image_size_option_reduces_images_in_the_book_and_reports_it():
+    url = "https://lparchive.org/X-COM-Terror-from-the-Deep"
+    big_jpeg = _make_image("JPEG", (3200, 2400), quality=95)
+    webp = _make_image("WEBP", (500, 400))
+    session = _FakeSession("never-matches", responses={
+        f"{url}/Update%2001/": _FakeResponse(200, b'<div id="content"><img src="huge.jpg"/><img src="pic.webp"/><img src="tiny.png"/></div>'),
+        f"{url}/Update%2001/huge.jpg": _FakeResponse(200, big_jpeg),
+        f"{url}/Update%2001/pic.webp": _FakeResponse(200, webp),
+        f"{url}/Update%2001/tiny.png": _FakeResponse(200, PNG_BYTES),  # not decodable: kept as is
+    })
+    messages = []
+    processing = ImageProcessing(max_size=1600, jpeg_quality=80)
+    with tempfile.TemporaryDirectory() as d:
+        out = f"{d}/book.epub"
+        await asyncio.wait_for(do(url, out, session, messages.append, image_processing=processing), timeout=60)
+        with zipfile.ZipFile(out) as z:
+            opf = z.read("EPUB/content.opf").decode()
+            chapter = z.read("EPUB/update_0.xhtml").decode()
+            images = {n: z.read(n) for n in z.namelist() if n.startswith("EPUB/images/")}
+    jpegs = [n for n, data in images.items() if n.endswith(".jpg")]
+    assert len(jpegs) == 2 and all(max(_dimensions(images[n])) <= 1600 for n in jpegs)
+    assert not any(n.endswith(".webp") for n in images) and "image/webp" not in opf
+    assert sum(len(d) for d in images.values()) < len(big_jpeg)
+    assert all(f'src="{n.removeprefix("EPUB/")}"' in chapter for n in jpegs)
+    assert processing.seen >= 3 and processing.changed == 2 and processing.bytes_out < processing.bytes_in
+    assert any(m.startswith("Images: 2 of ") and "MB -> " in m for m in messages)
+
+
+@pytest.mark.asyncio
+async def test_without_the_option_images_are_kept_byte_for_byte():
+    url = "https://lparchive.org/X-COM-Terror-from-the-Deep"
+    big_jpeg = _make_image("JPEG", (3200, 2400), quality=95)
+    session = _FakeSession("never-matches", responses={
+        f"{url}/Update%2001/": _FakeResponse(200, b'<div id="content"><img src="huge.jpg"/></div>'),
+        f"{url}/Update%2001/huge.jpg": _FakeResponse(200, big_jpeg),
+    })
+    messages = []
+    with tempfile.TemporaryDirectory() as d:
+        out = f"{d}/book.epub"
+        await asyncio.wait_for(do(url, out, session, messages.append), timeout=60)
+        with zipfile.ZipFile(out) as z:
+            stored = [z.read(n) for n in z.namelist() if n.endswith(".jpg")]
+    assert stored == [big_jpeg]
+    assert not any(m.startswith("Images:") for m in messages)
+
+
+def test_cli_image_flags(monkeypatch):
+    seen = {}
+
+    async def fake(url, *args, **kwargs):
+        seen.update(kwargs)
+
+    monkeypatch.setattr(cli, "lparchive2epub", fake)
+    cli.main(["--no-cache", "https://lparchive.org/Some-LP", "out.epub"])
+    assert seen["image_processing"] is None
+    cli.main(["--no-cache", "--max-image-size", "1600", "--jpeg-quality", "70", "https://lparchive.org/Some-LP", "out.epub"])
+    assert (seen["image_processing"].max_size, seen["image_processing"].jpeg_quality) == (1600, 70)
+    for bad in (["--max-image-size", "0"], ["--max-image-size", "big"], ["--jpeg-quality", "101"]):
+        with pytest.raises(SystemExit) as exit_info:
+            cli.main(["--no-cache", *bad, "https://lparchive.org/Some-LP", "out.epub"])
+        assert exit_info.value.code == 2

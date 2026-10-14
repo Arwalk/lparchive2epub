@@ -1,6 +1,7 @@
 import asyncio
 import datetime
 import functools
+import io
 import mimetypes
 import os
 import re
@@ -21,6 +22,85 @@ from lparchive2epub.style import get_style_item
 # Concurrency limit for worker queues
 CONCURRENCY_LIMIT_PAGES = 25
 CONCURRENCY_LIMIT_IMAGES = 10
+
+@dataclass
+class ImageProcessing:
+    """Opt-in image reduction (--max-image-size). Counters are updated as images go through."""
+    max_size: int                   # longest edge, in pixels
+    jpeg_quality: int = 85
+    bytes_in: int = 0
+    bytes_out: int = 0
+    changed: int = 0
+    seen: int = 0
+
+    def record(self, before: int, after: int):
+        self.seen += 1
+        self.bytes_in += before
+        self.bytes_out += after
+        if after != before:
+            self.changed += 1
+
+    def summary(self) -> str:
+        return (f"Images: {self.changed} of {self.seen} reduced, "
+                f"{self.bytes_in / 1e6:.1f} MB -> {self.bytes_out / 1e6:.1f} MB")
+
+
+# Formats the optimiser may rewrite. GIF is left alone (animations), SVG is text.
+REDUCIBLE_TYPES = {"image/jpeg", "image/png", "image/webp", "image/bmp"}
+
+
+def reduce_image(content: bytes, media_type: str, settings: ImageProcessing) -> tuple[bytes, str, str] | None:
+    """Shrink an image to at most `settings.max_size` pixels on its longest edge and re-encode it.
+
+    JPEG stays JPEG (at `jpeg_quality`), PNG stays PNG. WebP and BMP, which many readers can't show,
+    become PNG (with transparency) or JPEG (without). Returns (bytes, media type, extension), or
+    None when the image is left untouched: not a reducible format, animated, undecodable, or the
+    re-encoded version would not be smaller."""
+    if media_type not in REDUCIBLE_TYPES:
+        return None
+    from PIL import Image as PILImage, ImageOps
+
+    try:
+        image = PILImage.open(io.BytesIO(content))
+        image.load()
+    except Exception:  # noqa: BLE001 - corrupted or exotic file: keep what the site serves
+        return None
+    if getattr(image, "is_animated", False):
+        return None
+
+    image = ImageOps.exif_transpose(image)
+    width, height = image.size
+    scale = settings.max_size / max(width, height)
+    resized = scale < 1
+    if resized:
+        image = image.resize((max(1, round(width * scale)), max(1, round(height * scale))), PILImage.LANCZOS)
+
+    has_alpha = image.mode in ("RGBA", "LA") or (image.mode == "P" and "transparency" in image.info)
+    if media_type == "image/jpeg":
+        if not resized:
+            return None  # re-encoding a JPEG that already fits only loses quality
+        target = "JPEG"
+    elif media_type == "image/png":
+        target = "PNG"
+    else:  # webp, bmp: pick a format every reader understands
+        target = "PNG" if has_alpha else "JPEG"
+
+    out = io.BytesIO()
+    if target == "JPEG":
+        if image.mode not in ("RGB", "L"):
+            image = image.convert("RGB")
+        image.save(out, "JPEG", quality=settings.jpeg_quality, optimize=True)
+        new_type, extension = "image/jpeg", "jpg"
+    else:
+        if resized and image.mode == "P":
+            image = image.convert("RGBA" if has_alpha else "RGB")
+        image.save(out, "PNG", optimize=True)
+        new_type, extension = "image/png", "png"
+    data = out.getvalue()
+    if not resized and media_type == new_type and len(data) >= len(content):
+        return None  # same format, same pixels, not smaller: keep the original bytes
+    return data, new_type, extension
+
 
 def get_blake2b_hash(content: bytes) -> str:
     hasher = blake2b()
@@ -595,7 +675,8 @@ async def fetch_with_retries(session: aiohttp.ClientSession, url: str, max_retri
 
 
 
-async def _get_image(session: aiohttp.ClientSession, img: Image, registry: dict = None) -> IndexedEpubImage:
+async def _get_image(session: aiohttp.ClientSession, img: Image, registry: dict = None,
+                     processing: ImageProcessing | None = None) -> IndexedEpubImage:
     # Get the image URL from either src (for img tags) or href (for a tags)
     img_url = img.url
     if img_url is None:
@@ -610,14 +691,13 @@ async def _get_image(session: aiohttp.ClientSession, img: Image, registry: dict 
     else:
         future = None
 
-    def build(fetched: Fetched) -> IndexedEpubImage:
+    def build(fetched: Fetched, reduced: tuple[bytes, str, str] | None) -> IndexedEpubImage:
         content = fetched.body
-        detected = detect_image_type(content, img_url, fetched.content_type)
-        if detected is None:
-            declared = (fetched.content_type or "unknown type").split(";")[0].strip()
-            raise NonRetryableError(f"Not an image: the server answered with {declared} ({len(content)} bytes)",
-                                    img_url)
-        media_type, extension = detected
+        media_type, extension = _detect_or_fail(fetched, img_url)
+        if reduced is not None:
+            content, media_type, extension = reduced
+        if processing is not None:
+            processing.record(len(fetched.body), len(content))
         img_hash = get_blake2b_hash(content)
         new_name = f"images/{img_hash}.{extension}"
         return IndexedEpubImage(
@@ -634,7 +714,13 @@ async def _get_image(session: aiohttp.ClientSession, img: Image, registry: dict 
         )
 
     try:
-        res = build(await fetch_with_retries(session, img_url))
+        fetched = await fetch_with_retries(session, img_url)
+        reduced = None
+        if processing is not None:
+            media_type, _ = _detect_or_fail(fetched, img_url)
+            # CPU-bound (decode, resize, encode): off the event loop so downloads keep flowing
+            reduced = await asyncio.to_thread(reduce_image, fetched.body, media_type, processing)
+        res = build(fetched, reduced)
         if future:
             future.set_result(res)
         return res
@@ -645,6 +731,15 @@ async def _get_image(session: aiohttp.ClientSession, img: Image, registry: dict 
             future.exception()
             del registry[img_url]
         raise
+
+def _detect_or_fail(fetched: Fetched, img_url: str) -> tuple[str, str]:
+    detected = detect_image_type(fetched.body, img_url, fetched.content_type)
+    if detected is None:
+        declared = (fetched.content_type or "unknown type").split(";")[0].strip()
+        raise NonRetryableError(f"Not an image: the server answered with {declared} ({len(fetched.body)} bytes)",
+                                img_url)
+    return detected
+
 
 def _describe(e: Exception) -> str:
     """Fetch errors are self-explanatory; anything else is unexpected, so say what kind of error it was."""
@@ -657,12 +752,13 @@ def _skipped(img: Image, e: Exception) -> SkippedResource:
     return SkippedResource(page=img.root_url, url=img.src, reason=_describe(e))
 
 
-async def build_intro(session: aiohttp.ClientSession, url_root: str, intro: Intro, registry: dict = None, failures: list[SkippedResource] = None) -> Page:
+async def build_intro(session: aiohttp.ClientSession, url_root: str, intro: Intro, registry: dict = None,
+                      failures: list[SkippedResource] = None, processing: ImageProcessing | None = None) -> Page:
     intro_chapter = epub.EpubHtml(title="Introduction", file_name=INTRO_FILE_NAME, lang=intro.language)
     intro_chapter.add_item(get_style_item())
     tasks = []
     for image in intro.images:
-        task = asyncio.ensure_future(_get_image(session, image, registry))
+        task = asyncio.ensure_future(_get_image(session, image, registry, processing))
         tasks.append(task)
 
     results = await asyncio.gather(*tasks, return_exceptions=True)
@@ -701,12 +797,13 @@ def batch(iterable, n=1):
     for ndx in range(0, l, n):
         yield iterable[ndx:min(ndx + n, l)]
 
-async def build_update(session: aiohttp.ClientSession, chapter: Chapters, data: Update, intro: Intro, registry: dict = None, failures: list[SkippedResource] = None) -> Page:
+async def build_update(session: aiohttp.ClientSession, chapter: Chapters, data: Update, intro: Intro, registry: dict = None,
+                       failures: list[SkippedResource] = None, processing: ImageProcessing | None = None) -> Page:
     update_chapter = epub.EpubHtml(title=str(chapter.txt), file_name=chapter.new_href,
                                    lang=intro.language)  # TODO: fix language
     update_chapter.add_item(get_style_item())
 
-    img_builder = functools.partial(_get_image, session, registry=registry)
+    img_builder = functools.partial(_get_image, session, registry=registry, processing=processing)
 
     # Queue-based worker pool to cap concurrency
     q: asyncio.Queue = asyncio.Queue()
@@ -772,11 +869,13 @@ def add_page(known_images: set, book: EpubBook, toc: List, spine: List, page: Pa
     spine.append(page.chapter)
 
 
-async def build_single_page(session: aiohttp.ClientSession, intro: Intro, chapter: Chapters, all_chapters: List[Chapters], pbar, registry: dict = None, failures: list[SkippedResource] = None) -> Page:
+async def build_single_page(session: aiohttp.ClientSession, intro: Intro, chapter: Chapters, all_chapters: List[Chapters], pbar,
+                            registry: dict = None, failures: list[SkippedResource] = None,
+                            processing: ImageProcessing | None = None) -> Page:
     fetched = await fetch_with_retries(session, chapter.original_href)
     chapter_bs = get_cleaned_html(fetched.text())
     update = Extractor.get_update(all_chapters, chapter_bs, chapter)
-    page = await build_update(session, chapter, update, intro, registry, failures)
+    page = await build_update(session, chapter, update, intro, registry, failures, processing)
     pbar.update(1)
     return page
 
@@ -804,7 +903,8 @@ def build_placeholder_page(chapter: Chapters, intro: Intro, error: Exception) ->
 
 
 async def lparchive2epub(url: str, file: str, root_session: aiohttp.ClientSession | None = None, writer=tqdm.write,
-                         strict: bool = False, allow_missing_updates: bool = False):
+                         strict: bool = False, allow_missing_updates: bool = False,
+                         image_processing: ImageProcessing | None = None):
     try:
         url = normalize_lp_url(url)
     except ValueError as e:
@@ -812,7 +912,7 @@ async def lparchive2epub(url: str, file: str, root_session: aiohttp.ClientSessio
     if root_session is None:
         root_session = aiohttp.ClientSession()
     async with root_session as session:
-        await do(url, file, session, writer, strict, allow_missing_updates)
+        await do(url, file, session, writer, strict, allow_missing_updates, image_processing)
 
 
 tags_to_clean = [
@@ -927,7 +1027,7 @@ def format_failures_report(url: str, failures: list[SkippedResource], outcome: s
 
 
 async def do(url: str, file: str, session: aiohttp.ClientSession, writer, strict: bool = False,
-             allow_missing_updates: bool = False):
+             allow_missing_updates: bool = False, image_processing: ImageProcessing | None = None):
     check_output_path(file)
     writer(f"extracting lp from {url}")
     writer("getting landing page")
@@ -948,7 +1048,7 @@ async def do(url: str, file: str, session: aiohttp.ClientSession, writer, strict
     image_registry = {}
     failures: list[SkippedResource] = []
     missing_updates: list[tuple[int, Chapters, Exception]] = []
-    epub_intro = await build_intro(session, url, intro, image_registry, failures)
+    epub_intro = await build_intro(session, url, intro, image_registry, failures, image_processing)
 
     known_images: set[str] = set()
 
@@ -971,7 +1071,8 @@ async def do(url: str, file: str, session: aiohttp.ClientSession, writer, strict
                 except asyncio.CancelledError:
                     break
                 try:
-                    page = await build_single_page(session, intro, chapter, intro.chapters, pbar, image_registry, failures)
+                    page = await build_single_page(session, intro, chapter, intro.chapters, pbar, image_registry,
+                                                   failures, image_processing)
                 except asyncio.CancelledError:
                     raise  # task_done() runs in the finally clause below
                 except Exception as e:
@@ -1046,6 +1147,8 @@ async def do(url: str, file: str, session: aiohttp.ClientSession, writer, strict
 
     mtime = datetime.datetime.strptime(intro.published_on, "%b %d, %Y")
 
+    if image_processing is not None:
+        writer(image_processing.summary())
     writer("Writing book file")
     write_book(file, book, mtime)
 
