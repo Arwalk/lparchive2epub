@@ -40,6 +40,10 @@ To have it installed in its own separate environment, you can use https://github
 
 A standalone executable is available for releases on windows. See the releases page.
 
+## Building standalone
+
+`uv run --with pyinstaller pyinstaller --onefile --name lparchive2epub lparchive2epub/main.py`
+
 ## Known limitations
 
 - ~~Similar images present in multiple pages in the let's play are duplicated, bloating the file. Though recurring images are usually smileys, so not too big.~~ Now handled!
