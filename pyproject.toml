@@ -1,6 +1,6 @@
 [project]
 name = "lparchive2epub"
-version = "1.4.2"
+version = "1.5.0"
 description = ""
 authors = [{ name = "Arwalk", email = "siragentprovocateurarwalk@gmail.com" }]
 requires-python = ">=3.12,<4"

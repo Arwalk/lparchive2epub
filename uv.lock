@@ -557,7 +557,7 @@ wheels = [
 
 [[package]]
 name = "lparchive2epub"
-version = "1.4.2"
+version = "1.5.0"
 source = { editable = "." }
 dependencies = [
     { name = "aiohttp" },
