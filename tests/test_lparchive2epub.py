@@ -5,7 +5,7 @@ import zipfile
 from urllib.parse import unquote
 
 import aiohttp
-from lparchive2epub.lib import Extractor, Chapters, lparchive2epub, BeautifulSoup, normalize_url, build_update, Update, Intro, format_failures_report, ISSUES_URL, do, StrictModeError, MissingUpdatesError, ExtractionError
+from lparchive2epub.lib import Extractor, Chapters, lparchive2epub, BeautifulSoup, normalize_url, build_update, Update, Intro, format_failures_report, ISSUES_URL, do, StrictModeError, MissingUpdatesError, ExtractionError, OutputError, check_output_path
 from importlib.resources import files
 import tests.resources as resources
 import pytest
@@ -584,3 +584,54 @@ async def test_intro_toc_links_point_at_existing_chapter_files():
     toc_links = re.findall(r'href="(update_[^"]+)"', intro)
     assert len(toc_links) == 18
     assert all(f"EPUB/{h}" in files for h in toc_links), toc_links
+
+
+@pytest.mark.asyncio
+async def test_missing_output_directory_fails_before_any_download():
+    url = "https://lparchive.org/X-COM-Terror-from-the-Deep"
+    session = _FakeSession(failing_slug="never-matches")
+    with tempfile.TemporaryDirectory() as d:
+        out = f"{d}/does-not-exist/book.epub"
+        with pytest.raises(OutputError) as exc_info:
+            await do(url, out, session, lambda *_: None)
+        assert not os.path.exists(out)
+    assert session.requested == []
+    assert isinstance(exc_info.value, ExtractionError)
+    assert out in str(exc_info.value)
+    assert "does not exist" in str(exc_info.value)
+
+
+def test_check_output_path_rejects_directory_and_unwritable_locations():
+    with tempfile.TemporaryDirectory() as d:
+        with pytest.raises(OutputError, match="is a directory"):
+            check_output_path(d)
+        check_output_path(f"{d}/fine.epub")  # does not raise
+        existing = f"{d}/existing.epub"
+        open(existing, "wb").close()
+        check_output_path(existing)  # overwriting an existing writable file is fine
+        if os.name != "nt" and os.geteuid() != 0:
+            os.chmod(d, 0o500)
+            try:
+                with pytest.raises(OutputError, match="not writable"):
+                    check_output_path(f"{d}/nope.epub")
+            finally:
+                os.chmod(d, 0o700)
+
+
+@pytest.mark.asyncio
+async def test_write_failure_is_reported_and_leaves_no_partial_file(monkeypatch):
+    url = "https://lparchive.org/X-COM-Terror-from-the-Deep"
+    session = _FakeSession(failing_slug="never-matches")
+    import lparchive2epub.lib as lib
+
+    def exploding_write(name, book, options=None):
+        with open(name, "wb") as f:
+            f.write(b"half a zip")
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(lib.epub, "write_epub", exploding_write)
+    with tempfile.TemporaryDirectory() as d:
+        out = f"{d}/book.epub"
+        with pytest.raises(OutputError, match="No space left on device"):
+            await do(url, out, session, lambda *_: None)
+        assert os.listdir(d) == []

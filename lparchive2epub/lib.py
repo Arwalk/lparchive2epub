@@ -322,6 +322,37 @@ class MissingUpdatesError(ExtractionError):
     """One or more updates (chapters) could not be retrieved."""
 
 
+class OutputError(ExtractionError):
+    """The output file can't be written."""
+
+
+def check_output_path(file: str):
+    """Fail early, before any download, if the book can't possibly be written at `file`."""
+    directory = os.path.dirname(os.path.abspath(file))
+    if os.path.isdir(file):
+        raise OutputError(f"Cannot write the book to {file}: it is a directory.")
+    if not os.path.isdir(directory):
+        raise OutputError(f"Cannot write the book to {file}: the directory {directory} does not exist.")
+    if not os.access(directory, os.W_OK):
+        raise OutputError(f"Cannot write the book to {file}: the directory {directory} is not writable.")
+    if os.path.exists(file) and not os.access(file, os.W_OK):
+        raise OutputError(f"Cannot write the book to {file}: the file exists and is not writable.")
+
+
+def write_book(file: str, book: EpubBook, mtime: datetime.datetime):
+    """Write the book through a temporary file, so a failure never leaves a truncated epub behind."""
+    partial = file + ".part"
+    try:
+        epub.write_epub(partial, book, options={"mtime": mtime, "raise_exceptions": True})
+        os.replace(partial, file)
+    except OSError as e:
+        try:
+            os.remove(partial)
+        except OSError:
+            pass
+        raise OutputError(f"Cannot write the book to {file}: {e.strerror or e}") from e
+
+
 ISSUES_URL = "https://github.com/Arwalk/lparchive2epub/issues/new"
 
 # Client errors that may succeed later: request timeout, too many requests
@@ -590,6 +621,7 @@ def format_failures_report(url: str, failures: list[SkippedResource], outcome: s
 
 async def do(url: str, file: str, session: aiohttp.ClientSession, writer, strict: bool = False,
              allow_missing_updates: bool = False):
+    check_output_path(file)
     writer(f"extracting lp from {url}")
     writer("getting landing page")
     page_text = await get_resource_with_retries(session, url)
@@ -699,7 +731,7 @@ async def do(url: str, file: str, session: aiohttp.ClientSession, writer, strict
     mtime = datetime.datetime.strptime(intro.published_on, "%b %d, %Y")
 
     writer("Writing book file")
-    epub.write_epub(file, book, options = {"mtime": mtime})
+    write_book(file, book, mtime)
 
     if failures:
         writer(format_failures_report(
