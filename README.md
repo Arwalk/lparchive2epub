@@ -48,6 +48,18 @@ A standalone executable is available for releases on windows. See the releases p
 
 `uv run --with pyinstaller pyinstaller --onefile --name lparchive2epub lparchive2epub/main.py`
 
+## Exit codes
+
+| code | meaning |
+|---|---|
+| 0 | the book was written (skipped images, if any, are listed in a report) |
+| 1 | the book was not written: `--strict` failure, missing update(s), or an unexpected error |
+| 2 | invalid command line |
+| 3 | the Let's Play was not found on lparchive.org (HTTP 404) |
+| 4 | lparchive.org could not be reached or kept failing |
+| 5 | the output file could not be written |
+| 130 | interrupted with Ctrl-C |
+
 ## Known limitations
 
 - ~~Similar images present in multiple pages in the let's play are duplicated, bloating the file. Though recurring images are usually smileys, so not too big.~~ Now handled!

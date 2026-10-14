@@ -1,11 +1,12 @@
 import asyncio
 import sys
+import traceback
 from argparse import ArgumentParser, ArgumentTypeError
 from urllib.parse import urlparse
 
 from aiohttp_client_cache import CacheBackend, CachedSession
 
-from lparchive2epub.lib import lparchive2epub, ExtractionError
+from lparchive2epub.lib import lparchive2epub, ExtractionError, ISSUES_URL, EXIT_FAILURE, EXIT_INTERRUPTED
 
 
 def is_lparchive_url(arg):
@@ -39,13 +40,22 @@ async def amain(args):
     await lparchive2epub(args.url[0], args.output[0], cache, strict=args.strict,
                          allow_missing_updates=args.allow_missing_updates)
 
-def main():
-    args = arg_parser.parse_args()
+def main(argv=None):
+    args = arg_parser.parse_args(argv)
     try:
         asyncio.run(amain(args))
     except ExtractionError as e:
         print(e, file=sys.stderr)
-        sys.exit(1)
+        sys.exit(e.exit_code)
+    except KeyboardInterrupt:
+        print("\nInterrupted. No book was written.", file=sys.stderr)
+        sys.exit(EXIT_INTERRUPTED)
+    except Exception as e:  # noqa: BLE001 - last resort: never leave the user with a bare traceback
+        print(f"lparchive2epub failed with an unexpected error: {type(e).__name__}: {e}", file=sys.stderr)
+        print(f"This is a bug. Please open an issue at {ISSUES_URL} with the URL you used and the details below.",
+              file=sys.stderr)
+        traceback.print_exc()
+        sys.exit(EXIT_FAILURE)
 
 
 if __name__ == '__main__':

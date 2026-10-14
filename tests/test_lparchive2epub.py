@@ -5,7 +5,9 @@ import zipfile
 from urllib.parse import unquote
 
 import aiohttp
-from lparchive2epub.lib import Extractor, Chapters, lparchive2epub, BeautifulSoup, normalize_url, build_update, Update, Intro, format_failures_report, ISSUES_URL, do, StrictModeError, MissingUpdatesError, ExtractionError, OutputError, check_output_path, detect_image_type
+from lparchive2epub.lib import Extractor, Chapters, lparchive2epub, BeautifulSoup, normalize_url, build_update, Update, Intro, format_failures_report, ISSUES_URL, do, StrictModeError, MissingUpdatesError, ExtractionError, OutputError, check_output_path, detect_image_type, NotFoundError, NetworkError, RetriesExhaustedError, EXIT_NOT_FOUND, EXIT_NETWORK, EXIT_OUTPUT, EXIT_INTERRUPTED
+import lparchive2epub.lib as lib
+from lparchive2epub import main as cli
 from importlib.resources import files
 import tests.resources as resources
 import pytest
@@ -705,3 +707,79 @@ async def test_image_media_type_comes_from_content_and_non_images_are_skipped():
     assert not any("html" in n for n in image_files)
     report = "\n".join(messages)
     assert dead_host_url in report and "Not an image" in report and "text/html" in report
+
+
+@pytest.mark.asyncio
+async def test_landing_page_404_is_a_not_found_error():
+    url = "https://lparchive.org/This-LP-Does-Not-Exist"
+    session = _FakeSession("never-matches", responses={url: _FakeResponse(404, b"nope")})
+    with tempfile.TemporaryDirectory() as d:
+        with pytest.raises(NotFoundError) as exc_info:
+            await do(url, f"{d}/book.epub", session, lambda *_: None)
+    msg = str(exc_info.value)
+    assert exc_info.value.exit_code == EXIT_NOT_FOUND
+    assert url in msg and "404" in msg and "Check the URL" in msg
+    assert "Traceback" not in msg
+
+
+class _UnreachableSession(_FakeSession):
+    def get(self, url, **kwargs):
+        self.requested.append(url)
+        raise aiohttp.ClientConnectionError("Cannot connect to host lparchive.org:443 [Name or service not known]")
+
+
+@pytest.mark.asyncio
+async def test_unreachable_landing_page_is_a_network_error(monkeypatch):
+    monkeypatch.setattr(lib, "RETRY_BACKOFF_BASE", 0)
+    url = "https://lparchive.org/X-COM-Terror-from-the-Deep"
+    session = _UnreachableSession("never-matches")
+    with tempfile.TemporaryDirectory() as d:
+        with pytest.raises(NetworkError) as exc_info:
+            await asyncio.wait_for(do(url, f"{d}/book.epub", session, lambda *_: None), timeout=10)
+    assert exc_info.value.exit_code == EXIT_NETWORK
+    assert "Could not reach" in str(exc_info.value) and url in str(exc_info.value)
+    assert "Name or service not known" in str(exc_info.value)
+    assert len(session.requested) == 5  # all retries were used
+    assert isinstance(exc_info.value.__cause__, RetriesExhaustedError)
+
+
+@pytest.mark.asyncio
+async def test_server_error_on_landing_page_is_a_network_error(monkeypatch):
+    monkeypatch.setattr(lib, "RETRY_BACKOFF_BASE", 0)
+    url = "https://lparchive.org/X-COM-Terror-from-the-Deep"
+    session = _FakeSession("never-matches", responses={url: _FakeResponse(503, b"down")})
+    with tempfile.TemporaryDirectory() as d:
+        with pytest.raises(NetworkError, match="HTTP 503"):
+            await asyncio.wait_for(do(url, f"{d}/book.epub", session, lambda *_: None), timeout=10)
+
+
+def _run_cli_with(monkeypatch, capsys, exc):
+    async def fake(*args, **kwargs):
+        raise exc
+    monkeypatch.setattr(cli, "lparchive2epub", fake)
+    with pytest.raises(SystemExit) as exit_info:
+        cli.main(["--no-cache", "https://lparchive.org/Some-LP", "out.epub"])
+    return exit_info.value.code, capsys.readouterr().err
+
+
+@pytest.mark.parametrize(("exc", "code", "text"), [
+    (NotFoundError("Not found: nope"), EXIT_NOT_FOUND, "Not found: nope"),
+    (NetworkError("Could not reach"), EXIT_NETWORK, "Could not reach"),
+    (OutputError("Cannot write"), EXIT_OUTPUT, "Cannot write"),
+    (StrictModeError("strict report"), 1, "strict report"),
+    (MissingUpdatesError("missing report"), 1, "missing report"),
+    (KeyboardInterrupt(), EXIT_INTERRUPTED, "Interrupted. No book was written."),
+])
+def test_cli_exit_codes_and_messages(monkeypatch, capsys, exc, code, text):
+    exit_code, err = _run_cli_with(monkeypatch, capsys, exc)
+    assert exit_code == code
+    assert text in err
+    assert "Traceback" not in err
+
+
+def test_cli_unexpected_error_asks_for_a_bug_report(monkeypatch, capsys):
+    exit_code, err = _run_cli_with(monkeypatch, capsys, AttributeError("'NoneType' object has no attribute 'find'"))
+    assert exit_code == 1
+    assert "unexpected error: AttributeError" in err
+    assert ISSUES_URL in err
+    assert "Traceback" in err  # kept on purpose: it is what the bug report needs

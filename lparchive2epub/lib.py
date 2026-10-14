@@ -343,8 +343,21 @@ CURL_HEADERS = {
     "accept": "*/*"
 }
 
-class NonRetryableError(RuntimeError):
+class FetchError(RuntimeError):
+    """A resource could not be retrieved. `url` and, when known, the HTTP `status` are kept for reporting."""
+
+    def __init__(self, message: str, url: str = "", status: int | None = None):
+        super().__init__(message)
+        self.url = url
+        self.status = status
+
+
+class NonRetryableError(FetchError):
     """A failure that will not go away by trying again (malformed URL, 404...)."""
+
+
+class RetriesExhaustedError(FetchError):
+    """The resource was still unavailable after all retries (network trouble, 5xx...)."""
 
 
 @dataclass
@@ -354,8 +367,18 @@ class SkippedResource:
     reason: str
 
 
+# Exit codes of the command line tool. argparse uses 2 for usage errors.
+EXIT_FAILURE = 1
+EXIT_USAGE = 2
+EXIT_NOT_FOUND = 3
+EXIT_NETWORK = 4
+EXIT_OUTPUT = 5
+EXIT_INTERRUPTED = 130
+
+
 class ExtractionError(RuntimeError):
     """The book could not be built; the message is a full report meant to be shown to the user."""
+    exit_code = EXIT_FAILURE
 
 
 class StrictModeError(ExtractionError):
@@ -368,6 +391,31 @@ class MissingUpdatesError(ExtractionError):
 
 class OutputError(ExtractionError):
     """The output file can't be written."""
+    exit_code = EXIT_OUTPUT
+
+
+class NotFoundError(ExtractionError):
+    """The Let's Play landing page does not exist on lparchive.org."""
+    exit_code = EXIT_NOT_FOUND
+
+
+class NetworkError(ExtractionError):
+    """lparchive.org could not be reached or kept failing."""
+    exit_code = EXIT_NETWORK
+
+
+def landing_page_error(url: str, e: Exception) -> ExtractionError:
+    """Turn a failure to fetch the landing page into a message a user can act on."""
+    status = getattr(e, "status", None)
+    if status == 404:
+        return NotFoundError(
+            f"Not found: {url} answered HTTP 404.\n"
+            "Check the URL: a Let's Play address looks like https://lparchive.org/Name-Of-The-Lets-Play")
+    if status is not None:
+        return NetworkError(f"lparchive.org answered HTTP {status} for {url}. Try again later.")
+    cause = getattr(e, "__cause__", None) or e
+    detail = str(cause) or type(cause).__name__
+    return NetworkError(f"Could not reach {url}: {detail}\nCheck your network connection and try again.")
 
 
 def check_output_path(file: str):
@@ -401,6 +449,8 @@ ISSUES_URL = "https://github.com/Arwalk/lparchive2epub/issues/new"
 
 # Client errors that may succeed later: request timeout, too many requests
 RETRYABLE_CLIENT_STATUSES = {408, 429}
+# Exponential backoff between retries: base * 2^attempt seconds (2s, 4s, 8s, 16s). Tests set it to 0.
+RETRY_BACKOFF_BASE = 1.0
 
 
 async def get_resource_with_retries(session: aiohttp.ClientSession, url, action=_default_get, max_retries=5):
@@ -411,22 +461,21 @@ async def get_resource_with_retries(session: aiohttp.ClientSession, url, action=
         try:
             async with session.get(url, headers=CURL_HEADERS) as r:
                 if 400 <= r.status < 500 and r.status not in RETRYABLE_CLIENT_STATUSES:
-                    raise NonRetryableError(f"Failed to get resource {url}, status code: {r.status}")
+                    raise NonRetryableError(f"Failed to get resource {url}, status code: {r.status}", url, r.status)
                 if r.status != 200:
-                    raise RuntimeError(f"Failed to get resource {url}, status code: {r.status}")
+                    raise FetchError(f"Failed to get resource {url}, status code: {r.status}", url, r.status)
                 return await action(r)
         except NonRetryableError:
             raise
         except aiohttp.InvalidURL as e:
-            raise NonRetryableError(f"Invalid URL {url}: {e}") from e
+            raise NonRetryableError(f"Invalid URL {url}: {e}", url) from e
         except Exception as e:
             last_exception = e
             retry_count += 1
             if retry_count < max_retries:
-                # Exponential backoff: 2^retry_count * 1s (2s, 4s, 8s, 16s)
-                wait_time = (2 ** retry_count) * 1
-                await asyncio.sleep(wait_time)
-    raise RuntimeError(f"Failed to get resource {url} after {max_retries} retries: {last_exception}")
+                await asyncio.sleep(RETRY_BACKOFF_BASE * (2 ** retry_count))
+    raise RetriesExhaustedError(f"Failed to get resource {url} after {max_retries} retries: {last_exception}",
+                                url, getattr(last_exception, "status", None)) from last_exception
 
 
 
@@ -673,7 +722,10 @@ async def do(url: str, file: str, session: aiohttp.ClientSession, writer, strict
     check_output_path(file)
     writer(f"extracting lp from {url}")
     writer("getting landing page")
-    page_text = await get_resource_with_retries(session, url)
+    try:
+        page_text = await get_resource_with_retries(session, url)
+    except (FetchError, aiohttp.ClientError, OSError) as e:
+        raise landing_page_error(url, e) from e
 
     landing = get_cleaned_html(page_text)
 
@@ -714,8 +766,7 @@ async def do(url: str, file: str, session: aiohttp.ClientSession, writer, strict
                 try:
                     page = await build_single_page(session, intro, chapter, intro.chapters, pbar, image_registry, failures)
                 except asyncio.CancelledError:
-                    q.task_done()
-                    raise
+                    raise  # task_done() runs in the finally clause below
                 except Exception as e:
                     # A chapter that can't be retrieved must not silently vanish from the book: remember it
                     # so the run fails with a full report (or, on request, gets a placeholder page).
