@@ -90,6 +90,8 @@ LP_SPECIFIC_NAMES = {
 }
 
 FIND_FILES = re.compile(r"([.])[^/.]+$")
+# "update_3.xhtml/" or "update_3.xhtml/#anchor" -> the slash must go
+TRAILING_SLASH_AFTER_PAGE = re.compile(r"\.xhtml/(?=#|$)")
 FIND_ANCHOR_LINKS = re.compile(r"(#)[^/.]+$")
 
 # Typos in the scheme part of a URL found in some LPs: "hhttp://", "htttp://", "http:/", "http//"...
@@ -129,10 +131,13 @@ class Extractor:
             links = content.find_all("a", href=re.compile(c.original_href_slug))
             to_update = (x for x in links if not FIND_FILES.search(x.get("href")))
             for link_to_update in to_update:
-                link_to_update["href"] = link_to_update["href"].replace(c.original_href_slug, c.new_href + "/")
+                # The slug ends with "/" (e.g. "Update%2001/"); the file name inside the book must not.
+                href = link_to_update["href"].replace(c.original_href_slug, c.new_href)
+                link_to_update["href"] = TRAILING_SLASH_AFTER_PAGE.sub(".xhtml", href)
             asset_links = (x for x in links if FIND_FILES.search(x.get("href")))
             for link_to_asset in asset_links:
-                link_to_asset["href"] = link_to_asset["href"].replace(c.original_href_slug, c.original_href + "/")
+                # original_href already ends with "/"
+                link_to_asset["href"] = link_to_asset["href"].replace(c.original_href_slug, c.original_href)
 
     @staticmethod
     def get_known_update_names(url: str) -> List[str]:

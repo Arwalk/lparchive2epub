@@ -537,3 +537,50 @@ async def test_unretrievable_chapter_fails_in_strict_mode_even_when_allowed():
                                    timeout=30)
         assert not os.path.exists(out)
     assert f"{url}/Update%2005/" in str(exc_info.value)
+
+
+def test_fix_links_rewrites_chapter_links_without_trailing_slash():
+    root = "https://lparchive.org/Some-LP"
+    chapters = [
+        Chapters(num=0, original_href=f"{root}/Update%2001/", txt="Update 1", new_href="update_0.xhtml",
+                 original_href_slug="Update%2001/"),
+        Chapters(num=1, original_href=f"{root}/Update%2002/", txt="Update 2", new_href="update_1.xhtml",
+                 original_href_slug="Update%2002/"),
+    ]
+    html = ('<div id="content">'
+            '<a href="Update%2001/">plain</a>'
+            '<a href="Update%2001/#part2">anchor</a>'
+            '<a href="../Update%2002/">from an update page</a>'
+            '<a href="Update%2002/map.png">asset in a chapter</a>'
+            '<a href="manual.pdf">local asset</a>'
+            '<a href="http://example.com/Update%2001/">unrelated host, left alone</a>'
+            '</div>')
+    content = BeautifulSoup(html, "html.parser").find("div", id="content")
+
+    Extractor.fix_links(content, chapters, f"{root}/Update%2003/")
+
+    hrefs = [a["href"] for a in content.find_all("a")]
+    assert hrefs == [
+        "update_0.xhtml",
+        "update_0.xhtml#part2",
+        "update_1.xhtml",
+        f"{root}/Update%2002/map.png",
+        f"{root}/Update%2003/manual.pdf",
+        "http://example.com/update_0.xhtml",
+    ]
+    assert not any(h.endswith("/") or ".xhtml/" in h for h in hrefs)
+
+
+@pytest.mark.asyncio
+async def test_intro_toc_links_point_at_existing_chapter_files():
+    url = "https://lparchive.org/X-COM-Terror-from-the-Deep"
+    session = _FakeSession(failing_slug="never-matches")
+    with tempfile.TemporaryDirectory() as d:
+        out = f"{d}/book.epub"
+        await asyncio.wait_for(do(url, out, session, lambda *_: None), timeout=30)
+        with zipfile.ZipFile(out) as z:
+            files = set(z.namelist())
+            intro = z.read("EPUB/introduction.xhtml").decode()
+    toc_links = re.findall(r'href="(update_[^"]+)"', intro)
+    assert len(toc_links) == 18
+    assert all(f"EPUB/{h}" in files for h in toc_links), toc_links
