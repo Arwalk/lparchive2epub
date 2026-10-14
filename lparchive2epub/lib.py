@@ -5,7 +5,7 @@ import mimetypes
 import os
 import re
 import zipfile
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from hashlib import blake2b
 from typing import List, Tuple
 from urllib.parse import urlparse, urljoin, urldefrag, unquote
@@ -76,7 +76,45 @@ class Intro:
     intro: BeautifulSoup
     images: List[Image]
     chapters: List[Chapters]
-    published_on: str
+    published_on: str                       # "Added to the archive on ..." as written on the page
+    began: str | None = None                # "Began on ..."
+    ended: str | None = None                # "Ended on ..."
+    parts: int | None = None                # "This LP has N parts."
+    tags: List[str] = field(default_factory=list)
+    thread_title: str | None = None         # the original forum thread
+    thread_url: str | None = None
+
+
+LP_DATE_FORMAT = "%b %d, %Y"  # how lparchive writes dates: "Oct 26, 2009"
+PUBLISHER = "The Let's Play Archive"
+STATISTICS = {
+    "began": re.compile(r"^Began on (.+)$"),
+    "ended": re.compile(r"^Ended on (.+)$"),
+    "parts": re.compile(r"^This LP has (\d+) parts?\.?$"),
+}
+
+
+def parse_lp_date(text: str | None) -> datetime.datetime | None:
+    try:
+        return datetime.datetime.strptime(text.strip(), LP_DATE_FORMAT) if text else None
+    except ValueError:
+        return None
+
+
+def compose_description(intro: Intro, url: str) -> str:
+    """A synopsis for the reader's library, built from what the landing page states about the LP."""
+    parts = [f"Let's Play of {intro.title} by {intro.author}."]
+    if intro.parts and intro.began and intro.ended:
+        when = f"between {intro.began} and {intro.ended}" if intro.began != intro.ended else f"on {intro.began}"
+        parts.append(f"{intro.parts} updates posted {when}.")
+    elif intro.parts:
+        parts.append(f"{intro.parts} updates.")
+    elif intro.began and intro.ended:
+        parts.append(f"Posted between {intro.began} and {intro.ended}.")
+    parts.append(f"Archived by {PUBLISHER} at {url} on {intro.published_on}.")
+    if intro.thread_url:
+        parts.append(f"Original thread: {intro.thread_url}")
+    return " ".join(parts)
 
 
 @dataclass
@@ -220,8 +258,26 @@ class Extractor:
 
         published_on = archival.find("strong").text
 
+        statistics = {}
+        stats_list = p.find("ul", id="statistics")
+        for item in stats_list.find_all("li") if stats_list else []:
+            text = " ".join(item.get_text(" ").split())
+            for key, pattern in STATISTICS.items():
+                if m := pattern.match(text):
+                    statistics[key] = m.group(1)
+        tag_list = p.find("li", id="taglist")
+        tags = [a.get_text(strip=True) for a in tag_list.find_all("a")] if tag_list else []
+        thread = p.find("p", id="thread")
+        thread_link = thread.find("a", href=True) if thread else None
+
         return Intro(
-            title=title, language=language, author=author, intro=content, images=images, chapters=chapters, published_on=published_on
+            title=title, language=language, author=author, intro=content, images=images, chapters=chapters,
+            published_on=published_on,
+            began=statistics.get("began"), ended=statistics.get("ended"),
+            parts=int(statistics["parts"]) if "parts" in statistics else None,
+            tags=[t for t in tags if t],
+            thread_title=thread_link.get_text(" ", strip=True) if thread_link else None,
+            thread_url=thread_link["href"].strip() if thread_link else None,
         )
 
     @staticmethod
@@ -975,6 +1031,16 @@ async def do(url: str, file: str, session: aiohttp.ClientSession, writer, strict
     book.set_title(intro.title)
     book.set_language(intro.language)
     book.add_metadata("DC", "source", url)
+    book.add_metadata("DC", "publisher", PUBLISHER)
+    book.add_metadata("DC", "description", compose_description(intro, url))
+    # Publication date: when the LP was finished, else when it started, else when it was archived
+    published = parse_lp_date(intro.ended) or parse_lp_date(intro.began) or parse_lp_date(intro.published_on)
+    if published:
+        book.add_metadata("DC", "date", published.strftime("%Y-%m-%d"))
+    for subject in ["Let's Play", *intro.tags]:
+        book.add_metadata("DC", "subject", subject)
+    if intro.thread_url:
+        book.add_metadata("DC", "relation", intro.thread_url)
     # Stable across runs: Python's hash() must not be used here, it is randomised per process.
     book.set_identifier(f"lparchive2epub-{get_blake2b_hash(intro.title.encode("utf-8"))}-{get_blake2b_hash(intro.author.encode("utf-8"))}-{get_blake2b_hash(url.encode("utf-8"))}")
 

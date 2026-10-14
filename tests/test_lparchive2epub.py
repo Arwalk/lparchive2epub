@@ -1,4 +1,5 @@
 import asyncio
+import datetime
 import hashlib
 import io
 import os
@@ -8,7 +9,7 @@ import zipfile
 from urllib.parse import unquote
 
 import aiohttp
-from lparchive2epub.lib import Extractor, Chapters, lparchive2epub, BeautifulSoup, normalize_url, build_update, Update, Intro, format_failures_report, ISSUES_URL, do, StrictModeError, MissingUpdatesError, ExtractionError, OutputError, check_output_path, detect_image_type, NotFoundError, NetworkError, RetriesExhaustedError, NotALetsPlayError, normalize_lp_url, fetch_with_retries, Fetched, get_cleaned_html, EXIT_NOT_FOUND, EXIT_NETWORK, EXIT_OUTPUT, EXIT_INTERRUPTED
+from lparchive2epub.lib import Extractor, Chapters, lparchive2epub, BeautifulSoup, normalize_url, build_update, Update, Intro, format_failures_report, ISSUES_URL, do, StrictModeError, MissingUpdatesError, ExtractionError, OutputError, check_output_path, detect_image_type, NotFoundError, NetworkError, RetriesExhaustedError, NotALetsPlayError, normalize_lp_url, fetch_with_retries, Fetched, get_cleaned_html, compose_description, parse_lp_date, EXIT_NOT_FOUND, EXIT_NETWORK, EXIT_OUTPUT, EXIT_INTERRUPTED
 import lparchive2epub.lib as lib
 from lparchive2epub import main as cli
 from importlib.resources import files
@@ -1102,3 +1103,63 @@ async def test_built_pages_contain_no_handlers_or_legacy_attributes():
     chapter = pages["EPUB/update_0.xhtml"]
     assert '<span class="bbc-spoiler">secret</span>' in chapter
     assert '<a href="https://www.youtube.com/embed/abc">' in chapter and "<iframe" not in chapter
+
+
+def test_extractor_reads_the_landing_page_facts():
+    intro = Extractor.intro("https://lparchive.org/X-COM-Terror-from-the-Deep", BeautifulSoup(xcom, "html.parser"))
+    assert (intro.began, intro.ended, intro.parts) == ("Oct 26, 2009", "Apr 09, 2010", 18)
+    assert intro.published_on == "May 14, 2010"
+    assert intro.tags == ["hybrid", "voice"]
+    assert intro.thread_url == "http://forums.somethingawful.com/showthread.php?threadid=3220122"
+    assert intro.thread_title.startswith("The X-COM: Terror From The Deep")
+
+    intro = Extractor.intro("https://lparchive.org/Resident-Evil-1", BeautifulSoup(re1, "html.parser"))
+    assert (intro.began, intro.ended, intro.parts) == ("Sep 10, 2007", "Nov 16, 2007", 59)
+    assert intro.tags == ["screenshot", "humorous", "challenges", "narrative"]
+
+    intro = Extractor.intro("https://lparchive.org/Dwarf-Fortress-Headshoots", BeautifulSoup(headshoots, "html.parser"))
+    assert (intro.began, intro.ended, intro.parts) == ("Apr 25, 2009", "Apr 25, 2009", 90)
+    assert intro.author == "Various"
+
+
+def test_extractor_tolerates_missing_optional_facts():
+    html = b"""<html><head><title>Old LP</title><meta name="author" content="Someone"/></head><body>
+    <ul id="statistics"><li id="archival">Added to the archive on <strong>Jan 02, 2008</strong></li></ul>
+    <div id="content">hello</div></body></html>"""
+    intro = Extractor.intro("https://lparchive.org/Old-LP", BeautifulSoup(html, "html.parser"))
+    assert (intro.began, intro.ended, intro.parts, intro.tags, intro.thread_url) == (None, None, None, [], None)
+    assert compose_description(intro, "https://lparchive.org/Old-LP") == (
+        "Let's Play of Old LP by Someone. Archived by The Let's Play Archive at https://lparchive.org/Old-LP on Jan 02, 2008.")
+
+
+def test_compose_description_and_dates():
+    intro = Extractor.intro("https://lparchive.org/X-COM-Terror-from-the-Deep", BeautifulSoup(xcom, "html.parser"))
+    assert compose_description(intro, "https://lparchive.org/X-COM-Terror-from-the-Deep") == (
+        "Let's Play of X-COM: Terror from the Deep by GuavaMoment. "
+        "18 updates posted between Oct 26, 2009 and Apr 09, 2010. "
+        "Archived by The Let's Play Archive at https://lparchive.org/X-COM-Terror-from-the-Deep on May 14, 2010. "
+        "Original thread: http://forums.somethingawful.com/showthread.php?threadid=3220122")
+    headshoots_intro = Extractor.intro("https://lparchive.org/Dwarf-Fortress-Headshoots", BeautifulSoup(headshoots, "html.parser"))
+    assert "90 updates posted on Apr 25, 2009." in compose_description(headshoots_intro, "u")
+    assert parse_lp_date("Apr 09, 2010") == datetime.datetime(2010, 4, 9)
+    assert parse_lp_date("not a date") is None and parse_lp_date(None) is None
+
+
+@pytest.mark.asyncio
+async def test_book_carries_dublin_core_metadata_from_the_landing_page():
+    url = "https://lparchive.org/X-COM-Terror-from-the-Deep"
+    session = _FakeSession("never-matches")
+    with tempfile.TemporaryDirectory() as d:
+        out = f"{d}/book.epub"
+        await asyncio.wait_for(do(url, out, session, lambda *_: None), timeout=30)
+        with zipfile.ZipFile(out) as z:
+            opf = z.read("EPUB/content.opf").decode()
+    assert "<dc:title>X-COM: Terror from the Deep</dc:title>" in opf
+    assert ">GuavaMoment</dc:creator>" in opf
+    assert "<dc:publisher>The Let's Play Archive</dc:publisher>" in opf
+    assert "<dc:date>2010-04-09</dc:date>" in opf
+    assert "<dc:description>Let's Play of X-COM: Terror from the Deep by GuavaMoment. 18 updates posted between" in opf
+    assert re.findall(r"<dc:subject>([^<]+)</dc:subject>", opf) == ["Let's Play", "hybrid", "voice"]
+    assert "<dc:relation>http://forums.somethingawful.com/showthread.php?threadid=3220122</dc:relation>" in opf
+    assert f"<dc:source>{url}</dc:source>" in opf
+    assert 'property="dcterms:modified">2010-05-14T00:00:00Z' in opf
