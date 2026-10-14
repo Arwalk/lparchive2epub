@@ -770,12 +770,83 @@ tags_to_clean = [
 ]
 
 
+# Active content has no place in a book (and makes epubcheck demand the "scripted" property).
+TAGS_TO_DROP = ["script", "noscript", "style", "form", "input", "button", "select", "textarea"]
+# Embedded players: replaced by a plain link to what they were showing, when they point somewhere.
+EMBED_TAGS = ["iframe", "embed", "object", "video", "audio"]
+# HTML 4 presentational attributes that are invalid in XHTML 5 and that the stylesheet supersedes anyway.
+ATTRIBUTES_TO_DROP = {"border", "align", "valign", "bgcolor", "background", "cellpadding", "cellspacing",
+                      "hspace", "vspace", "nowrap", "target", "rel"}
+SPOILER_CLASS = "bbc-spoiler"
+
+
 def get_cleaned_html(page: str) -> BeautifulSoup:
-    xml_version = BeautifulSoup(page, "html.parser")
+    """Parse a page and make its markup fit for a book: no scripts, handlers or players, no legacy
+    attributes, and spoilers that stay readable."""
+    soup = BeautifulSoup(page, "html.parser")
     for tag in tags_to_clean:
-        while found := xml_version.find(tag):
+        while found := soup.find(tag):
             found.unwrap()
-    return xml_version
+    sanitize(soup)
+    return soup
+
+
+def sanitize(soup: BeautifulSoup):
+    for element in soup.find_all(TAGS_TO_DROP):
+        element.decompose()
+
+    for element in soup.find_all(EMBED_TAGS):
+        source = element.get("src") or element.get("data")
+        if source and HAS_SCHEME.match(source.strip()):
+            link = soup.new_tag("a", href=source.strip())
+            link.string = source.strip()
+            paragraph = soup.new_tag("p")
+            paragraph.append(f"[{element.name}: ")
+            paragraph.append(link)
+            paragraph.append("]")
+            element.replace_with(paragraph)
+        else:
+            element.decompose()
+
+    # <font color="red"> -> <span style="color: red">, <center> -> <div style="text-align: center">
+    for font in soup.find_all("font"):
+        font.name = "span"
+        color = font.attrs.pop("color", None)
+        font.attrs.pop("size", None)
+        font.attrs.pop("face", None)
+        if color:
+            font["style"] = f"color: {color};"
+    for center in soup.find_all("center"):
+        center.name = "div"
+        center["style"] = "text-align: center;"
+
+    for element in soup.find_all(True):
+        for attribute in list(element.attrs):
+            if attribute.startswith("on") or attribute in ATTRIBUTES_TO_DROP:
+                del element.attrs[attribute]
+        # <a name="x"> is the HTML 4 anchor; XHTML 5 wants an id
+        if element.name == "a" and "name" in element.attrs:
+            element.attrs.setdefault("id", element.attrs["name"])
+            del element.attrs["name"]
+        # Forum spoilers come with black-on-black inline styles (and hover handlers, removed above):
+        # unreadable on paper. The stylesheet marks .bbc-spoiler instead.
+        classes = element.get("class") or []
+        if SPOILER_CLASS in classes or _hides_its_text(element.get("style")):
+            element.attrs.pop("style", None)
+            if SPOILER_CLASS not in classes:
+                element["class"] = classes + [SPOILER_CLASS]
+
+
+def _hides_its_text(style: str | None) -> bool:
+    """True for inline styles that paint the text in its own background colour (the forum spoiler trick)."""
+    if not style:
+        return False
+    declarations = {}
+    for declaration in style.split(";"):
+        name, _, value = declaration.partition(":")
+        declarations[name.strip().lower()] = " ".join(value.lower().split())
+    color, background = declarations.get("color"), declarations.get("background-color") or declarations.get("background")
+    return bool(color) and color == background
 
 
 def format_failures_report(url: str, failures: list[SkippedResource], outcome: str, what: str = "resource(s)") -> str:

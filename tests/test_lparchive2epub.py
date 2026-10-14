@@ -8,7 +8,7 @@ import zipfile
 from urllib.parse import unquote
 
 import aiohttp
-from lparchive2epub.lib import Extractor, Chapters, lparchive2epub, BeautifulSoup, normalize_url, build_update, Update, Intro, format_failures_report, ISSUES_URL, do, StrictModeError, MissingUpdatesError, ExtractionError, OutputError, check_output_path, detect_image_type, NotFoundError, NetworkError, RetriesExhaustedError, NotALetsPlayError, normalize_lp_url, fetch_with_retries, Fetched, EXIT_NOT_FOUND, EXIT_NETWORK, EXIT_OUTPUT, EXIT_INTERRUPTED
+from lparchive2epub.lib import Extractor, Chapters, lparchive2epub, BeautifulSoup, normalize_url, build_update, Update, Intro, format_failures_report, ISSUES_URL, do, StrictModeError, MissingUpdatesError, ExtractionError, OutputError, check_output_path, detect_image_type, NotFoundError, NetworkError, RetriesExhaustedError, NotALetsPlayError, normalize_lp_url, fetch_with_retries, Fetched, get_cleaned_html, EXIT_NOT_FOUND, EXIT_NETWORK, EXIT_OUTPUT, EXIT_INTERRUPTED
 import lparchive2epub.lib as lib
 from lparchive2epub import main as cli
 from importlib.resources import files
@@ -1035,3 +1035,70 @@ async def test_book_has_exactly_one_stylesheet_linked_from_every_page():
             for n in z.namelist():
                 if n.endswith(".xhtml") and n != "EPUB/nav.xhtml":
                     assert 'href="style/lparchive.css"' in z.read(n).decode(), n
+
+
+def test_sanitize_strips_active_content_and_legacy_markup():
+    html = """<div id="content">
+      <script>alert(1)</script><noscript>no</noscript><style>b{color:red}</style>
+      <form action="/x"><input type="text"/><button>go</button><select><option>a</option></select><textarea>t</textarea></form>
+      <iframe src="https://www.youtube.com/embed/abc123" width="560" height="315"></iframe>
+      <embed src="relative.swf"/>
+      <object data="https://example.com/thing.swf"></object>
+      <img alt="" border="0" class="img" src="1.png" title=":smug:" width="640" height="480"/>
+      <a href="https://example.com/" rel="nofollow" target="_blank" onclick="track()">link</a>
+      <a name="part2">anchor</a><a name="part3" id="keep">anchor with id</a>
+      <font color="red" size="3" face="Arial">red text</font>
+      <center>centered</center>
+      <table border="1" cellpadding="2" cellspacing="0" align="center"><tr><td valign="top" bgcolor="#fff" nowrap="nowrap">cell</td></tr></table>
+      <span style="color: #336699;">speaker colour kept</span>
+      <span class="bbc-spoiler" onmouseout="x()" onmouseover="y()" style="color: rgb(0, 0, 0); background-color: rgb(0, 0, 0);">hidden</span>
+      <span style="color:#000000; background:#000000">also hidden, no class</span>
+      <o:p>office</o:p>
+    </div>"""
+    soup = get_cleaned_html(html)
+    out = str(soup)
+
+    for gone in ("<script", "<noscript", "<style", "<form", "<input", "<button", "<select", "<textarea",
+                 "<iframe", "<embed", "<object", "<font", "<center", "<o:p", "onclick", "onmouseout", "onmouseover",
+                 'border="', 'rel="', 'target="', 'align="', 'valign="', 'bgcolor="', 'nowrap="', 'cellpadding="',
+                 'cellspacing="', 'name="', 'size="', 'face="'):
+        assert gone not in out, gone
+
+    # players become plain links to what they embedded; a relative/unknown source is just dropped
+    assert '<p>[iframe: <a href="https://www.youtube.com/embed/abc123">https://www.youtube.com/embed/abc123</a>]</p>' in out
+    assert '<p>[object: <a href="https://example.com/thing.swf">https://example.com/thing.swf</a>]</p>' in out
+    assert "relative.swf" not in out
+    # useful attributes survive
+    assert '<img alt="" class="img" height="480" src="1.png" title=":smug:" width="640"/>' in out
+    assert '<a href="https://example.com/">link</a>' in out
+    assert '<a id="part2">anchor</a>' in out and '<a id="keep">anchor with id</a>' in out
+    assert '<span style="color: red;">red text</span>' in out
+    assert '<div style="text-align: center;">centered</div>' in out
+    assert '<span style="color: #336699;">speaker colour kept</span>' in out
+    # spoilers are readable and marked for the stylesheet
+    assert '<span class="bbc-spoiler">hidden</span>' in out
+    assert '<span class="bbc-spoiler">also hidden, no class</span>' in out
+    assert "office" in out
+
+
+@pytest.mark.asyncio
+async def test_built_pages_contain_no_handlers_or_legacy_attributes():
+    url = "https://lparchive.org/X-COM-Terror-from-the-Deep"
+    spoiler_chapter = f"{url}/Update%2001/"
+    session = _FakeSession("never-matches")
+    session.responses[spoiler_chapter] = _FakeResponse(200, (
+        '<div id="content"><img alt="" border="0" class="img" src="1.png"/>'
+        '<span class="bbc-spoiler" onmouseover="a()" style="color:#000;background-color:#000">secret</span>'
+        '<iframe src="https://www.youtube.com/embed/abc"></iframe><a href="https://x.example/" target="_blank">x</a></div>'
+    ).encode())
+    with tempfile.TemporaryDirectory() as d:
+        out = f"{d}/book.epub"
+        await asyncio.wait_for(do(url, out, session, lambda *_: None), timeout=30)
+        with zipfile.ZipFile(out) as z:
+            pages = {n: z.read(n).decode() for n in z.namelist() if n.endswith(".xhtml")}
+    for name, page in pages.items():
+        assert not re.search(r'\son[a-z]+="', page), name
+        assert 'border="' not in page and 'target="' not in page and 'rel="nofollow"' not in page, name
+    chapter = pages["EPUB/update_0.xhtml"]
+    assert '<span class="bbc-spoiler">secret</span>' in chapter
+    assert '<a href="https://www.youtube.com/embed/abc">' in chapter and "<iframe" not in chapter
