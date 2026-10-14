@@ -1,6 +1,11 @@
 import asyncio
+import os
+import re
+import zipfile
+from urllib.parse import unquote
+
 import aiohttp
-from lparchive2epub.lib import Extractor, Chapters, lparchive2epub, BeautifulSoup, normalize_url, build_update, Update, Intro, format_failures_report, ISSUES_URL
+from lparchive2epub.lib import Extractor, Chapters, lparchive2epub, BeautifulSoup, normalize_url, build_update, Update, Intro, format_failures_report, ISSUES_URL, do, StrictModeError, MissingUpdatesError, ExtractionError
 from importlib.resources import files
 import tests.resources as resources
 import pytest
@@ -428,3 +433,107 @@ async def test_build_update_skips_unreachable_images():
     report = format_failures_report("https://lparchive.org/Some-LP", failures + failures, "outcome")
     assert report.count("url:    ftp://example.com/broken.png") == 1
     assert ISSUES_URL in report
+
+
+class _FakeResponse:
+    def __init__(self, status: int, body: bytes):
+        self.status = status
+        self._body = body
+        self.content = self
+
+    async def text(self):
+        return self._body.decode("utf-8", errors="replace")
+
+    async def read(self):
+        return self._body
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *exc):
+        return False
+
+
+class _FakeSession:
+    """Serves the X-COM landing page fixture; chapters are tiny pages, one of them answering 404."""
+
+    def __init__(self, failing_slug: str):
+        self.failing_slug = failing_slug
+        self.requested = []
+
+    def get(self, url, **kwargs):
+        self.requested.append(url)
+        if url.rstrip("/") == "https://lparchive.org/X-COM-Terror-from-the-Deep":
+            return _FakeResponse(200, xcom)
+        if self.failing_slug in url:
+            return _FakeResponse(404, b"not here")
+        if "Update" in url:
+            return _FakeResponse(200, f'<div id="content"><h3>{unquote(url)}</h3>some text</div>'.encode())
+        return _FakeResponse(200, b"\x89PNG fake image bytes")
+
+    async def close(self):
+        pass
+
+
+def _chapter_files(epub_path: str) -> list[str]:
+    with zipfile.ZipFile(epub_path) as z:
+        return sorted(n for n in z.namelist() if re.fullmatch(r"EPUB/update_\d+\.xhtml", n))
+
+
+@pytest.mark.asyncio
+async def test_unretrievable_chapter_fails_loudly_by_default():
+    url = "https://lparchive.org/X-COM-Terror-from-the-Deep"
+    failing = "Update%2005/"
+    session = _FakeSession(failing)
+    with tempfile.TemporaryDirectory() as d:
+        out = f"{d}/book.epub"
+        with pytest.raises(MissingUpdatesError) as exc_info:
+            await asyncio.wait_for(do(url, out, session, lambda *_: None), timeout=30)
+        assert not os.path.exists(out)
+
+    report = str(exc_info.value)
+    assert isinstance(exc_info.value, ExtractionError)
+    assert "1 update(s) could not be retrieved" in report
+    assert f"url:    {url}/{failing}" in report
+    assert "status code: 404" in report
+    assert "No book was written" in report
+    assert "--allow-missing-updates" in report
+
+
+@pytest.mark.asyncio
+async def test_unretrievable_chapter_gets_placeholder_when_allowed():
+    url = "https://lparchive.org/X-COM-Terror-from-the-Deep"
+    failing = "Update%2005/"
+    session = _FakeSession(failing)
+    messages = []
+    with tempfile.TemporaryDirectory() as d:
+        out = f"{d}/book.epub"
+        await asyncio.wait_for(do(url, out, session, messages.append, allow_missing_updates=True), timeout=30)
+
+        # all 18 chapters are present, including a placeholder for the failed one
+        assert len(_chapter_files(out)) == 18
+        with zipfile.ZipFile(out) as z:
+            placeholder = z.read("EPUB/update_4.xhtml").decode()
+            good = z.read("EPUB/update_3.xhtml").decode()
+    assert f"{url}/{failing}" in placeholder
+    assert "could not be retrieved" in placeholder
+    assert "could not be retrieved" not in good
+
+    report = "\n".join(messages)
+    assert "1 resource(s) could not be retrieved" in report
+    assert f"url:    {url}/{failing}" in report
+    assert "status code: 404" in report
+    assert "placeholder" in report
+
+
+@pytest.mark.asyncio
+async def test_unretrievable_chapter_fails_in_strict_mode_even_when_allowed():
+    url = "https://lparchive.org/X-COM-Terror-from-the-Deep"
+    session = _FakeSession("Update%2005/")
+    with tempfile.TemporaryDirectory() as d:
+        out = f"{d}/book.epub"
+        with pytest.raises(StrictModeError) as exc_info:
+            await asyncio.wait_for(do(url, out, session, lambda *_: None, strict=True, allow_missing_updates=True),
+                                   timeout=30)
+        assert not os.path.exists(out)
+    assert f"{url}/Update%2005/" in str(exc_info.value)

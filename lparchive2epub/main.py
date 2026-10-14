@@ -5,7 +5,7 @@ from urllib.parse import urlparse
 
 from aiohttp_client_cache import CacheBackend, CachedSession
 
-from lparchive2epub.lib import lparchive2epub, StrictModeError
+from lparchive2epub.lib import lparchive2epub, ExtractionError
 
 
 def is_lparchive_url(arg):
@@ -27,19 +27,23 @@ arg_parser.add_argument("output", metavar="OUTPUT_FILE", nargs=1, type=str)
 arg_parser.add_argument("--no-cache", action="store_true", help="Don't cache url calls")
 arg_parser.add_argument("--strict", action="store_true",
                         help="Fail instead of skipping resources (images...) that can't be retrieved")
+arg_parser.add_argument("--allow-missing-updates", action="store_true",
+                        help="Build the book even if some updates can't be retrieved, replacing them with a "
+                             "placeholder page (by default this is an error and no book is written)")
 
 async def amain(args):
     if args.no_cache:
         cache = None
     else:
         cache = CachedSession(cache=CacheBackend())
-    await lparchive2epub(args.url[0], args.output[0], cache, strict=args.strict)
+    await lparchive2epub(args.url[0], args.output[0], cache, strict=args.strict,
+                         allow_missing_updates=args.allow_missing_updates)
 
 def main():
     args = arg_parser.parse_args()
     try:
         asyncio.run(amain(args))
-    except StrictModeError as e:
+    except ExtractionError as e:
         print(e, file=sys.stderr)
         sys.exit(1)
 

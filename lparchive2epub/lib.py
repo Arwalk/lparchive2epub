@@ -305,8 +305,16 @@ class SkippedResource:
     reason: str
 
 
-class StrictModeError(RuntimeError):
-    pass
+class ExtractionError(RuntimeError):
+    """The book could not be built; the message is a full report meant to be shown to the user."""
+
+
+class StrictModeError(ExtractionError):
+    """Resources were skipped while --strict was requested."""
+
+
+class MissingUpdatesError(ExtractionError):
+    """One or more updates (chapters) could not be retrieved."""
 
 
 ISSUES_URL = "https://github.com/Arwalk/lparchive2epub/issues/new"
@@ -502,13 +510,37 @@ async def build_single_page(session: aiohttp.ClientSession, intro: Intro, chapte
 
     return await get_resource_with_retries(session, chapter.original_href, get)
 
-async def lparchive2epub(url: str, file: str, root_session: aiohttp.ClientSession | None = None, writer=tqdm.write, strict: bool = False):
+def build_placeholder_page(chapter: Chapters, intro: Intro, error: Exception) -> Page:
+    """Stand-in for a chapter that could not be retrieved, so the book keeps its structure."""
+    placeholder = epub.EpubHtml(title=str(chapter.txt), file_name=chapter.new_href, lang=intro.language)
+    placeholder.add_item(get_style_item())
+    content = BeautifulSoup("<div id=\"content\"></div>", "html.parser")
+    div = content.div
+    h = content.new_tag("h3")
+    h.string = str(chapter.txt)
+    div.append(h)
+    p = content.new_tag("p")
+    p.append("This update could not be retrieved when the book was built. It is available online at ")
+    a = content.new_tag("a", href=chapter.original_href)
+    a.string = chapter.original_href
+    p.append(a)
+    p.append(".")
+    div.append(p)
+    reason = content.new_tag("p")
+    reason.string = f"Reason: {str(error) or type(error).__name__}"
+    div.append(reason)
+    placeholder.content = str(content)
+    return Page(chapter.num, placeholder, [])
+
+
+async def lparchive2epub(url: str, file: str, root_session: aiohttp.ClientSession | None = None, writer=tqdm.write,
+                         strict: bool = False, allow_missing_updates: bool = False):
     if url.endswith("/"):
         url = url[:-1]
     if root_session is None:
         root_session = aiohttp.ClientSession()
     async with root_session as session:
-        await do(url, file, session, writer, strict)
+        await do(url, file, session, writer, strict, allow_missing_updates)
 
 
 tags_to_clean = [
@@ -530,16 +562,19 @@ def get_cleaned_html(page: str) -> BeautifulSoup:
     return xml_version
 
 
-def format_failures_report(url: str, failures: list[SkippedResource], outcome: str) -> str:
+def format_failures_report(url: str, failures: list[SkippedResource], outcome: str, what: str = "resource(s)") -> str:
     unique = list(dict.fromkeys((f.page, f.url, f.reason) for f in failures))
     separator = "-" * 72
     lines = [
         separator,
-        f"lparchive2epub: {len(unique)} resource(s) could not be retrieved while extracting {url}",
+        f"lparchive2epub: {len(unique)} {what} could not be retrieved while extracting {url}",
     ]
     for page, res_url, reason in unique:
-        lines.append(f"  - page:   {page}")
-        lines.append(f"    url:    {res_url}")
+        if page != res_url:
+            lines.append(f"  - page:   {page}")
+            lines.append(f"    url:    {res_url}")
+        else:
+            lines.append(f"  - url:    {res_url}")
         lines.append(f"    reason: {reason}")
     lines.append(separator)
     lines.append(outcome)
@@ -548,7 +583,8 @@ def format_failures_report(url: str, failures: list[SkippedResource], outcome: s
     return "\n".join(lines)
 
 
-async def do(url: str, file: str, session: aiohttp.ClientSession, writer, strict: bool = False):
+async def do(url: str, file: str, session: aiohttp.ClientSession, writer, strict: bool = False,
+             allow_missing_updates: bool = False):
     writer(f"extracting lp from {url}")
     writer("getting landing page")
     page_text = await get_resource_with_retries(session, url)
@@ -564,6 +600,7 @@ async def do(url: str, file: str, session: aiohttp.ClientSession, writer, strict
     writer("building intro")
     image_registry = {}
     failures: list[SkippedResource] = []
+    missing_updates: list[tuple[int, Chapters, Exception]] = []
     epub_intro = await build_intro(session, url, intro, image_registry, failures)
 
     known_images = {
@@ -586,13 +623,22 @@ async def do(url: str, file: str, session: aiohttp.ClientSession, writer, strict
             while True:
                 try:
                     i, chapter = await q.get()
-                    try:
-                        page = await build_single_page(session, intro, chapter, intro.chapters, pbar, image_registry, failures)
-                        pages_indexed.append((i, page))
-                    finally:
-                        q.task_done()
                 except asyncio.CancelledError:
                     break
+                try:
+                    page = await build_single_page(session, intro, chapter, intro.chapters, pbar, image_registry, failures)
+                except asyncio.CancelledError:
+                    q.task_done()
+                    raise
+                except Exception as e:
+                    # A chapter that can't be retrieved must not silently vanish from the book: remember it
+                    # so the run fails with a full report (or, on request, gets a placeholder page).
+                    missing_updates.append((i, chapter, e))
+                    pbar.update(1)
+                else:
+                    pages_indexed.append((i, page))
+                finally:
+                    q.task_done()
 
         workers = [asyncio.create_task(worker()) for _ in range(CONCURRENCY_LIMIT_PAGES)]
 
@@ -603,6 +649,20 @@ async def do(url: str, file: str, session: aiohttp.ClientSession, writer, strict
         for w in workers:
             w.cancel()
         await asyncio.gather(*workers, return_exceptions=True)
+
+    if missing_updates:
+        missing_updates.sort(key=lambda x: x[0])
+        missing = [SkippedResource(page=c.original_href, url=c.original_href, reason=str(e) or type(e).__name__)
+                   for _, c, e in missing_updates]
+        if not allow_missing_updates:
+            raise MissingUpdatesError(format_failures_report(
+                url, missing,
+                "No book was written: it would be missing the update(s) above. "
+                "Run again later, or with --allow-missing-updates to build it anyway with placeholder pages.",
+                what="update(s)"))
+        failures.extend(missing)
+        for i, chapter, e in missing_updates:
+            pages_indexed.append((i, build_placeholder_page(chapter, intro, e)))
 
     pages = [p for _, p in sorted(pages_indexed, key=lambda x: x[0])]
 
@@ -637,4 +697,7 @@ async def do(url: str, file: str, session: aiohttp.ClientSession, writer, strict
     epub.write_epub(file, book, options = {"mtime": mtime})
 
     if failures:
-        writer(format_failures_report(url, failures, "Those resources were left as external links in the book."))
+        writer(format_failures_report(
+            url, failures,
+            "Missing images were left as external links in the book; "
+            "missing updates (--allow-missing-updates) were replaced by a placeholder page linking to the original."))

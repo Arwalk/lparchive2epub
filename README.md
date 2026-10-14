@@ -3,7 +3,7 @@
 this tool (and library) aims at helping people extracting full epubs of Let's Plays from https://lparchive.org/
 
 ```
-usage: lparchive2epub [-h] [--no-cache] [--strict] URL OUTPUT_FILE
+usage: lparchive2epub [-h] [--no-cache] [--strict] [--allow-missing-updates] URL OUTPUT_FILE
 
 A tool to transform a Let's Play from lparchive.org to epub format.
 
@@ -16,6 +16,10 @@ options:
   --no-cache   Don't cache url calls
   --strict     Fail instead of skipping resources (images...) that can't be
                retrieved
+  --allow-missing-updates
+               Build the book even if some updates can't be retrieved,
+               replacing them with a placeholder page (by default this is an
+               error and no book is written)
 ```
 
 The repository also contains the script `util/all_archives.py` that tries to scrape all LPs from lparchive.
@@ -50,4 +54,4 @@ A standalone executable is available for releases on windows. See the releases p
 - ~~Links to images are not properly saved.~~ Now working properly!
 - LPs that are mostly link to YouTube videos are not very interesting to transform to epub
 - Some LPs completely fail to be downloaded.
-- Some LPs contain broken links (typos like `hhttp://`, dead image hosts...). Common typos are repaired automatically; resources that still can't be retrieved are left as external links, and a report is printed at the end. Please paste that report in a [GitHub issue](https://github.com/Arwalk/lparchive2epub/issues/new) so the case can be handled in a future release. Use `--strict` to fail instead.
+- Some LPs contain broken links (typos like `hhttp://`, dead image hosts...). Common typos are repaired automatically; resources that still can't be retrieved are left as external links and a report is printed at the end. If a whole update can't be retrieved, no book is written and the failing update(s) are listed; pass `--allow-missing-updates` to build the book anyway with a placeholder page in their place. Please paste that report in a [GitHub issue](https://github.com/Arwalk/lparchive2epub/issues/new) so the case can be handled in a future release. Use `--strict` to fail instead.
