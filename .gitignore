@@ -12,3 +12,4 @@ cache/*
 cache
 *.log
 plan.md
+*.whl
