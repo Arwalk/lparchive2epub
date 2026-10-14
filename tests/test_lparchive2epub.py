@@ -997,3 +997,41 @@ async def test_transient_server_errors_are_retried_but_processing_errors_are_not
     assert "2 update(s) could not be retrieved" in report
     assert "after 5 retries" in report and "status code: 503" in report
     assert "KeyError: 'simulated parsing bug'" in report
+
+
+def test_stylesheet_is_self_contained_and_sized_for_lparchive_markup():
+    from lparchive2epub.style import get_style_item, style, STYLE_FILE_NAME
+    item = get_style_item()
+    assert item.file_name == STYLE_FILE_NAME and item.media_type == "text/css"
+    content = item.get_content()
+    assert (content.decode() if isinstance(content, bytes) else content) == style
+    # nothing epubcheck objects to: no external resources, no forbidden properties
+    assert "@font-face" not in style and "url(" not in style and "direction" not in style
+    assert "!important" not in style
+    # the reader's font and colours stay in charge
+    assert "body {" in style and "font-family" not in style.split("}")[0]
+    assert "background" not in style
+    # update titles are h3 on lparchive: they must not render smaller than the text
+    m = re.search(r"h3 \{ font-size: ([\d.]+)em; \}", style)
+    assert m and float(m.group(1)) > 1.0
+    # images fit the screen, aspect ratio kept
+    assert re.search(r"img \{[^}]*max-width: 100%;[^}]*height: auto;", style)
+    # the markup actually present in lparchive pages is covered
+    for selector in (".bbc-block", ".bbc-block h4", "blockquote", ".bbc-spoiler", "ul.toc li", "pre, code"):
+        assert selector in style, selector
+    assert len(style.splitlines()) < 120
+
+
+@pytest.mark.asyncio
+async def test_book_has_exactly_one_stylesheet_linked_from_every_page():
+    url = "https://lparchive.org/X-COM-Terror-from-the-Deep"
+    session = _FakeSession("never-matches")
+    with tempfile.TemporaryDirectory() as d:
+        out = f"{d}/book.epub"
+        await asyncio.wait_for(do(url, out, session, lambda *_: None), timeout=30)
+        with zipfile.ZipFile(out) as z:
+            css = [n for n in z.namelist() if n.endswith(".css")]
+            assert css == ["EPUB/style/lparchive.css"]
+            for n in z.namelist():
+                if n.endswith(".xhtml") and n != "EPUB/nav.xhtml":
+                    assert 'href="style/lparchive.css"' in z.read(n).decode(), n
