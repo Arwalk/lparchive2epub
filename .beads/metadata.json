@@ -1,0 +1,7 @@
+{
+  "database": "dolt",
+  "backend": "dolt",
+  "dolt_mode": "embedded",
+  "dolt_database": "lparchive2epub",
+  "project_id": "29ae28e1-b334-45f8-95e1-2e35278c9b75"
+}
