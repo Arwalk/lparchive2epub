@@ -5,7 +5,7 @@ import zipfile
 from urllib.parse import unquote
 
 import aiohttp
-from lparchive2epub.lib import Extractor, Chapters, lparchive2epub, BeautifulSoup, normalize_url, build_update, Update, Intro, format_failures_report, ISSUES_URL, do, StrictModeError, MissingUpdatesError, ExtractionError, OutputError, check_output_path
+from lparchive2epub.lib import Extractor, Chapters, lparchive2epub, BeautifulSoup, normalize_url, build_update, Update, Intro, format_failures_report, ISSUES_URL, do, StrictModeError, MissingUpdatesError, ExtractionError, OutputError, check_output_path, detect_image_type
 from importlib.resources import files
 import tests.resources as resources
 import pytest
@@ -435,11 +435,18 @@ async def test_build_update_skips_unreachable_images():
     assert ISSUES_URL in report
 
 
+PNG_BYTES = b"\x89PNG\r\n\x1a\n" + b"fake png payload"
+JPEG_BYTES = b"\xff\xd8\xff\xe0" + b"fake jpeg payload"
+GIF_BYTES = b"GIF89a" + b"fake gif payload"
+WEBP_BYTES = b"RIFF\x10\x00\x00\x00WEBPVP8 " + b"fake webp payload"
+
+
 class _FakeResponse:
-    def __init__(self, status: int, body: bytes):
+    def __init__(self, status: int, body: bytes, content_type: str | None = None):
         self.status = status
         self._body = body
         self.content = self
+        self.headers = {"Content-Type": content_type} if content_type else {}
 
     async def text(self):
         return self._body.decode("utf-8", errors="replace")
@@ -457,19 +464,22 @@ class _FakeResponse:
 class _FakeSession:
     """Serves the X-COM landing page fixture; chapters are tiny pages, one of them answering 404."""
 
-    def __init__(self, failing_slug: str):
+    def __init__(self, failing_slug: str, responses: dict | None = None):
         self.failing_slug = failing_slug
         self.requested = []
+        self.responses = responses or {}  # url -> _FakeResponse, checked first
 
     def get(self, url, **kwargs):
         self.requested.append(url)
+        if url in self.responses:
+            return self.responses[url]
         if url.rstrip("/") == "https://lparchive.org/X-COM-Terror-from-the-Deep":
             return _FakeResponse(200, xcom)
         if self.failing_slug in url:
             return _FakeResponse(404, b"not here")
         if "Update" in url:
             return _FakeResponse(200, f'<div id="content"><h3>{unquote(url)}</h3>some text</div>'.encode())
-        return _FakeResponse(200, b"\x89PNG fake image bytes")
+        return _FakeResponse(200, PNG_BYTES)
 
     async def close(self):
         pass
@@ -635,3 +645,63 @@ async def test_write_failure_is_reported_and_leaves_no_partial_file(monkeypatch)
         with pytest.raises(OutputError, match="No space left on device"):
             await do(url, out, session, lambda *_: None)
         assert os.listdir(d) == []
+
+
+@pytest.mark.parametrize(("content", "url", "content_type", "expected"), [
+    (PNG_BYTES, "http://x/a.JPG", None, ("image/png", "png")),           # bytes win over a wrong extension
+    (JPEG_BYTES, "http://x/a.jpeg", None, ("image/jpeg", "jpg")),
+    (JPEG_BYTES, "http://x/a.PNG?size=large", None, ("image/jpeg", "jpg")),
+    (GIF_BYTES, "http://x/a.GIF", None, ("image/gif", "gif")),
+    (WEBP_BYTES, "http://x/a", None, ("image/webp", "webp")),
+    (b"BMfake", "http://x/a.bmp", None, ("image/bmp", "bmp")),
+    (b'<svg xmlns="http://www.w3.org/2000/svg"></svg>', "http://x/a", None, ("image/svg+xml", "svg")),
+    (b"\x00\x01unknown", "http://x/a.webp", None, ("image/webp", "webp")),             # URL fallback
+    (b"\x00\x01unknown", "http://x/a", "image/gif; charset=binary", ("image/gif", "gif")),  # header fallback
+    (b"<!DOCTYPE html><html><body>Not found</body></html>", "http://x/a.png", "text/html", None),
+    (b"\x00\x01unknown", "http://x/a.php", "text/plain", None),
+])
+def test_detect_image_type(content, url, content_type, expected):
+    assert detect_image_type(content, url, content_type) == expected
+
+
+def test_all_images_finds_linked_images_regardless_of_extension_case_or_query():
+    html = ('<div id="content">'
+            '<a href="full.JPG">1</a> <a href="full.jpeg">2</a> <a href="full.webp?dl=1">3</a> '
+            '<a href="full.png#top">4</a> <a href="notes.txt">no</a> <a href="Update%2002/">no</a>'
+            '</div>')
+    content = BeautifulSoup(html, "html.parser").find("div", id="content")
+    images = Extractor.all_images(content, "https://lparchive.org/Some-LP/Update%2001/")
+    assert [i.src for i in images] == ["full.JPG", "full.jpeg", "full.webp?dl=1", "full.png#top"]
+
+
+@pytest.mark.asyncio
+async def test_image_media_type_comes_from_content_and_non_images_are_skipped():
+    url = "https://lparchive.org/X-COM-Terror-from-the-Deep"
+    jpeg_as_png_url = f"{url}/Update%2001/shot.PNG"
+    dead_host_url = "http://img.example/dead.jpg"
+    session = _FakeSession("never-matches", responses={
+        jpeg_as_png_url: _FakeResponse(200, JPEG_BYTES, "image/png"),   # lying extension and header
+        dead_host_url: _FakeResponse(200, b"<!DOCTYPE html><html><body>gone</body></html>", "text/html"),
+    })
+    # one chapter embeds both images
+    session.responses[f"{url}/Update%2001/"] = _FakeResponse(
+        200, f'<div id="content"><img src="shot.PNG"/><img src="{dead_host_url}"/></div>'.encode())
+    messages = []
+    with tempfile.TemporaryDirectory() as d:
+        out = f"{d}/book.epub"
+        await asyncio.wait_for(do(url, out, session, messages.append), timeout=30)
+        with zipfile.ZipFile(out) as z:
+            opf = z.read("EPUB/content.opf").decode()
+            chapter = z.read("EPUB/update_0.xhtml").decode()
+            image_files = [n for n in z.namelist() if n.startswith("EPUB/images/")]
+
+    jpeg_items = re.findall(r'<item href="(images/[^"]+)" id="[^"]+" media-type="image/jpeg"/>', opf)
+    assert len(jpeg_items) == 1 and jpeg_items[0].endswith(".jpg")
+    assert f'src="{jpeg_items[0]}"' in chapter
+    assert all(n.endswith((".png", ".jpg")) for n in image_files)
+    assert "image/PNG" not in opf and "image/peg" not in opf
+    # the HTML page served instead of an image is not embedded: link left as is and reported
+    assert dead_host_url in chapter
+    assert not any("html" in n for n in image_files)
+    report = "\n".join(messages)
+    assert dead_host_url in report and "Not an image" in report and "text/html" in report

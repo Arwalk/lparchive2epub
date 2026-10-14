@@ -1,6 +1,7 @@
 import asyncio
 import datetime
 import functools
+import mimetypes
 import os
 import re
 from dataclasses import dataclass
@@ -90,6 +91,50 @@ LP_SPECIFIC_NAMES = {
 }
 
 FIND_FILES = re.compile(r"([.])[^/.]+$")
+# Links to image files, whatever the case of the extension and ignoring any query string or fragment
+IMAGE_FILE_LINK = re.compile(r"\.(jpe?g|png|gif|webp|bmp|svg)(?=[?#]|$)", re.IGNORECASE)
+
+# (media subtype, file extension) by magic number. Checked in order.
+IMAGE_SIGNATURES = (
+    (b"\x89PNG\r\n\x1a\n", "png", "png"),
+    (b"GIF87a", "gif", "gif"),
+    (b"GIF89a", "gif", "gif"),
+    (b"\xff\xd8\xff", "jpeg", "jpg"),
+    (b"BM", "bmp", "bmp"),
+)
+IMAGE_EXTENSIONS = {
+    "image/jpeg": "jpg",
+    "image/png": "png",
+    "image/gif": "gif",
+    "image/webp": "webp",
+    "image/bmp": "bmp",
+    "image/svg+xml": "svg",
+}
+
+
+def detect_image_type(content: bytes, url: str = "", content_type: str | None = None) -> tuple[str, str] | None:
+    """Return (media type, file extension) for downloaded image bytes, or None if this is not an image.
+
+    The bytes are authoritative: file extensions on image hosts are often wrong, and dead hosts
+    happily answer 200 with an HTML page. The URL and Content-Type header are only fallbacks for
+    formats without a simple signature."""
+    head = content[:16]
+    for signature, subtype, ext in IMAGE_SIGNATURES:
+        if head.startswith(signature):
+            return f"image/{subtype}", ext
+    if head.startswith(b"RIFF") and head[8:12] == b"WEBP":
+        return "image/webp", "webp"
+    start = content[:512].lstrip()
+    if start.startswith(b"<svg") or (start.startswith(b"<?xml") and b"<svg" in content[:2048]):
+        return "image/svg+xml", "svg"
+    if start.startswith((b"<!DOCTYPE", b"<html", b"<HTML", b"<head", b"<body", b"<!doctype")):
+        return None
+    # Fallbacks: a format we have no signature for; trust the declared type, then the URL
+    for candidate in (content_type.split(";")[0].strip().lower() if content_type else None,
+                      mimetypes.guess_type(urlparse(url).path)[0]):
+        if candidate in IMAGE_EXTENSIONS:
+            return candidate, IMAGE_EXTENSIONS[candidate]
+    return None
 # "update_3.xhtml/" or "update_3.xhtml/#anchor" -> the slash must go
 TRAILING_SLASH_AFTER_PAGE = re.compile(r"\.xhtml/(?=#|$)")
 FIND_ANCHOR_LINKS = re.compile(r"(#)[^/.]+$")
@@ -240,32 +285,31 @@ class Extractor:
         images = (x for x in images if x.get("src", None) is not None)
         r = []
 
-        def get_media_type(base : str) -> str:
-            if "jpg" in base:
-                base = base.replace("jpg", "jpeg")
-            return base
+        def get_media_type(src: str) -> str:
+            # Only a hint from the URL; the real type is detected from the downloaded bytes.
+            guessed, _ = mimetypes.guess_type(urlparse(src).path)
+            return guessed or "application/octet-stream"
 
         # Add direct images
         for i, x in enumerate(images):
             r.append(Image(
                 num=i,
                 src=x['src'],
-                media_type=get_media_type(x["src"][-3:]),
+                media_type=get_media_type(x["src"]),
                 tag=x,
                 url=Extractor.get_full_url(root_url, x["src"]),
                 root_url=root_url
             ))
 
         # Find image links - typically "Click here for full image" links
-        image_links = content.find_all("a", href=lambda x: x and (
-                    x.endswith('.jpg') or x.endswith('.png') or x.endswith('.gif')))
+        image_links = content.find_all("a", href=lambda x: x and IMAGE_FILE_LINK.search(x))
 
         # Add linked images to be saved, but don't modify the HTML structure
         for i, link in enumerate(image_links, start=len(r)):
             r.append(Image(
                 num=i,
                 src=link['href'],
-                media_type=get_media_type(link['href'][-3:]),
+                media_type=get_media_type(link['href']),
                 tag=link,  # Use the link tag itself
                 url=Extractor.get_full_url(root_url, link['href']),
                 root_url=root_url
@@ -402,10 +446,15 @@ async def _get_image(session: aiohttp.ClientSession, img: Image, registry: dict 
         future = None
 
     async def get(r):
-        media_type = img.media_type
         content = await r.content.read()
+        content_type = r.headers.get("Content-Type") if getattr(r, "headers", None) else None
+        detected = detect_image_type(content, img_url, content_type)
+        if detected is None:
+            declared = (content_type or "unknown type").split(";")[0].strip()
+            raise NonRetryableError(f"Not an image: the server answered with {declared} ({len(content)} bytes)")
+        media_type, extension = detected
         img_hash = get_blake2b_hash(content)
-        new_name = f"images/{img_hash}.{media_type}"
+        new_name = f"images/{img_hash}.{extension}"
         return IndexedEpubImage(
             img.num,
             img_hash,
@@ -415,7 +464,7 @@ async def _get_image(session: aiohttp.ClientSession, img: Image, registry: dict 
             EpubImage(
                 uid=f"i{img_hash}",
                 file_name=new_name,
-                media_type=f"image/{media_type}",
+                media_type=media_type,
                 content=content)
         )
 
