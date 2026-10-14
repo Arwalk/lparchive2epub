@@ -7,7 +7,7 @@ import re
 from dataclasses import dataclass
 from hashlib import blake2b
 from typing import List, Tuple
-from urllib.parse import urlparse, urlunparse, unquote
+from urllib.parse import urlparse, urljoin, urldefrag, unquote
 
 import aiohttp
 from bs4 import BeautifulSoup
@@ -118,6 +118,8 @@ def detect_image_type(content: bytes, url: str = "", content_type: str | None = 
     The bytes are authoritative: file extensions on image hosts are often wrong, and dead hosts
     happily answer 200 with an HTML page. The URL and Content-Type header are only fallbacks for
     formats without a simple signature."""
+    if not content:
+        return None  # some hosts answer 200 with an empty body for images that are gone
     head = content[:16]
     for signature, subtype, ext in IMAGE_SIGNATURES:
         if head.startswith(signature):
@@ -135,8 +137,7 @@ def detect_image_type(content: bytes, url: str = "", content_type: str | None = 
         if candidate in IMAGE_EXTENSIONS:
             return candidate, IMAGE_EXTENSIONS[candidate]
     return None
-# "update_3.xhtml/" or "update_3.xhtml/#anchor" -> the slash must go
-TRAILING_SLASH_AFTER_PAGE = re.compile(r"\.xhtml/(?=#|$)")
+INTRO_FILE_NAME = "introduction.xhtml"
 FIND_ANCHOR_LINKS = re.compile(r"(#)[^/.]+$")
 
 # Typos in the scheme part of a URL found in some LPs: "hhttp://", "htttp://", "http:/", "http//"...
@@ -160,29 +161,33 @@ class Extractor:
 
     @staticmethod
     def fix_links(content, chapters, current_url: str):
+        """Point every link either inside the book (chapters, landing page) or at an absolute URL.
+
+        Links are resolved against the page they appear on, exactly like a browser would, so
+        "../Update%2002/", "/Other-LP/" and "manual.pdf" all end up unambiguous. Links to images
+        that get embedded are rewritten later by replace_img_name, from their absolute URL."""
         if not current_url.endswith("/"):
             current_url += "/"
 
-        all_links = [x for x in content.find_all("a") if x.get("href", None)]
-        for link in all_links:
-            link["href"] = link["href"].replace("../", "")
+        in_book = {c.original_href: c.new_href for c in chapters}
+        if chapters:
+            # original_href is root + "/" + slug, both slash-terminated: a link back to the landing page
+            root = chapters[0].original_href[:-len(chapters[0].original_href_slug)]
+            in_book[root] = INTRO_FILE_NAME
 
-        local_assets = (x for x in all_links if FIND_FILES.search(x.get("href")) and "/" not in x.get("href"))
-
-        for link_to_asset in local_assets:
-            link_to_asset["href"] = current_url + link_to_asset["href"]
-
-        for c in chapters:
-            links = content.find_all("a", href=re.compile(c.original_href_slug))
-            to_update = (x for x in links if not FIND_FILES.search(x.get("href")))
-            for link_to_update in to_update:
-                # The slug ends with "/" (e.g. "Update%2001/"); the file name inside the book must not.
-                href = link_to_update["href"].replace(c.original_href_slug, c.new_href)
-                link_to_update["href"] = TRAILING_SLASH_AFTER_PAGE.sub(".xhtml", href)
-            asset_links = (x for x in links if FIND_FILES.search(x.get("href")))
-            for link_to_asset in asset_links:
-                # original_href already ends with "/"
-                link_to_asset["href"] = link_to_asset["href"].replace(c.original_href_slug, c.original_href)
+        for link in content.find_all("a", href=True):
+            href = link["href"].strip()
+            if not href or href.startswith("#"):
+                continue  # in-page anchor
+            full = Extractor.get_full_url(current_url, href)
+            if full is None:
+                continue  # mailto:, javascript:, unrepairable scheme typo... leave as is
+            target, fragment = urldefrag(full)
+            key = target if target.endswith("/") else target + "/"
+            if key in in_book:
+                link["href"] = in_book[key] + (f"#{fragment}" if fragment else "")
+            else:
+                link["href"] = full
 
     @staticmethod
     def get_known_update_names(url: str) -> List[str]:
@@ -248,34 +253,16 @@ class Extractor:
 
     @staticmethod
     def get_full_url(root_url: str, src: str) -> str | None:
-        def remove_extra_dots(url):
-            parsed = list(urlparse(url))
-            dirs = []
-            for name in parsed[2].split("/"):
-                if name == "..":
-                    if len(dirs) > 1:
-                        dirs.pop()
-                else:
-                    dirs.append(name)
-            parsed[2] = "/".join(dirs)
-            return urlunparse(parsed)
+        """Absolute URL of `src` as found on the page at `root_url` (a directory-like page URL).
 
-        root = str(root_url)
-        if root.endswith("/"):
-            root = root[:-1]
-
-        src = src.strip()
+        Returns None when `src` can't be an http(s) URL (mailto:, javascript:, broken scheme...)."""
+        src = src.strip().replace("\\", "/")
         if FIXABLE_SCHEME.match(src) or src.startswith("//") or HAS_SCHEME.match(src):
-            full = normalize_url(src)
-            if full is None:
-                return None
-        elif root_url in src:
-            full = src
-        else:
-            full = f"{root}/{src}"
-        if ".." in full:
-            full = remove_extra_dots(full)
-        return full
+            return normalize_url(src)
+        base = str(root_url)
+        if not base.endswith("/"):
+            base += "/"
+        return urljoin(base, src)
 
 
     @staticmethod
@@ -500,7 +487,8 @@ async def _get_image(session: aiohttp.ClientSession, img: Image, registry: dict 
         detected = detect_image_type(content, img_url, content_type)
         if detected is None:
             declared = (content_type or "unknown type").split(";")[0].strip()
-            raise NonRetryableError(f"Not an image: the server answered with {declared} ({len(content)} bytes)")
+            raise NonRetryableError(f"Not an image: the server answered with {declared} ({len(content)} bytes)",
+                                    img_url)
         media_type, extension = detected
         img_hash = get_blake2b_hash(content)
         new_name = f"images/{img_hash}.{extension}"
@@ -535,7 +523,7 @@ def _skipped(img: Image, e: Exception) -> SkippedResource:
 
 
 async def build_intro(session: aiohttp.ClientSession, url_root: str, intro: Intro, registry: dict = None, failures: list[SkippedResource] = None) -> Page:
-    intro_chapter = epub.EpubHtml(title="Introduction", file_name="introduction.xhtml", lang=intro.language)
+    intro_chapter = epub.EpubHtml(title="Introduction", file_name=INTRO_FILE_NAME, lang=intro.language)
     intro_chapter.add_item(get_style_item())
     tasks = []
     for image in intro.images:

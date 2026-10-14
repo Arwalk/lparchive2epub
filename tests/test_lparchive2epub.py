@@ -408,6 +408,15 @@ def test_get_full_url():
     assert Extractor.get_full_url(root, "1.png") == f"{root}1.png"
     assert Extractor.get_full_url(root, "../1.png") == "https://lparchive.org/Shin-Megami-Tensei-Devil-Summoner/1.png"
     assert Extractor.get_full_url(root, "mailto:someone@example.com") is None
+    assert Extractor.get_full_url(root, "javascript:void(0)") is None
+    # site-absolute paths are relative to the host, not to the page
+    assert Extractor.get_full_url(root, "/site_images/x.png") == "https://lparchive.org/site_images/x.png"
+    assert Extractor.get_full_url(root, "../Smilies/emot-smith.gif") == "https://lparchive.org/Shin-Megami-Tensei-Devil-Summoner/Smilies/emot-smith.gif"
+    assert Extractor.get_full_url(root, "//lpix.org/a.png") == "https://lpix.org/a.png"
+    assert Extractor.get_full_url(root, " img\\sub\\a.png ") == f"{root}img/sub/a.png"
+    assert Extractor.get_full_url(root, "https://lpix.org/a.png") == "https://lpix.org/a.png"
+    # the landing page URL has no trailing slash
+    assert Extractor.get_full_url("https://lparchive.org/Some-LP", "Update%2001/") == "https://lparchive.org/Some-LP/Update%2001/"
 
 
 @pytest.mark.asyncio
@@ -560,12 +569,19 @@ def test_fix_links_rewrites_chapter_links_without_trailing_slash():
                  original_href_slug="Update%2002/"),
     ]
     html = ('<div id="content">'
-            '<a href="Update%2001/">plain</a>'
-            '<a href="Update%2001/#part2">anchor</a>'
-            '<a href="../Update%2002/">from an update page</a>'
-            '<a href="Update%2002/map.png">asset in a chapter</a>'
+            '<a href="../Update%2001/">plain</a>'
+            '<a href="../Update%2001/#part2">anchor</a>'
+            '<a href="../Update%2002">no trailing slash</a>'
+            '<a href="../Update%2002/map.png">asset in a chapter</a>'
             '<a href="manual.pdf">local asset</a>'
+            '<a href="../">back to the landing page</a>'
+            '<a href="#top">in-page anchor</a>'
+            '<a href="/Other-LP/">another LP, site-absolute</a>'
+            '<a href="/site_images/x.png">site-absolute asset</a>'
+            '<a href="//lpix.org/a.png">scheme-relative</a>'
             '<a href="http://example.com/Update%2001/">unrelated host, left alone</a>'
+            '<a href="mailto:someone@example.com">mail</a>'
+            '<a href="hhttp://lpix.org/b.png">repairable typo</a>'
             '</div>')
     content = BeautifulSoup(html, "html.parser").find("div", id="content")
 
@@ -578,9 +594,29 @@ def test_fix_links_rewrites_chapter_links_without_trailing_slash():
         "update_1.xhtml",
         f"{root}/Update%2002/map.png",
         f"{root}/Update%2003/manual.pdf",
-        "http://example.com/update_0.xhtml",
+        "introduction.xhtml",
+        "#top",
+        "https://lparchive.org/Other-LP/",
+        "https://lparchive.org/site_images/x.png",
+        "https://lpix.org/a.png",
+        "http://example.com/Update%2001/",
+        "mailto:someone@example.com",
+        "http://lpix.org/b.png",
     ]
-    assert not any(h.endswith("/") or ".xhtml/" in h for h in hrefs)
+    assert not any(".xhtml/" in h for h in hrefs)
+
+
+def test_fix_links_on_the_landing_page_resolves_against_the_lp_root():
+    root = "https://lparchive.org/Some-LP"
+    chapters = [Chapters(num=0, original_href=f"{root}/Update%2001/", txt="Update 1", new_href="update_0.xhtml",
+                         original_href_slug="Update%2001/")]
+    html = ('<div id="content"><a href="Update%2001/">toc</a><a href="/X-COM-Interceptor/">other lp</a>'
+            '<a href="Images/map.png">asset</a><a href="Update%20(1)/">regex chars are harmless</a></div>')
+    content = BeautifulSoup(html, "html.parser").find("div", id="content")
+    Extractor.fix_links(content, chapters, root)
+    assert [a["href"] for a in content.find_all("a")] == [
+        "update_0.xhtml", "https://lparchive.org/X-COM-Interceptor/", f"{root}/Images/map.png",
+        f"{root}/Update%20(1)/"]
 
 
 @pytest.mark.asyncio
@@ -596,6 +632,9 @@ async def test_intro_toc_links_point_at_existing_chapter_files():
     toc_links = re.findall(r'href="(update_[^"]+)"', intro)
     assert len(toc_links) == 18
     assert all(f"EPUB/{h}" in files for h in toc_links), toc_links
+    # links to other LPs leave the book as absolute URLs instead of dangling container paths
+    assert 'href="https://lparchive.org/X-COM-Interceptor/"' in intro
+    assert 'href="/X-COM-Interceptor/"' not in intro
 
 
 @pytest.mark.asyncio
@@ -661,6 +700,7 @@ async def test_write_failure_is_reported_and_leaves_no_partial_file(monkeypatch)
     (b"\x00\x01unknown", "http://x/a", "image/gif; charset=binary", ("image/gif", "gif")),  # header fallback
     (b"<!DOCTYPE html><html><body>Not found</body></html>", "http://x/a.png", "text/html", None),
     (b"\x00\x01unknown", "http://x/a.php", "text/plain", None),
+    (b"", "http://x/a.gif", "image/gif", None),                           # empty body, whatever the header says
 ])
 def test_detect_image_type(content, url, content_type, expected):
     assert detect_image_type(content, url, content_type) == expected
