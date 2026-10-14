@@ -8,7 +8,8 @@ usage: lparchive2epub [-h] [--no-cache] [--strict] [--allow-missing-updates] URL
 A tool to transform a Let's Play from lparchive.org to epub format.
 
 positional arguments:
-  URL
+  URL          Address of the Let's Play on lparchive.org (any page of it
+               will do)
   OUTPUT_FILE
 
 options:

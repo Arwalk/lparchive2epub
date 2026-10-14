@@ -2,20 +2,17 @@ import asyncio
 import sys
 import traceback
 from argparse import ArgumentParser, ArgumentTypeError
-from urllib.parse import urlparse
-
 from aiohttp_client_cache import CacheBackend, CachedSession
 
-from lparchive2epub.lib import lparchive2epub, ExtractionError, ISSUES_URL, EXIT_FAILURE, EXIT_INTERRUPTED
+from lparchive2epub.lib import lparchive2epub, ExtractionError, ISSUES_URL, EXIT_FAILURE, EXIT_INTERRUPTED, normalize_lp_url
 
 
 def is_lparchive_url(arg):
-    url = urlparse(arg)
-    if not "lparchive.org" in url.geturl():
-        raise ArgumentTypeError(f"{arg} is not an lparchive.org URL")
-    if not url.path or url.path == "/":
-        raise ArgumentTypeError(f"{arg} is not a let's play archive")
-    return arg
+    """argparse type: any lparchive.org address, normalised to the Let's Play's own URL."""
+    try:
+        return normalize_lp_url(arg)
+    except ValueError as e:
+        raise ArgumentTypeError(str(e)) from e
 
 
 arg_parser = ArgumentParser(
@@ -23,7 +20,8 @@ arg_parser = ArgumentParser(
     description="A tool to transform a Let's Play from lparchive.org to epub format."
 )
 
-arg_parser.add_argument("url", metavar="URL", nargs=1, type=is_lparchive_url)
+arg_parser.add_argument("url", metavar="URL", nargs=1, type=is_lparchive_url,
+                        help="Address of the Let's Play on lparchive.org (any page of it will do)")
 arg_parser.add_argument("output", metavar="OUTPUT_FILE", nargs=1, type=str)
 arg_parser.add_argument("--no-cache", action="store_true", help="Don't cache url calls")
 arg_parser.add_argument("--strict", action="store_true",

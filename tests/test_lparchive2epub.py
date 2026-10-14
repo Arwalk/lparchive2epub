@@ -8,7 +8,7 @@ import zipfile
 from urllib.parse import unquote
 
 import aiohttp
-from lparchive2epub.lib import Extractor, Chapters, lparchive2epub, BeautifulSoup, normalize_url, build_update, Update, Intro, format_failures_report, ISSUES_URL, do, StrictModeError, MissingUpdatesError, ExtractionError, OutputError, check_output_path, detect_image_type, NotFoundError, NetworkError, RetriesExhaustedError, EXIT_NOT_FOUND, EXIT_NETWORK, EXIT_OUTPUT, EXIT_INTERRUPTED
+from lparchive2epub.lib import Extractor, Chapters, lparchive2epub, BeautifulSoup, normalize_url, build_update, Update, Intro, format_failures_report, ISSUES_URL, do, StrictModeError, MissingUpdatesError, ExtractionError, OutputError, check_output_path, detect_image_type, NotFoundError, NetworkError, RetriesExhaustedError, NotALetsPlayError, normalize_lp_url, EXIT_NOT_FOUND, EXIT_NETWORK, EXIT_OUTPUT, EXIT_INTERRUPTED
 import lparchive2epub.lib as lib
 from lparchive2epub import main as cli
 from importlib.resources import files
@@ -886,3 +886,75 @@ async def test_output_is_byte_identical_whatever_the_download_order():
         assert z.testzip() is None
     assert len(images) == 18 * 6 + 1 + 1  # 6 per chapter, one shared, one in the intro
     assert "lparchive2epub-" in opf and opf.count("<dc:identifier") == 1
+
+
+@pytest.mark.parametrize(("given", "expected"), [
+    ("https://lparchive.org/X-COM-Terror-from-the-Deep", "https://lparchive.org/X-COM-Terror-from-the-Deep"),
+    ("https://lparchive.org/X-COM-Terror-from-the-Deep/", "https://lparchive.org/X-COM-Terror-from-the-Deep"),
+    ("https://lparchive.org/X-COM-Terror-from-the-Deep/Update%2001/", "https://lparchive.org/X-COM-Terror-from-the-Deep"),
+    ("https://lparchive.org/Some-LP/Update%2003/#part2", "https://lparchive.org/Some-LP"),
+    ("https://lparchive.org/Some-LP?x=1", "https://lparchive.org/Some-LP"),
+    ("http://www.lparchive.org/Some-LP/", "https://lparchive.org/Some-LP"),
+    ("HTTPS://LPARCHIVE.ORG/Some-LP", "https://lparchive.org/Some-LP"),
+    ("lparchive.org/Some-LP", "https://lparchive.org/Some-LP"),
+    ("  https://lparchive.org/Some-LP  ", "https://lparchive.org/Some-LP"),
+])
+def test_normalize_lp_url(given, expected):
+    assert normalize_lp_url(given) == expected
+
+
+@pytest.mark.parametrize("given", [
+    "https://lparchive.org/",
+    "https://lparchive.org",
+    "lparchive.org",
+    "https://evil.example/?lparchive.org",
+    "https://evil.example/lparchive.org/Some-LP",
+    "https://notlparchive.org/Some-LP",
+    "https://lparchive.org.evil.example/Some-LP",
+    "ftp://lparchive.org/Some-LP",
+    "",
+])
+def test_normalize_lp_url_rejects_non_lp_addresses(given):
+    with pytest.raises(ValueError):
+        normalize_lp_url(given)
+
+
+def test_cli_rejects_bad_url_with_usage_error(capsys):
+    with pytest.raises(SystemExit) as exit_info:
+        cli.main(["https://evil.example/?lparchive.org", "out.epub"])
+    assert exit_info.value.code == 2
+    assert "is not an lparchive.org URL" in capsys.readouterr().err
+
+
+def test_cli_normalises_the_url_before_extracting(monkeypatch):
+    seen = {}
+
+    async def fake(url, *args, **kwargs):
+        seen["url"] = url
+
+    monkeypatch.setattr(cli, "lparchive2epub", fake)
+    cli.main(["--no-cache", "lparchive.org/Some-LP/Update%2007/", "out.epub"])
+    assert seen["url"] == "https://lparchive.org/Some-LP"
+
+
+NOT_AN_LP_PAGE = b"""<html><head><title>GuavaMoment's Let's Plays</title></head>
+<body><div class="header">The Let's Play Archive</div><ul><li><a href="/X-COM-Terror-from-the-Deep/">X-COM</a></li></ul></body></html>"""
+
+
+def test_intro_rejects_a_page_that_is_not_a_lets_play():
+    with pytest.raises(NotALetsPlayError) as exc_info:
+        Extractor.intro("https://lparchive.org/author", BeautifulSoup(NOT_AN_LP_PAGE, "html.parser"))
+    msg = str(exc_info.value)
+    assert "is not the page of a Let's Play" in msg
+    assert "the content block" in msg and "the archival date" in msg and "the author" in msg
+    assert exc_info.value.exit_code == EXIT_NOT_FOUND
+
+
+@pytest.mark.asyncio
+async def test_non_lp_page_fails_cleanly_through_do():
+    url = "https://lparchive.org/author"
+    session = _FakeSession("never-matches", responses={url: _FakeResponse(200, NOT_AN_LP_PAGE)})
+    with tempfile.TemporaryDirectory() as d:
+        with pytest.raises(NotALetsPlayError):
+            await do(url, f"{d}/book.epub", session, lambda *_: None)
+        assert os.listdir(d) == []

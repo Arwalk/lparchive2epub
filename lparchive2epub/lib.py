@@ -200,16 +200,24 @@ class Extractor:
 
     @staticmethod
     def intro(url: str, p: BeautifulSoup) -> Intro:
-        title = p.title.text
-        author = next(x for x in p.find_all("meta") if x.get("name", None) == "author").get("content", None)
-        language = "en"
         content = p.find("div", id="content")
+        archival = p.find("li", id="archival")
+        author_meta = p.find("meta", attrs={"name": "author"})
+        missing = [name for name, found in (("the content block", content), ("the archival date", archival),
+                                            ("the author", author_meta), ("the title", p.title)) if found is None]
+        if missing:
+            raise NotALetsPlayError(
+                f"{url} is not the page of a Let's Play: {', '.join(missing)} could not be found on it.\n"
+                f"A Let's Play address looks like {LPARCHIVE_ROOT}/Name-Of-The-Lets-Play")
+
+        title = p.title.text
+        author = author_meta.get("content", None) or "Unknown"
+        language = "en"
         chapters = Extractor.all_chapters(url, p)
         Extractor.fix_links(content, chapters, url)
 
         images = Extractor.all_images(content, url)
 
-        archival = p.find("li", id="archival")
         published_on = archival.find("strong").text
 
         return Intro(
@@ -390,6 +398,38 @@ class NotFoundError(ExtractionError):
 class NetworkError(ExtractionError):
     """lparchive.org could not be reached or kept failing."""
     exit_code = EXIT_NETWORK
+
+
+class NotALetsPlayError(ExtractionError):
+    """The page exists but is not the landing page of a Let's Play (author page, tag listing...)."""
+    exit_code = EXIT_NOT_FOUND
+
+
+LPARCHIVE_HOSTS = {"lparchive.org", "www.lparchive.org"}
+LPARCHIVE_ROOT = "https://lparchive.org"
+
+
+def normalize_lp_url(arg: str) -> str:
+    """Turn any address on lparchive.org into the canonical URL of the Let's Play it belongs to.
+
+    "lparchive.org/Some-LP/", "http://www.lparchive.org/Some-LP/Update%2003/#part2" and
+    "https://lparchive.org/Some-LP?x=1" all give "https://lparchive.org/Some-LP".
+    Raises ValueError with a user-facing message when the address is not on lparchive.org or
+    does not name a Let's Play."""
+    text = arg.strip()
+    if not text:
+        raise ValueError("no URL given")
+    if "://" not in text:
+        text = "https://" + text.lstrip("/")
+    parsed = urlparse(text)
+    if parsed.scheme.lower() not in ("http", "https"):
+        raise ValueError(f"{arg} is not an http(s) URL")
+    if parsed.hostname is None or parsed.hostname.lower() not in LPARCHIVE_HOSTS:
+        raise ValueError(f"{arg} is not an lparchive.org URL")
+    segments = [seg for seg in parsed.path.split("/") if seg]
+    if not segments:
+        raise ValueError(f"{arg} does not name a Let's Play: expected something like {LPARCHIVE_ROOT}/Name-Of-The-Lets-Play")
+    return f"{LPARCHIVE_ROOT}/{segments[0]}"
 
 
 def landing_page_error(url: str, e: Exception) -> ExtractionError:
@@ -688,8 +728,10 @@ def build_placeholder_page(chapter: Chapters, intro: Intro, error: Exception) ->
 
 async def lparchive2epub(url: str, file: str, root_session: aiohttp.ClientSession | None = None, writer=tqdm.write,
                          strict: bool = False, allow_missing_updates: bool = False):
-    if url.endswith("/"):
-        url = url[:-1]
+    try:
+        url = normalize_lp_url(url)
+    except ValueError as e:
+        raise NotFoundError(str(e)) from e
     if root_session is None:
         root_session = aiohttp.ClientSession()
     async with root_session as session:
