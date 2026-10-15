@@ -881,7 +881,7 @@ async def test_output_is_byte_identical_whatever_the_download_order():
     assert hashlib.sha256(first).hexdigest() == hashlib.sha256(second).hexdigest() == hashlib.sha256(third).hexdigest()
     with zipfile.ZipFile(io.BytesIO(first)) as z:
         opf = z.read("EPUB/content.opf").decode()
-        images = re.findall(r'href="images/[^"]+"', opf)
+        images = [i for i in re.findall(r'href="images/[^"]+"', opf) if "cover" not in i]
         # zip entries are stamped with the LP's archival date, not the build time
         assert {info.date_time for info in z.infolist()} == {(2010, 5, 14, 0, 0, 0)}
         assert z.infolist()[0].filename == "mimetype" and z.infolist()[0].compress_type == zipfile.ZIP_STORED
@@ -1035,7 +1035,7 @@ async def test_book_has_exactly_one_stylesheet_linked_from_every_page():
             css = [n for n in z.namelist() if n.endswith(".css")]
             assert css == ["EPUB/style/lparchive.css"]
             for n in z.namelist():
-                if n.endswith(".xhtml") and n != "EPUB/nav.xhtml":
+                if n.endswith(".xhtml") and n not in ("EPUB/nav.xhtml", "EPUB/cover.xhtml"):
                     assert 'href="style/lparchive.css"' in z.read(n).decode(), n
 
 
@@ -1260,7 +1260,7 @@ async def test_max_image_size_option_reduces_images_in_the_book_and_reports_it()
         with zipfile.ZipFile(out) as z:
             opf = z.read("EPUB/content.opf").decode()
             chapter = z.read("EPUB/update_0.xhtml").decode()
-            images = {n: z.read(n) for n in z.namelist() if n.startswith("EPUB/images/")}
+            images = {n: z.read(n) for n in z.namelist() if n.startswith("EPUB/images/") and "cover" not in n}
     jpegs = [n for n, data in images.items() if n.endswith(".jpg")]
     assert len(jpegs) == 2 and all(max(_dimensions(images[n])) <= 1600 for n in jpegs)
     assert not any(n.endswith(".webp") for n in images) and "image/webp" not in opf
@@ -1283,7 +1283,7 @@ async def test_without_the_option_images_are_kept_byte_for_byte():
         out = f"{d}/book.epub"
         await asyncio.wait_for(do(url, out, session, messages.append), timeout=60)
         with zipfile.ZipFile(out) as z:
-            stored = [z.read(n) for n in z.namelist() if n.endswith(".jpg")]
+            stored = [z.read(n) for n in z.namelist() if n.endswith(".jpg") and "cover" not in n]
     assert stored == [big_jpeg]
     assert not any(m.startswith("Images:") for m in messages)
 
@@ -1377,7 +1377,7 @@ async def test_identical_bytes_under_different_urls_are_processed_and_stored_onc
         out = f"{d}/book.epub"
         await asyncio.wait_for(do(url, out, session, lambda *_: None, image_processing=processing), timeout=60)
         with zipfile.ZipFile(out) as z:
-            images = [n for n in z.namelist() if n.startswith("EPUB/images/") and n.endswith(".jpg")]
+            images = [n for n in z.namelist() if n.startswith("EPUB/images/") and n.endswith(".jpg") and "cover" not in n]
             pages = [z.read(f"EPUB/update_{i}.xhtml").decode() for i in range(3)]
 
     assert [session.requested.count(u) for u in urls] == [1, 1, 1]   # each URL still downloaded once
@@ -1670,3 +1670,93 @@ def test_blocks_inside_links_are_restructured_so_the_page_validates():
     soup = BeautifulSoup(out, "html.parser")
     for wrapper in soup.find_all(["a", "b", "i", "span"]):
         assert not wrapper.find(["p", "div", "blockquote", "ul", "table", "pre"]), str(wrapper)
+
+
+def test_generated_cover_is_a_jpeg_of_the_expected_size_and_deterministic():
+    from lparchive2epub.cover import make_cover, COVER_SIZE
+    one = make_cover("Dwarf Fortress - Boatmurdered", "Various")
+    two = make_cover("Dwarf Fortress - Boatmurdered", "Various")
+    assert one == two
+    assert detect_image_type(one) == ("image/jpeg", "jpg") and _dimensions(one) == COVER_SIZE
+    # very long titles are wrapped and shrunk rather than cut off: the function must not fail
+    long_title = "An Extremely Long Title " * 12 + "Supercalifragilisticexpialidociouslylongsinglewordthatdoesnotfit"
+    assert _dimensions(make_cover(long_title, "Someone With A Rather Long Name Too")) == COVER_SIZE
+
+
+def test_title_page_lists_the_landing_page_facts():
+    from lparchive2epub.cover import make_title_page
+    intro = Extractor.intro("https://lparchive.org/X-COM-Terror-from-the-Deep", BeautifulSoup(xcom, "html.parser"))
+    page = make_title_page(intro, "https://lparchive.org/X-COM-Terror-from-the-Deep", "A description <with> markup")
+    assert "<h1>X-COM: Terror from the Deep</h1>" in page
+    assert "by GuavaMoment" in page
+    assert "Updates: 18 updates" in page and "Posted: Oct 26, 2009 to Apr 09, 2010" in page
+    assert "Tags: hybrid, voice" in page and "Added to the archive: May 14, 2010" in page
+    assert '<a href="http://forums.somethingawful.com/showthread.php?threadid=3220122">' in page
+    assert "A description &lt;with&gt; markup" in page and "Converted by lparchive2epub" in page
+
+
+async def _build_book(session, **kwargs):
+    url = "https://lparchive.org/X-COM-Terror-from-the-Deep"
+    with tempfile.TemporaryDirectory() as d:
+        out = f"{d}/book.epub"
+        await asyncio.wait_for(do(url, out, session, lambda *_: None, **kwargs), timeout=60)
+        with zipfile.ZipFile(out) as z:
+            return {n: z.read(n) for n in z.namelist()}
+
+
+@pytest.mark.asyncio
+async def test_book_opens_on_cover_then_title_page_then_navigation():
+    files = await _build_book(_FakeSession("never-matches"))
+    opf = files["EPUB/content.opf"].decode()
+    assert re.search(r'<item href="images/cover.jpg" id="cover-img" media-type="image/jpeg" properties="cover-image"/>', opf)
+    assert len(re.findall(r'<meta name="cover" content="cover-img"\s*/?>', opf)) == 1   # EPUB 2 readers, once
+    spine = re.findall(r'<itemref idref="([^"]+)"', opf)
+    assert spine[:3] == ["cover", "chapter_0", "nav"]
+    assert 'linear="no"' not in opf   # the cover is read first, not a detached page (epubcheck OPF-096)
+    assert '<title>Title page</title>' in files["EPUB/title_page.xhtml"].decode()
+    nav = files["EPUB/nav.xhtml"].decode()
+    assert '<a href="title_page.xhtml">Title page</a>' in nav
+    assert '<a href="introduction.xhtml">X-COM: Terror from the Deep</a>' in nav   # landing page named after the LP
+    assert nav.count(">Introduction<") == 0
+    assert _dimensions(files["EPUB/images/cover.jpg"]) == (1600, 2400)
+
+
+@pytest.mark.asyncio
+async def test_custom_and_no_cover():
+    custom = _make_image("PNG", (600, 900))
+    files = await _build_book(_FakeSession("never-matches"), cover=custom)
+    assert files["EPUB/images/cover.png"] == custom
+    assert 'href="images/cover.png" id="cover-img" media-type="image/png" properties="cover-image"' in files["EPUB/content.opf"].decode()
+
+    files = await _build_book(_FakeSession("never-matches"), cover=False)
+    opf = files["EPUB/content.opf"].decode()
+    assert "cover-image" not in opf and not any("cover" in n for n in files)
+    assert re.findall(r'<itemref idref="([^"]+)"', opf)[:2] == ["chapter_0", "nav"]
+    assert "EPUB/title_page.xhtml" in files
+
+    with pytest.raises(OutputError, match="not an image"):
+        await _build_book(_FakeSession("never-matches"), cover=b"this is not an image")
+
+
+def test_cli_cover_flags(monkeypatch):
+    seen = {}
+
+    async def fake(url, *args, **kwargs):
+        seen.update(kwargs)
+
+    monkeypatch.setattr(cli, "lparchive2epub", fake)
+    cli.main(["https://lparchive.org/Some-LP", "out.epub"])
+    assert seen["cover"] is True
+    cli.main(["--no-cover", "https://lparchive.org/Some-LP", "out.epub"])
+    assert seen["cover"] is False
+    with tempfile.TemporaryDirectory() as d:
+        with open(f"{d}/c.png", "wb") as f:
+            f.write(PNG_BYTES)
+        cli.main(["--cover", f"{d}/c.png", "https://lparchive.org/Some-LP", "out.epub"])
+        assert seen["cover"] == PNG_BYTES
+        with pytest.raises(SystemExit) as exit_info:
+            cli.main(["--cover", f"{d}/missing.png", "https://lparchive.org/Some-LP", "out.epub"])
+        assert exit_info.value.code == 1
+    with pytest.raises(SystemExit) as exit_info:
+        cli.main(["--cover", "x.png", "--no-cover", "https://lparchive.org/Some-LP", "out.epub"])
+    assert exit_info.value.code == 2

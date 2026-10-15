@@ -582,7 +582,7 @@ requires-dist = [
     { name = "aiohttp-client-cache", extras = ["all"], specifier = ">=0.14" },
     { name = "beautifulsoup4", specifier = ">=4.12.2,<5" },
     { name = "ebooklib", specifier = ">=0.20" },
-    { name = "pillow", specifier = ">=10" },
+    { name = "pillow", specifier = "==12.3.0" },
     { name = "tqdm", specifier = ">=4.66.4,<5" },
 ]
 

@@ -59,6 +59,11 @@ arg_parser.add_argument("--max-image-size", metavar="PIXELS", type=positive_int,
                              "as served. 1600 suits e-readers, 2500 high-resolution tablets")
 arg_parser.add_argument("--jpeg-quality", metavar="1-100", type=jpeg_quality, default=85,
                         help="JPEG quality used when --max-image-size re-encodes an image (default: 85)")
+cover_group = arg_parser.add_mutually_exclusive_group()
+cover_group.add_argument("--cover", metavar="IMAGE",
+                         help="Use this image file as the cover instead of the generated one (title and author on "
+                              "a plain background)")
+cover_group.add_argument("--no-cover", action="store_true", help="Build the book without a cover image")
 
 async def amain(args):
     cache = None
@@ -67,8 +72,17 @@ async def amain(args):
         print(f"using cache {cache_file}", file=sys.stderr)
         cache = CachedSession(cache=SQLiteBackend(cache_file, expire_after=-1, fast_save=True, autoclose=True))
     processing = ImageProcessing(args.max_image_size, args.jpeg_quality) if args.max_image_size else None
+    cover: bytes | bool = True
+    if args.no_cover:
+        cover = False
+    elif args.cover:
+        try:
+            with open(args.cover, "rb") as f:
+                cover = f.read()
+        except OSError as e:
+            raise ExtractionError(f"Cannot read the cover image {args.cover}: {e.strerror or e}") from e
     await lparchive2epub(args.url[0], args.output[0], cache, strict=args.strict,
-                         allow_missing_updates=args.allow_missing_updates, image_processing=processing)
+                         allow_missing_updates=args.allow_missing_updates, image_processing=processing, cover=cover)
 
 def main(argv=None):
     args = arg_parser.parse_args(argv)

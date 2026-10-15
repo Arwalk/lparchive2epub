@@ -18,6 +18,7 @@ from ebooklib import epub
 from ebooklib.epub import EpubHtml, EpubImage, EpubBook
 from tqdm.asyncio import tqdm
 
+from lparchive2epub.cover import COVER_FILE_NAME, TITLE_PAGE_FILE_NAME, make_cover, make_title_page
 from lparchive2epub.style import get_style_item
 
 # Concurrency limit for worker queues
@@ -848,7 +849,8 @@ def _skipped(img: Image, e: Exception) -> SkippedResource:
 
 async def build_intro(session: aiohttp.ClientSession, url_root: str, intro: Intro, registry: ImageRegistry | None = None,
                       failures: list[SkippedResource] = None, processing: ImageProcessing | None = None) -> Page:
-    intro_chapter = epub.EpubHtml(title="Introduction", file_name=INTRO_FILE_NAME, lang=intro.language)
+    # Named after the Let's Play: many LPs have their own "Introduction" update right after it
+    intro_chapter = epub.EpubHtml(title=intro.title, file_name=INTRO_FILE_NAME, lang=intro.language)
     intro_chapter.add_item(get_style_item())
     tasks = []
     for image in intro.images:
@@ -998,7 +1000,7 @@ def build_placeholder_page(chapter: Chapters, intro: Intro, error: Exception) ->
 
 async def lparchive2epub(url: str, file: str, root_session: aiohttp.ClientSession | None = None, writer=tqdm.write,
                          strict: bool = False, allow_missing_updates: bool = False,
-                         image_processing: ImageProcessing | None = None):
+                         image_processing: ImageProcessing | None = None, cover: bytes | None | bool = True):
     try:
         url = normalize_lp_url(url)
     except ValueError as e:
@@ -1006,7 +1008,7 @@ async def lparchive2epub(url: str, file: str, root_session: aiohttp.ClientSessio
     if root_session is None:
         root_session = aiohttp.ClientSession()
     async with root_session as session:
-        await do(url, file, session, writer, strict, allow_missing_updates, image_processing)
+        await do(url, file, session, writer, strict, allow_missing_updates, image_processing, cover)
 
 
 tags_to_clean = [
@@ -1149,7 +1151,9 @@ def format_failures_report(url: str, failures: list[SkippedResource], outcome: s
 
 
 async def do(url: str, file: str, session: aiohttp.ClientSession, writer, strict: bool = False,
-             allow_missing_updates: bool = False, image_processing: ImageProcessing | None = None):
+             allow_missing_updates: bool = False, image_processing: ImageProcessing | None = None,
+             cover: bytes | None | bool = True):
+    """`cover`: True for a generated text cover, bytes for a custom image, None/False for no cover."""
     check_output_path(file)
     writer(f"extracting lp from {url}")
     writer("getting landing page")
@@ -1164,7 +1168,26 @@ async def do(url: str, file: str, session: aiohttp.ClientSession, writer, strict
     intro = Extractor.intro(url, landing)
 
     toc = []
-    spine = ["nav"]
+    spine = []
+    description = compose_description(intro, url)
+    if cover:
+        cover_bytes = cover if isinstance(cover, bytes) else make_cover(intro.title, intro.author)
+        cover_type = detect_image_type(cover_bytes)   # by content only: no file name to fall back on
+        if cover_type is None:
+            raise OutputError("The cover is not an image file.")
+        cover_name = COVER_FILE_NAME.rsplit(".", 1)[0] + "." + cover_type[1]
+        # Adds the image (with the cover-image property and the EPUB 2 <meta name="cover">) and a
+        # cover.xhtml page with id "cover"
+        book.set_cover(cover_name, cover_bytes)
+        book.get_item_with_id("cover").is_linear = True   # part of the reading order, not a detached page
+        spine.append("cover")
+    title_page = epub.EpubHtml(title="Title page", file_name=TITLE_PAGE_FILE_NAME, lang=intro.language)
+    title_page.add_item(get_style_item())
+    title_page.content = make_title_page(intro, url, description)
+    book.add_item(title_page)
+    toc.append(epub.Link(title_page.file_name, title_page.title, title_page.id))
+    spine.append(title_page)
+    spine.append("nav")
 
     writer("building intro")
     image_registry = ImageRegistry()
@@ -1258,7 +1281,7 @@ async def do(url: str, file: str, session: aiohttp.ClientSession, writer, strict
     book.set_language(intro.language)
     book.add_metadata("DC", "source", url)
     book.add_metadata("DC", "publisher", PUBLISHER)
-    book.add_metadata("DC", "description", compose_description(intro, url))
+    book.add_metadata("DC", "description", description)
     # Publication date: when the LP was finished, else when it started, else when it was archived
     published = parse_lp_date(intro.ended) or parse_lp_date(intro.began) or parse_lp_date(intro.published_on)
     if published:

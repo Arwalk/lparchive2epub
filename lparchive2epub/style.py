@@ -97,6 +97,12 @@ ul.toc li {
   border-bottom: 1px solid #cccccc;
 }
 
+/* Generated title page */
+.title-page { text-align: center; }
+.title-page h1 { margin-top: 3em; }
+.title-page .author { font-size: 1.2em; margin-bottom: 2em; }
+.title-page .colophon { font-size: 0.85em; margin-top: 2em; }
+
 table {
   border-collapse: collapse;
   margin: 1em 0;

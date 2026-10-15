@@ -5,6 +5,7 @@ this tool (and library) aims at helping people extracting full epubs of Let's Pl
 ```
 usage: lparchive2epub [-h] [--cache FILE] [--strict] [--allow-missing-updates]
                       [--max-image-size PIXELS] [--jpeg-quality 1-100]
+                      [--cover IMAGE | --no-cover]
                       URL OUTPUT_FILE
 
 A tool to transform a Let's Play from lparchive.org to epub format.
@@ -35,6 +36,10 @@ options:
   --jpeg-quality 1-100
                JPEG quality used when --max-image-size re-encodes an image
                (default: 85)
+  --cover IMAGE
+               Use this image file as the cover instead of the generated one
+               (title and author on a plain background)
+  --no-cover   Build the book without a cover image
 ```
 
 The repository also contains the script `util/all_archives.py` that tries to scrape all LPs from lparchive,
@@ -77,6 +82,12 @@ building the same LP again (after a failure, or with a newer version of the tool
 and only fetches what is missing. Failed downloads are never cached, so re-running after a dead host
 comes back works as expected. The database keeps a copy of every image it has seen, so it grows with
 each LP you build; delete the file to start afresh.
+
+## Cover and title page
+
+Every book gets a generated cover (title and author on a plain background) and a title page with the
+facts from the landing page: author, number of updates, when it was posted, tags, archival date,
+original thread. `--cover IMAGE` uses your own picture instead, `--no-cover` leaves the cover out.
 
 ## Image size
 
