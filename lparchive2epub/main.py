@@ -23,9 +23,11 @@ arg_parser = ArgumentParser(
     description="A tool to transform a Let's Play from lparchive.org to epub format."
 )
 
-arg_parser.add_argument("url", metavar="URL", nargs=1, type=is_lparchive_url,
+arg_parser.add_argument("url", metavar="URL", type=is_lparchive_url,
                         help="Address of the Let's Play on lparchive.org (any page of it will do)")
-arg_parser.add_argument("output", metavar="OUTPUT_FILE", nargs=1, type=str)
+arg_parser.add_argument("output", metavar="OUTPUT", nargs="?", default=None,
+                        help="Where to write the book: a file name, or a directory to put '<title>.epub' in "
+                             "(default: '<title>.epub' in the current directory)")
 arg_parser.add_argument("--cache", metavar="FILE",
                         help="Keep every downloaded page and image in a SQLite database at FILE (created if "
                              "needed, '.sqlite' added when FILE has no extension), so that running again, after a "
@@ -94,9 +96,11 @@ async def amain(args):
                 cover = f.read()
         except OSError as e:
             raise ExtractionError(f"Cannot read the cover image {args.cover}: {e.strerror or e}") from e
-    await lparchive2epub(args.url[0], args.output[0], session, strict=args.strict,
-                         allow_missing_updates=args.allow_missing_updates, image_processing=processing, cover=cover,
-                         fetch=fetch)
+    written = await lparchive2epub(args.url, args.output, session, strict=args.strict,
+                                   allow_missing_updates=args.allow_missing_updates, image_processing=processing,
+                                   cover=cover, fetch=fetch)
+    if args.quiet:
+        print(written)   # the one thing a script wants from a quiet run
 
 def main(argv=None):
     args = arg_parser.parse_args(argv)

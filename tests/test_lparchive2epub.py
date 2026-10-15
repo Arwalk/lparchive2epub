@@ -10,7 +10,7 @@ import zipfile
 from urllib.parse import unquote
 
 import aiohttp
-from lparchive2epub.lib import Extractor, Chapters, lparchive2epub, BeautifulSoup, normalize_url, build_update, Update, Intro, format_failures_report, ISSUES_URL, do, StrictModeError, MissingUpdatesError, ExtractionError, OutputError, check_output_path, detect_image_type, NotFoundError, NetworkError, RetriesExhaustedError, NotALetsPlayError, normalize_lp_url, fetch_with_retries, Fetched, get_cleaned_html, compose_description, parse_lp_date, reduce_image, ImageProcessing, ImageRegistry, FetchSettings, check_cache_path, resolve_cache_path, CacheError, EXIT_CACHE, EXIT_NOT_FOUND, EXIT_NETWORK, EXIT_OUTPUT, EXIT_INTERRUPTED
+from lparchive2epub.lib import Extractor, Chapters, lparchive2epub, BeautifulSoup, normalize_url, build_update, Update, Intro, format_failures_report, ISSUES_URL, do, StrictModeError, MissingUpdatesError, ExtractionError, OutputError, check_output_path, detect_image_type, NotFoundError, NetworkError, RetriesExhaustedError, NotALetsPlayError, normalize_lp_url, fetch_with_retries, Fetched, get_cleaned_html, compose_description, parse_lp_date, reduce_image, ImageProcessing, ImageRegistry, FetchSettings, check_cache_path, safe_file_name, resolve_output_path, resolve_cache_path, CacheError, EXIT_CACHE, EXIT_NOT_FOUND, EXIT_NETWORK, EXIT_OUTPUT, EXIT_INTERRUPTED
 import lparchive2epub.lib as lib
 from lparchive2epub import main as cli
 from importlib.resources import files
@@ -1899,3 +1899,68 @@ def test_cli_download_flags(monkeypatch):
         with pytest.raises(SystemExit) as exit_info:
             cli.main([*bad, "https://lparchive.org/Some-LP", "out.epub"])
         assert exit_info.value.code == 2
+
+
+@pytest.mark.parametrize(("title", "expected"), [
+    ("X-COM: Terror from the Deep", "X-COM Terror from the Deep.epub"),
+    ("Dwarf Fortress - Boatmurdered", "Dwarf Fortress - Boatmurdered.epub"),
+    ('Banjo-Kazooie: Grunty"s Revenge', "Banjo-Kazooie Grunty s Revenge.epub"),
+    ("What? / Why! | Who*", "What Why! Who.epub"),
+    ("  spaced   out...  ", "spaced out.epub"),
+    ("A" * 200, "A" * 150 + ".epub"),
+    ('"?:*', "Some-LP.epub"),   # nothing usable: the URL slug
+])
+def test_safe_file_name(title, expected):
+    assert safe_file_name(title, "Some-LP") == expected
+
+
+def test_resolve_output_path():
+    url = "https://lparchive.org/Some-LP"
+    assert resolve_output_path(None, "A: B", url) == "A B.epub"
+    assert resolve_output_path("my.epub", "A: B", url) == "my.epub"
+    with tempfile.TemporaryDirectory() as d:
+        assert resolve_output_path(d, "A: B", url) == os.path.join(d, "A B.epub")
+        assert resolve_output_path(f"{d}/x.epub", "A: B", url) == f"{d}/x.epub"
+
+
+@pytest.mark.asyncio
+async def test_output_defaults_to_the_title_in_the_current_directory(monkeypatch):
+    url = "https://lparchive.org/X-COM-Terror-from-the-Deep"
+    messages = []
+    with tempfile.TemporaryDirectory() as d:
+        monkeypatch.chdir(d)
+        written = await asyncio.wait_for(do(url, None, _FakeSession("never-matches"), messages.append), timeout=30)
+        assert written == "X-COM Terror from the Deep.epub"
+        assert os.listdir(d) == ["X-COM Terror from the Deep.epub"]
+        assert any(m == "Writing book file X-COM Terror from the Deep.epub" for m in messages)
+        os.mkdir(f"{d}/books")
+        written = await asyncio.wait_for(do(url, f"{d}/books", _FakeSession("never-matches"), lambda *_: None), timeout=30)
+        assert written == os.path.join(f"{d}/books", "X-COM Terror from the Deep.epub") and os.path.exists(written)
+        written = await asyncio.wait_for(do(url, f"{d}/named.epub", _FakeSession("never-matches"), lambda *_: None), timeout=30)
+        assert written == f"{d}/named.epub" and os.path.exists(written)
+
+
+@pytest.mark.asyncio
+async def test_bad_output_directory_still_fails_before_any_download():
+    session = _FakeSession("never-matches")
+    with tempfile.TemporaryDirectory() as d:
+        with pytest.raises(OutputError, match="does not exist"):
+            await do("https://lparchive.org/X-COM-Terror-from-the-Deep", f"{d}/nope/x.epub", session, lambda *_: None)
+    assert session.requested == []
+
+
+def test_cli_output_is_optional_and_printed_when_quiet(monkeypatch, capsys):
+    seen = {}
+
+    async def fake(url, file, session=None, *args, **kwargs):
+        seen["url"], seen["file"] = url, file
+        await session.close()
+        return "Some LP.epub"
+
+    monkeypatch.setattr(cli, "lparchive2epub", fake)
+    cli.main(["https://lparchive.org/Some-LP"])
+    assert (seen["url"], seen["file"]) == ("https://lparchive.org/Some-LP", None)
+    assert capsys.readouterr().out == ""
+    cli.main(["--quiet", "https://lparchive.org/Some-LP", "out.epub"])
+    assert seen["file"] == "out.epub"
+    assert capsys.readouterr().out == "Some LP.epub\n"

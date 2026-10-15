@@ -711,15 +711,51 @@ def landing_page_error(url: str, e: Exception) -> ExtractionError:
     return NetworkError(f"Could not reach {url}: {detail}\nCheck your network connection and try again.")
 
 
+# Characters Windows refuses in file names (and that confuse shells everywhere), plus control characters
+UNSAFE_IN_FILE_NAMES = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
+MAX_FILE_NAME_LENGTH = 150
+
+
+def safe_file_name(title: str, fallback: str) -> str:
+    """The Let's Play's title as a file name every filesystem accepts, or `fallback` (the URL slug)
+    when nothing usable is left."""
+    name = UNSAFE_IN_FILE_NAMES.sub(" ", title)
+    name = " ".join(name.split()).strip(". ")
+    if len(name) > MAX_FILE_NAME_LENGTH:
+        name = name[:MAX_FILE_NAME_LENGTH].rstrip(". ")
+    return (name or fallback) + ".epub"
+
+
+def resolve_output_path(file: str | None, title: str, url: str) -> str:
+    """Where the book goes: `file` as given, or "<title>.epub" in `file` when that is a directory,
+    or in the current directory when no output was given."""
+    if file is None:
+        return safe_file_name(title, url.rstrip("/").rsplit("/", 1)[-1])
+    if os.path.isdir(file):
+        return os.path.join(file, safe_file_name(title, url.rstrip("/").rsplit("/", 1)[-1]))
+    return file
+
+
+def check_output_directory(file: str | None):
+    """Fail early, before any download, if the book can't possibly be written where `file` points:
+    `file` is the book's path, a directory to put it in, or None for the current directory."""
+    if file is None:
+        directory = os.getcwd()
+    elif os.path.isdir(file):
+        directory = file
+    else:
+        directory = os.path.dirname(os.path.abspath(file))
+        if not os.path.isdir(directory):
+            raise OutputError(f"Cannot write the book to {file}: the directory {directory} does not exist.")
+    if not os.access(directory, os.W_OK):
+        raise OutputError(f"Cannot write the book in {directory}: the directory is not writable.")
+
+
 def check_output_path(file: str):
-    """Fail early, before any download, if the book can't possibly be written at `file`."""
-    directory = os.path.dirname(os.path.abspath(file))
+    """Fail if the book can't be written at `file` (a file path, resolved)."""
+    check_output_directory(file)
     if os.path.isdir(file):
         raise OutputError(f"Cannot write the book to {file}: it is a directory.")
-    if not os.path.isdir(directory):
-        raise OutputError(f"Cannot write the book to {file}: the directory {directory} does not exist.")
-    if not os.access(directory, os.W_OK):
-        raise OutputError(f"Cannot write the book to {file}: the directory {directory} is not writable.")
     if os.path.exists(file) and not os.access(file, os.W_OK):
         raise OutputError(f"Cannot write the book to {file}: the file exists and is not writable.")
 
@@ -1069,10 +1105,12 @@ def build_placeholder_page(chapter: Chapters, intro: Intro, error: Exception) ->
     return Page(chapter.num, placeholder, [])
 
 
-async def lparchive2epub(url: str, file: str, root_session: aiohttp.ClientSession | None = None, writer=log,
-                         strict: bool = False, allow_missing_updates: bool = False,
+async def lparchive2epub(url: str, file: str | None = None, root_session: aiohttp.ClientSession | None = None,
+                         writer=log, strict: bool = False, allow_missing_updates: bool = False,
                          image_processing: ImageProcessing | None = None, cover: bytes | None | bool = True,
-                         fetch: FetchSettings | None = None):
+                         fetch: FetchSettings | None = None) -> str:
+    """Build the book for `url` at `file` (a path, a directory, or None for "<title>.epub" in the current
+    directory). Returns the path of the written book."""
     try:
         url = normalize_lp_url(url)
     except ValueError as e:
@@ -1080,7 +1118,7 @@ async def lparchive2epub(url: str, file: str, root_session: aiohttp.ClientSessio
     if root_session is None:
         root_session = aiohttp.ClientSession(timeout=CLIENT_TIMEOUT)
     async with root_session as session:
-        await do(url, file, session, writer, strict, allow_missing_updates, image_processing, cover, fetch)
+        return await do(url, file, session, writer, strict, allow_missing_updates, image_processing, cover, fetch)
 
 
 tags_to_clean = [
@@ -1222,14 +1260,16 @@ def format_failures_report(url: str, failures: list[SkippedResource], outcome: s
     return "\n".join(lines)
 
 
-async def do(url: str, file: str, session: aiohttp.ClientSession, writer, strict: bool = False,
+async def do(url: str, file: str | None, session: aiohttp.ClientSession, writer, strict: bool = False,
              allow_missing_updates: bool = False, image_processing: ImageProcessing | None = None,
-             cover: bytes | None | bool = True, fetch: FetchSettings | None = None):
-    """`cover`: True for a generated text cover, bytes for a custom image, None/False for no cover.
-    `writer` gets the final report and summary; progress messages go through it too unless `fetch.quiet`."""
+             cover: bytes | None | bool = True, fetch: FetchSettings | None = None) -> str:
+    """`file`: the book's path, a directory to put "<title>.epub" in, or None for the current directory.
+    `cover`: True for a generated text cover, bytes for a custom image, None/False for no cover.
+    `writer` gets the final report and summary; progress messages go through it too unless `fetch.quiet`.
+    Returns the path of the written book."""
     fetch = fetch or FetchSettings()
     say = (lambda *_: None) if fetch.quiet else writer
-    check_output_path(file)
+    check_output_directory(file)
     say(f"extracting lp from {url}")
     say("getting landing page")
     try:
@@ -1241,6 +1281,8 @@ async def do(url: str, file: str, session: aiohttp.ClientSession, writer, strict
 
     book = epub.EpubBook()
     intro = Extractor.intro(url, landing)
+    file = resolve_output_path(file, intro.title, url)
+    check_output_path(file)
 
     toc = []
     spine = []
@@ -1372,7 +1414,7 @@ async def do(url: str, file: str, session: aiohttp.ClientSession, writer, strict
 
     if image_processing is not None:
         writer(image_processing.summary())
-    say("Writing book file")
+    say(f"Writing book file {file}")
     write_book(file, book, mtime)
 
     if failures:
@@ -1380,3 +1422,4 @@ async def do(url: str, file: str, session: aiohttp.ClientSession, writer, strict
             url, failures,
             "Missing images were left as external links in the book; "
             "missing updates (--allow-missing-updates) were replaced by a placeholder page linking to the original."))
+    return file

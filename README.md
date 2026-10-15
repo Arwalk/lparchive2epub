@@ -7,14 +7,16 @@ usage: lparchive2epub [-h] [--cache FILE] [--strict] [--allow-missing-updates]
                       [--max-image-size PIXELS] [--jpeg-quality 1-100]
                       [--concurrency N] [--retries N] [--quiet]
                       [--cover IMAGE | --no-cover]
-                      URL OUTPUT_FILE
+                      URL [OUTPUT]
 
 A tool to transform a Let's Play from lparchive.org to epub format.
 
 positional arguments:
   URL          Address of the Let's Play on lparchive.org (any page of it
                will do)
-  OUTPUT_FILE
+  OUTPUT       Where to write the book: a file name, or a directory to put
+               '<title>.epub' in (default: '<title>.epub' in the current
+               directory)
 
 options:
   -h, --help   show this help message and exit
