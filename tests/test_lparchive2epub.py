@@ -1613,3 +1613,39 @@ def test_chapters_found_without_a_hard_coded_list(slug, count, first, expected_s
         assert slugs[0] == first
     for expected in expected_somewhere:
         assert expected in slugs, expected
+
+
+GOLDEN = os.path.join(os.path.dirname(__file__), "resources", "chapters.json")
+
+
+def _golden():
+    with open(GOLDEN, encoding="utf-8") as f:
+        return json.load(f)
+
+
+@pytest.fixture(scope="module")
+def archive():
+    """Every landing page of the archive with what the extractor must find on it."""
+    golden = _golden()
+    with zipfile.ZipFile(SNAPSHOT) as z:
+        manifest = json.loads(z.read("index.json"))
+        assert manifest["snapshot_date"] == golden["snapshot_date"], \
+            "chapters.json was generated from another snapshot: rerun util/generate_chapter_golden.py"
+        pages = {e["slug"]: z.read(e["file"]) for e in manifest["lets_plays"]}
+    assert set(pages) == set(golden["lets_plays"])
+    return pages, golden["lets_plays"]
+
+
+@pytest.mark.archive
+@pytest.mark.parametrize("slug", sorted(_golden()["lets_plays"]))
+def test_every_landing_page_extracts_as_recorded(archive, slug):
+    pages, expected = archive
+    intro = Extractor.intro(f"https://lparchive.org/{slug}", BeautifulSoup(pages[slug], "html.parser"))
+    want = expected[slug]
+    facts = {"title": intro.title, "author": intro.author, "parts": intro.parts, "began": intro.began,
+             "ended": intro.ended, "published_on": intro.published_on, "tags": intro.tags,
+             "thread_url": intro.thread_url}
+    assert facts == {k: want[k] for k in facts}
+    assert [[c.original_href_slug, c.txt] for c in intro.chapters] == want["chapters"], \
+        f"chapters of {slug} changed; if intended, rerun util/generate_chapter_golden.py and review the diff"
+    assert [c.num for c in intro.chapters] == list(range(len(intro.chapters)))

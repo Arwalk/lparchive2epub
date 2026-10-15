@@ -49,5 +49,8 @@ build-backend = "uv_build"
 addopts = [
   "--import-mode=importlib",
 ]
+markers = [
+  "archive: checks the extractor against every landing page of lparchive.org (tests/resources/landing_pages.zip); skip with -m 'not archive'",
+]
 pythonpath = "."
 asyncio_default_fixture_loop_scope = "session"
