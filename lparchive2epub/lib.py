@@ -675,7 +675,23 @@ async def fetch_with_retries(session: aiohttp.ClientSession, url: str, max_retri
 
 
 
-async def _get_image(session: aiohttp.ClientSession, img: Image, registry: dict = None,
+class ImageRegistry:
+    """Per-run memory of images, shared by every page being built.
+
+    by_url: one future per resolved URL, so a URL referenced from many pages is downloaded once.
+    The future is kept after a failure too: later references get the stored error immediately
+    instead of re-running the download and its retries (a dead host would otherwise cost
+    5 attempts and 30 s of backoff per reference).
+    by_content: hash of the downloaded bytes -> future of the finished image, so a second URL serving
+    the same bytes reuses the stored image (and skips the optional resize pass) instead of being
+    processed and held twice. A future, because identical downloads usually land at the same time."""
+
+    def __init__(self):
+        self.by_url: dict[str, asyncio.Future] = {}
+        self.by_content: dict[str, asyncio.Future] = {}
+
+
+async def _get_image(session: aiohttp.ClientSession, img: Image, registry: ImageRegistry | None = None,
                      processing: ImageProcessing | None = None) -> IndexedEpubImage:
     # Get the image URL from either src (for img tags) or href (for a tags)
     img_url = img.url
@@ -683,11 +699,11 @@ async def _get_image(session: aiohttp.ClientSession, img: Image, registry: dict 
         raise NonRetryableError(f"Malformed URL that could not be repaired: {img.src}")
 
     if registry is not None:
-        if img_url in registry:
-            return await registry[img_url]
+        if img_url in registry.by_url:
+            return await registry.by_url[img_url]
         loop = asyncio.get_running_loop()
         future = loop.create_future()
-        registry[img_url] = future
+        registry.by_url[img_url] = future
     else:
         future = None
 
@@ -715,21 +731,41 @@ async def _get_image(session: aiohttp.ClientSession, img: Image, registry: dict 
 
     try:
         fetched = await fetch_with_retries(session, img_url)
-        reduced = None
-        if processing is not None:
-            media_type, _ = _detect_or_fail(fetched, img_url)
-            # CPU-bound (decode, resize, encode): off the event loop so downloads keep flowing
-            reduced = await asyncio.to_thread(reduce_image, fetched.body, media_type, processing)
-        res = build(fetched, reduced)
+        raw_hash = get_blake2b_hash(fetched.body)
+        if registry is not None and raw_hash in registry.by_content:
+            # Same bytes already seen under another URL: share the stored image (it may still be
+            # being processed), keeping this URL as old_name so the page's links to it get rewritten.
+            known = await registry.by_content[raw_hash]
+            if processing is not None:
+                processing.record(len(fetched.body), len(known.data.content))
+            res = IndexedEpubImage(img.num, known.hash, img_url, known.new_name, img.root_url, known.data)
+        else:
+            content_future = asyncio.get_running_loop().create_future() if registry is not None else None
+            if content_future is not None:
+                registry.by_content[raw_hash] = content_future
+            try:
+                reduced = None
+                if processing is not None:
+                    media_type, _ = _detect_or_fail(fetched, img_url)
+                    # CPU-bound (decode, resize, encode): off the event loop so downloads keep flowing
+                    reduced = await asyncio.to_thread(reduce_image, fetched.body, media_type, processing)
+                res = build(fetched, reduced)
+            except Exception as e:
+                if content_future is not None:
+                    content_future.set_exception(e)
+                    content_future.exception()
+                raise
+            if content_future is not None:
+                content_future.set_result(res)
         if future:
             future.set_result(res)
         return res
     except Exception as e:
         if future:
             future.set_exception(e)
-            # Mark the exception as retrieved, so asyncio doesn't complain if nobody else awaits it
+            # Mark the exception as retrieved, so asyncio doesn't complain if nobody else awaits it.
+            # The future stays in the registry: the failure is remembered for the rest of the run.
             future.exception()
-            del registry[img_url]
         raise
 
 def _detect_or_fail(fetched: Fetched, img_url: str) -> tuple[str, str]:
@@ -752,7 +788,7 @@ def _skipped(img: Image, e: Exception) -> SkippedResource:
     return SkippedResource(page=img.root_url, url=img.src, reason=_describe(e))
 
 
-async def build_intro(session: aiohttp.ClientSession, url_root: str, intro: Intro, registry: dict = None,
+async def build_intro(session: aiohttp.ClientSession, url_root: str, intro: Intro, registry: ImageRegistry | None = None,
                       failures: list[SkippedResource] = None, processing: ImageProcessing | None = None) -> Page:
     intro_chapter = epub.EpubHtml(title="Introduction", file_name=INTRO_FILE_NAME, lang=intro.language)
     intro_chapter.add_item(get_style_item())
@@ -797,7 +833,7 @@ def batch(iterable, n=1):
     for ndx in range(0, l, n):
         yield iterable[ndx:min(ndx + n, l)]
 
-async def build_update(session: aiohttp.ClientSession, chapter: Chapters, data: Update, intro: Intro, registry: dict = None,
+async def build_update(session: aiohttp.ClientSession, chapter: Chapters, data: Update, intro: Intro, registry: ImageRegistry | None = None,
                        failures: list[SkippedResource] = None, processing: ImageProcessing | None = None) -> Page:
     update_chapter = epub.EpubHtml(title=str(chapter.txt), file_name=chapter.new_href,
                                    lang=intro.language)  # TODO: fix language
@@ -870,7 +906,7 @@ def add_page(known_images: set, book: EpubBook, toc: List, spine: List, page: Pa
 
 
 async def build_single_page(session: aiohttp.ClientSession, intro: Intro, chapter: Chapters, all_chapters: List[Chapters], pbar,
-                            registry: dict = None, failures: list[SkippedResource] = None,
+                            registry: ImageRegistry | None = None, failures: list[SkippedResource] = None,
                             processing: ImageProcessing | None = None) -> Page:
     fetched = await fetch_with_retries(session, chapter.original_href)
     chapter_bs = get_cleaned_html(fetched.text())
@@ -1045,7 +1081,7 @@ async def do(url: str, file: str, session: aiohttp.ClientSession, writer, strict
     spine = ["nav"]
 
     writer("building intro")
-    image_registry = {}
+    image_registry = ImageRegistry()
     failures: list[SkippedResource] = []
     missing_updates: list[tuple[int, Chapters, Exception]] = []
     epub_intro = await build_intro(session, url, intro, image_registry, failures, image_processing)

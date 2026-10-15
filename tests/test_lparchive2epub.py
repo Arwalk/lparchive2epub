@@ -9,7 +9,7 @@ import zipfile
 from urllib.parse import unquote
 
 import aiohttp
-from lparchive2epub.lib import Extractor, Chapters, lparchive2epub, BeautifulSoup, normalize_url, build_update, Update, Intro, format_failures_report, ISSUES_URL, do, StrictModeError, MissingUpdatesError, ExtractionError, OutputError, check_output_path, detect_image_type, NotFoundError, NetworkError, RetriesExhaustedError, NotALetsPlayError, normalize_lp_url, fetch_with_retries, Fetched, get_cleaned_html, compose_description, parse_lp_date, reduce_image, ImageProcessing, detect_image_type as _dit, EXIT_NOT_FOUND, EXIT_NETWORK, EXIT_OUTPUT, EXIT_INTERRUPTED
+from lparchive2epub.lib import Extractor, Chapters, lparchive2epub, BeautifulSoup, normalize_url, build_update, Update, Intro, format_failures_report, ISSUES_URL, do, StrictModeError, MissingUpdatesError, ExtractionError, OutputError, check_output_path, detect_image_type, NotFoundError, NetworkError, RetriesExhaustedError, NotALetsPlayError, normalize_lp_url, fetch_with_retries, Fetched, get_cleaned_html, compose_description, parse_lp_date, reduce_image, ImageProcessing, ImageRegistry, EXIT_NOT_FOUND, EXIT_NETWORK, EXIT_OUTPUT, EXIT_INTERRUPTED
 import lparchive2epub.lib as lib
 from lparchive2epub import main as cli
 from importlib.resources import files
@@ -437,7 +437,7 @@ async def test_build_update_skips_unreachable_images():
 
     async with aiohttp.ClientSession() as session:
         page = await asyncio.wait_for(
-            build_update(session, chapter, Update(content=content, images=images), intro, {}, failures),
+            build_update(session, chapter, Update(content=content, images=images), intro, ImageRegistry(), failures),
             timeout=5)
 
     assert page.images == []
@@ -1302,3 +1302,87 @@ def test_cli_image_flags(monkeypatch):
         with pytest.raises(SystemExit) as exit_info:
             cli.main(["--no-cache", *bad, "https://lparchive.org/Some-LP", "out.epub"])
         assert exit_info.value.code == 2
+
+
+def _chapters_sharing_image(url: str, image_url: str, chapters=(1, 2, 3)):
+    return {f"{url}/Update%200{n}/": _FakeResponse(200, f'<div id="content"><p>text {n}</p><img src="{image_url}"/></div>'.encode())
+            for n in chapters}
+
+
+class _FlakyImageSession(_FakeSession):
+    """One image URL always answers 503; everything else as usual."""
+
+    def __init__(self, dead_url: str):
+        super().__init__("never-matches")
+        self.dead_url = dead_url
+
+    def get(self, url, **kwargs):
+        if url == self.dead_url:
+            self.requested.append(url)
+            return _FakeResponse(503, b"down")
+        return super().get(url, **kwargs)
+
+
+@pytest.mark.asyncio
+async def test_registry_remembers_a_failed_image_for_the_whole_run(monkeypatch):
+    monkeypatch.setattr(lib, "RETRY_BACKOFF_BASE", 0)
+    url = "https://lparchive.org/X-COM-Terror-from-the-Deep"
+    dead = "http://img.example/dead.png"
+    session = _FlakyImageSession(dead)
+    session.responses.update(_chapters_sharing_image(url, dead))
+    messages = []
+    with tempfile.TemporaryDirectory() as d:
+        await asyncio.wait_for(do(url, f"{d}/book.epub", session, messages.append), timeout=30)
+    # one download attempt (with its 5 retries) for the whole run, not one per referencing chapter
+    assert session.requested.count(dead) == 5
+    report = "\n".join(messages)
+    assert "status code: 503" in report
+    # ...but every page that needed it is still listed
+    for n in (1, 2, 3):
+        assert f"page:   {url}/Update%200{n}/" in report
+
+
+@pytest.mark.asyncio
+async def test_registry_remembers_a_404_image_too():
+    url = "https://lparchive.org/X-COM-Terror-from-the-Deep"
+    missing = f"{url}/Update%2001/missing.png"
+    session = _FakeSession("never-matches", responses={missing: _FakeResponse(404, b"gone")})
+    session.responses.update(_chapters_sharing_image(url, missing))
+    with tempfile.TemporaryDirectory() as d:
+        await asyncio.wait_for(do(url, f"{d}/book.epub", session, lambda *_: None), timeout=30)
+    assert session.requested.count(missing) == 1
+
+
+@pytest.mark.asyncio
+async def test_identical_bytes_under_different_urls_are_processed_and_stored_once(monkeypatch):
+    url = "https://lparchive.org/X-COM-Terror-from-the-Deep"
+    picture = _make_image("JPEG", (3200, 2400), quality=95)
+    urls = [f"{url}/Update%200{n}/same-{n}.jpg" for n in (1, 2, 3)]
+    session = _FakeSession("never-matches", responses={u: _FakeResponse(200, picture) for u in urls})
+    for n, u in zip((1, 2, 3), urls):
+        session.responses[f"{url}/Update%200{n}/"] = _FakeResponse(
+            200, f'<div id="content"><img src="same-{n}.jpg"/><a href="same-{n}.jpg">full</a></div>'.encode())
+
+    calls = []
+    real_reduce = lib.reduce_image
+
+    def counting_reduce(content, media_type, settings):
+        calls.append(media_type)
+        return real_reduce(content, media_type, settings)
+
+    monkeypatch.setattr(lib, "reduce_image", counting_reduce)
+    processing = ImageProcessing(max_size=1600)
+    with tempfile.TemporaryDirectory() as d:
+        out = f"{d}/book.epub"
+        await asyncio.wait_for(do(url, out, session, lambda *_: None, image_processing=processing), timeout=60)
+        with zipfile.ZipFile(out) as z:
+            images = [n for n in z.namelist() if n.startswith("EPUB/images/") and n.endswith(".jpg")]
+            pages = [z.read(f"EPUB/update_{i}.xhtml").decode() for i in range(3)]
+
+    assert [session.requested.count(u) for u in urls] == [1, 1, 1]   # each URL still downloaded once
+    assert calls.count("image/jpeg") == 1                            # resized once, not three times
+    assert len(images) == 1                                          # stored once
+    stored = images[0].removeprefix("EPUB/")
+    for page in pages:                                               # every page's links rewritten to it
+        assert f'src="{stored}"' in page and f'href="{stored}"' in page
+    assert processing.changed == 3   # each download is accounted for in the report (plus the intro's image)
