@@ -4,8 +4,10 @@ import traceback
 from argparse import ArgumentParser, ArgumentTypeError
 from aiohttp_client_cache import CachedSession, SQLiteBackend
 
+import aiohttp
+
 from lparchive2epub.lib import lparchive2epub, ExtractionError, ISSUES_URL, EXIT_FAILURE, EXIT_INTERRUPTED, normalize_lp_url, \
-    ImageProcessing, check_cache_path
+    ImageProcessing, FetchSettings, check_cache_path, CLIENT_TIMEOUT, DEFAULT_CONCURRENCY, DEFAULT_RETRIES
 
 
 def is_lparchive_url(arg):
@@ -59,6 +61,13 @@ arg_parser.add_argument("--max-image-size", metavar="PIXELS", type=positive_int,
                              "as served. 1600 suits e-readers, 2500 high-resolution tablets")
 arg_parser.add_argument("--jpeg-quality", metavar="1-100", type=jpeg_quality, default=85,
                         help="JPEG quality used when --max-image-size re-encodes an image (default: 85)")
+arg_parser.add_argument("--concurrency", metavar="N", type=positive_int, default=DEFAULT_CONCURRENCY,
+                        help=f"Downloads in flight at the same time (default: {DEFAULT_CONCURRENCY})")
+arg_parser.add_argument("--retries", metavar="N", type=positive_int, default=DEFAULT_RETRIES,
+                        help=f"Attempts per download before giving up, with increasing waits in between "
+                             f"(default: {DEFAULT_RETRIES}; 1 means no retry)")
+arg_parser.add_argument("--quiet", action="store_true",
+                        help="No progress bars or progress messages; only the final report and errors")
 cover_group = arg_parser.add_mutually_exclusive_group()
 cover_group.add_argument("--cover", metavar="IMAGE",
                          help="Use this image file as the cover instead of the generated one (title and author on "
@@ -66,11 +75,15 @@ cover_group.add_argument("--cover", metavar="IMAGE",
 cover_group.add_argument("--no-cover", action="store_true", help="Build the book without a cover image")
 
 async def amain(args):
-    cache = None
+    fetch = FetchSettings(concurrency=args.concurrency, retries=args.retries, quiet=args.quiet)
     if args.cache:
         cache_file = check_cache_path(args.cache)
-        print(f"using cache {cache_file}", file=sys.stderr)
-        cache = CachedSession(cache=SQLiteBackend(cache_file, expire_after=-1, fast_save=True, autoclose=True))
+        if not args.quiet:
+            print(f"using cache {cache_file}", file=sys.stderr)
+        session = CachedSession(cache=SQLiteBackend(cache_file, expire_after=-1, fast_save=True, autoclose=True),
+                                timeout=CLIENT_TIMEOUT)
+    else:
+        session = aiohttp.ClientSession(timeout=CLIENT_TIMEOUT)
     processing = ImageProcessing(args.max_image_size, args.jpeg_quality) if args.max_image_size else None
     cover: bytes | bool = True
     if args.no_cover:
@@ -81,8 +94,9 @@ async def amain(args):
                 cover = f.read()
         except OSError as e:
             raise ExtractionError(f"Cannot read the cover image {args.cover}: {e.strerror or e}") from e
-    await lparchive2epub(args.url[0], args.output[0], cache, strict=args.strict,
-                         allow_missing_updates=args.allow_missing_updates, image_processing=processing, cover=cover)
+    await lparchive2epub(args.url[0], args.output[0], session, strict=args.strict,
+                         allow_missing_updates=args.allow_missing_updates, image_processing=processing, cover=cover,
+                         fetch=fetch)
 
 def main(argv=None):
     args = arg_parser.parse_args(argv)

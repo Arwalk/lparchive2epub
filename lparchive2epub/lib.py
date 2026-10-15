@@ -1,4 +1,5 @@
 import asyncio
+import contextlib
 import datetime
 import functools
 import io
@@ -6,6 +7,7 @@ import mimetypes
 import os
 import re
 import sqlite3
+import sys
 import zipfile
 from dataclasses import dataclass, field
 from hashlib import blake2b
@@ -21,9 +23,34 @@ from tqdm.asyncio import tqdm
 from lparchive2epub.cover import COVER_FILE_NAME, TITLE_PAGE_FILE_NAME, make_cover, make_title_page
 from lparchive2epub.style import get_style_item
 
-# Concurrency limit for worker queues
+# Worker pools: how many pages are being built at once, and how many images per page. The number of
+# requests actually in flight is capped separately by FetchSettings.concurrency.
 CONCURRENCY_LIMIT_PAGES = 25
 CONCURRENCY_LIMIT_IMAGES = 10
+DEFAULT_CONCURRENCY = 32   # measured on Boatmurdered: 16 costs ~40% of wall time, 32 ~15%, 64 none
+DEFAULT_RETRIES = 5
+# No total timeout (a 17 MB picture on a slow link is legitimate), but connecting and each read must
+# make progress: a stalled host must not park a download for minutes.
+CLIENT_TIMEOUT = aiohttp.ClientTimeout(total=None, connect=15, sock_connect=15, sock_read=60)
+
+
+def log(message: str):
+    """Default writer for progress messages: stderr, so stdout stays free for data."""
+    tqdm.write(message, file=sys.stderr)
+
+
+@dataclass
+class FetchSettings:
+    """How downloads behave: how many at once, how many attempts, and whether to say anything."""
+    concurrency: int = DEFAULT_CONCURRENCY
+    retries: int = DEFAULT_RETRIES
+    quiet: bool = False
+    _semaphore: asyncio.Semaphore | None = field(default=None, repr=False, compare=False)
+
+    def limit(self) -> asyncio.Semaphore:
+        if self._semaphore is None:
+            self._semaphore = asyncio.Semaphore(self.concurrency)   # created inside the running loop
+        return self._semaphore
 
 @dataclass
 class ImageProcessing:
@@ -734,18 +761,22 @@ RETRYABLE_CLIENT_STATUSES = {408, 429}
 RETRY_BACKOFF_BASE = 1.0
 
 
-async def fetch_with_retries(session: aiohttp.ClientSession, url: str, max_retries: int = 5) -> Fetched:
+async def fetch_with_retries(session: aiohttp.ClientSession, url: str, max_retries: int | None = None,
+                             fetch: FetchSettings | None = None) -> Fetched:
     """Download `url` (status 200 and the whole body), retrying on network trouble and 5xx/408/429.
 
     Only the download is retried. Whatever the caller does with the bytes afterwards (parsing,
     image sniffing...) runs outside this loop, so a bug there fails once and fast instead of
     re-downloading the resource five times with 30 s of backoff."""
+    if max_retries is None:
+        max_retries = fetch.retries if fetch is not None else DEFAULT_RETRIES
     retry_count = 0
     last_exception = None
 
     while retry_count < max_retries:
         try:
-            async with session.get(url, headers=CURL_HEADERS) as r:
+            async with (fetch.limit() if fetch is not None else contextlib.nullcontext()), \
+                    session.get(url, headers=CURL_HEADERS) as r:
                 if 400 <= r.status < 500 and r.status not in RETRYABLE_CLIENT_STATUSES:
                     raise NonRetryableError(f"Failed to get resource {url}, status code: {r.status}", url, r.status)
                 if r.status != 200:
@@ -789,7 +820,7 @@ class ImageRegistry:
 
 
 async def _get_image(session: aiohttp.ClientSession, img: Image, registry: ImageRegistry | None = None,
-                     processing: ImageProcessing | None = None) -> IndexedEpubImage:
+                     processing: ImageProcessing | None = None, fetch: FetchSettings | None = None) -> IndexedEpubImage:
     # Get the image URL from either src (for img tags) or href (for a tags)
     img_url = img.url
     if img_url is None:
@@ -827,7 +858,7 @@ async def _get_image(session: aiohttp.ClientSession, img: Image, registry: Image
         )
 
     try:
-        fetched = await fetch_with_retries(session, img_url)
+        fetched = await fetch_with_retries(session, img_url, fetch=fetch)
         raw_hash = get_blake2b_hash(fetched.body)
         if registry is not None and raw_hash in registry.by_content:
             # Same bytes already seen under another URL: share the stored image (it may still be
@@ -886,13 +917,14 @@ def _skipped(img: Image, e: Exception) -> SkippedResource:
 
 
 async def build_intro(session: aiohttp.ClientSession, url_root: str, intro: Intro, registry: ImageRegistry | None = None,
-                      failures: list[SkippedResource] = None, processing: ImageProcessing | None = None) -> Page:
+                      failures: list[SkippedResource] = None, processing: ImageProcessing | None = None,
+                      fetch: FetchSettings | None = None) -> Page:
     # Named after the Let's Play: many LPs have their own "Introduction" update right after it
     intro_chapter = epub.EpubHtml(title=intro.title, file_name=INTRO_FILE_NAME, lang=intro.language)
     intro_chapter.add_item(get_style_item())
     tasks = []
     for image in intro.images:
-        task = asyncio.ensure_future(_get_image(session, image, registry, processing))
+        task = asyncio.ensure_future(_get_image(session, image, registry, processing, fetch))
         tasks.append(task)
 
     results = await asyncio.gather(*tasks, return_exceptions=True)
@@ -932,12 +964,13 @@ def batch(iterable, n=1):
         yield iterable[ndx:min(ndx + n, l)]
 
 async def build_update(session: aiohttp.ClientSession, chapter: Chapters, data: Update, intro: Intro, registry: ImageRegistry | None = None,
-                       failures: list[SkippedResource] = None, processing: ImageProcessing | None = None) -> Page:
+                       failures: list[SkippedResource] = None, processing: ImageProcessing | None = None,
+                       fetch: FetchSettings | None = None) -> Page:
     update_chapter = epub.EpubHtml(title=str(chapter.txt), file_name=chapter.new_href,
                                    lang=intro.language)  # TODO: fix language
     update_chapter.add_item(get_style_item())
 
-    img_builder = functools.partial(_get_image, session, registry=registry, processing=processing)
+    img_builder = functools.partial(_get_image, session, registry=registry, processing=processing, fetch=fetch)
 
     # Queue-based worker pool to cap concurrency
     q: asyncio.Queue = asyncio.Queue()
@@ -1005,11 +1038,11 @@ def add_page(known_images: set, book: EpubBook, toc: List, spine: List, page: Pa
 
 async def build_single_page(session: aiohttp.ClientSession, intro: Intro, chapter: Chapters, all_chapters: List[Chapters], pbar,
                             registry: ImageRegistry | None = None, failures: list[SkippedResource] = None,
-                            processing: ImageProcessing | None = None) -> Page:
-    fetched = await fetch_with_retries(session, chapter.original_href)
+                            processing: ImageProcessing | None = None, fetch: FetchSettings | None = None) -> Page:
+    fetched = await fetch_with_retries(session, chapter.original_href, fetch=fetch)
     chapter_bs = get_cleaned_html(fetched.text())
     update = Extractor.get_update(all_chapters, chapter_bs, chapter)
-    page = await build_update(session, chapter, update, intro, registry, failures, processing)
+    page = await build_update(session, chapter, update, intro, registry, failures, processing, fetch)
     pbar.update(1)
     return page
 
@@ -1036,17 +1069,18 @@ def build_placeholder_page(chapter: Chapters, intro: Intro, error: Exception) ->
     return Page(chapter.num, placeholder, [])
 
 
-async def lparchive2epub(url: str, file: str, root_session: aiohttp.ClientSession | None = None, writer=tqdm.write,
+async def lparchive2epub(url: str, file: str, root_session: aiohttp.ClientSession | None = None, writer=log,
                          strict: bool = False, allow_missing_updates: bool = False,
-                         image_processing: ImageProcessing | None = None, cover: bytes | None | bool = True):
+                         image_processing: ImageProcessing | None = None, cover: bytes | None | bool = True,
+                         fetch: FetchSettings | None = None):
     try:
         url = normalize_lp_url(url)
     except ValueError as e:
         raise NotFoundError(str(e)) from e
     if root_session is None:
-        root_session = aiohttp.ClientSession()
+        root_session = aiohttp.ClientSession(timeout=CLIENT_TIMEOUT)
     async with root_session as session:
-        await do(url, file, session, writer, strict, allow_missing_updates, image_processing, cover)
+        await do(url, file, session, writer, strict, allow_missing_updates, image_processing, cover, fetch)
 
 
 tags_to_clean = [
@@ -1190,13 +1224,16 @@ def format_failures_report(url: str, failures: list[SkippedResource], outcome: s
 
 async def do(url: str, file: str, session: aiohttp.ClientSession, writer, strict: bool = False,
              allow_missing_updates: bool = False, image_processing: ImageProcessing | None = None,
-             cover: bytes | None | bool = True):
-    """`cover`: True for a generated text cover, bytes for a custom image, None/False for no cover."""
+             cover: bytes | None | bool = True, fetch: FetchSettings | None = None):
+    """`cover`: True for a generated text cover, bytes for a custom image, None/False for no cover.
+    `writer` gets the final report and summary; progress messages go through it too unless `fetch.quiet`."""
+    fetch = fetch or FetchSettings()
+    say = (lambda *_: None) if fetch.quiet else writer
     check_output_path(file)
-    writer(f"extracting lp from {url}")
-    writer("getting landing page")
+    say(f"extracting lp from {url}")
+    say("getting landing page")
     try:
-        page_text = (await fetch_with_retries(session, url)).text()
+        page_text = (await fetch_with_retries(session, url, fetch=fetch)).text()
     except (FetchError, aiohttp.ClientError, OSError) as e:
         raise landing_page_error(url, e) from e
 
@@ -1227,11 +1264,11 @@ async def do(url: str, file: str, session: aiohttp.ClientSession, writer, strict
     spine.append(title_page)
     spine.append("nav")
 
-    writer("building intro")
+    say("building intro")
     image_registry = ImageRegistry()
     failures: list[SkippedResource] = []
     missing_updates: list[tuple[int, Chapters, Exception]] = []
-    epub_intro = await build_intro(session, url, intro, image_registry, failures, image_processing)
+    epub_intro = await build_intro(session, url, intro, image_registry, failures, image_processing, fetch)
 
     known_images: set[str] = set()
 
@@ -1240,11 +1277,11 @@ async def do(url: str, file: str, session: aiohttp.ClientSession, writer, strict
     # pages takes a vastly inequal times to get, so it's faster to gather and sort
     # gotta go fast, but also keep the page order.
 
-    writer("building chapters / updates")
+    say("building chapters / updates")
 
     pages_indexed: list[tuple[int, Page]] = []
 
-    with tqdm(total=len(intro.chapters), desc="Gathering and building pages") as pbar:
+    with tqdm(total=len(intro.chapters), desc="Gathering and building pages", disable=fetch.quiet) as pbar:
         q: asyncio.Queue = asyncio.Queue()
 
         async def worker():
@@ -1255,7 +1292,7 @@ async def do(url: str, file: str, session: aiohttp.ClientSession, writer, strict
                     break
                 try:
                     page = await build_single_page(session, intro, chapter, intro.chapters, pbar, image_registry,
-                                                   failures, image_processing)
+                                                   failures, image_processing, fetch)
                 except asyncio.CancelledError:
                     raise  # task_done() runs in the finally clause below
                 except Exception as e:
@@ -1301,10 +1338,10 @@ async def do(url: str, file: str, session: aiohttp.ClientSession, writer, strict
         raise StrictModeError(format_failures_report(
             url, failures, "No book was written (--strict). Run again without --strict to build it anyway."))
 
-    for p in tqdm(pages, desc="Adding pages to book"):
+    for p in tqdm(pages, desc="Adding pages to book", disable=fetch.quiet):
         add_page(known_images, book, toc, spine, p)
 
-    writer("preparing book structure")
+    say("preparing book structure")
     book.toc = toc
 
     book.add_item(epub.EpubNcx())
@@ -1335,7 +1372,7 @@ async def do(url: str, file: str, session: aiohttp.ClientSession, writer, strict
 
     if image_processing is not None:
         writer(image_processing.summary())
-    writer("Writing book file")
+    say("Writing book file")
     write_book(file, book, mtime)
 
     if failures:

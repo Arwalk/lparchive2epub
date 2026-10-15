@@ -5,6 +5,7 @@ this tool (and library) aims at helping people extracting full epubs of Let's Pl
 ```
 usage: lparchive2epub [-h] [--cache FILE] [--strict] [--allow-missing-updates]
                       [--max-image-size PIXELS] [--jpeg-quality 1-100]
+                      [--concurrency N] [--retries N] [--quiet]
                       [--cover IMAGE | --no-cover]
                       URL OUTPUT_FILE
 
@@ -36,6 +37,12 @@ options:
   --jpeg-quality 1-100
                JPEG quality used when --max-image-size re-encodes an image
                (default: 85)
+  --concurrency N
+               Downloads in flight at the same time (default: 32)
+  --retries N  Attempts per download before giving up, with increasing waits
+               in between (default: 5; 1 means no retry)
+  --quiet      No progress bars or progress messages; only the final report
+               and errors
   --cover IMAGE
                Use this image file as the cover instead of the generated one
                (title and author on a plain background)
@@ -73,6 +80,12 @@ A standalone executable is available for releases on windows. See the releases p
 ## Building standalone
 
 `uv run --with pyinstaller pyinstaller --onefile --name lparchive2epub lparchive2epub/main.py`
+
+## Downloads
+
+At most 32 downloads are in flight at once (`--concurrency`), each one is attempted up to 5 times with
+increasing waits (`--retries`), and a connection that stops sending for a minute is given up rather than
+waited on. Progress goes to stderr; `--quiet` keeps only the final report and errors, for scripts.
 
 ## Cache
 

@@ -10,7 +10,7 @@ import zipfile
 from urllib.parse import unquote
 
 import aiohttp
-from lparchive2epub.lib import Extractor, Chapters, lparchive2epub, BeautifulSoup, normalize_url, build_update, Update, Intro, format_failures_report, ISSUES_URL, do, StrictModeError, MissingUpdatesError, ExtractionError, OutputError, check_output_path, detect_image_type, NotFoundError, NetworkError, RetriesExhaustedError, NotALetsPlayError, normalize_lp_url, fetch_with_retries, Fetched, get_cleaned_html, compose_description, parse_lp_date, reduce_image, ImageProcessing, ImageRegistry, check_cache_path, resolve_cache_path, CacheError, EXIT_CACHE, EXIT_NOT_FOUND, EXIT_NETWORK, EXIT_OUTPUT, EXIT_INTERRUPTED
+from lparchive2epub.lib import Extractor, Chapters, lparchive2epub, BeautifulSoup, normalize_url, build_update, Update, Intro, format_failures_report, ISSUES_URL, do, StrictModeError, MissingUpdatesError, ExtractionError, OutputError, check_output_path, detect_image_type, NotFoundError, NetworkError, RetriesExhaustedError, NotALetsPlayError, normalize_lp_url, fetch_with_retries, Fetched, get_cleaned_html, compose_description, parse_lp_date, reduce_image, ImageProcessing, ImageRegistry, FetchSettings, check_cache_path, resolve_cache_path, CacheError, EXIT_CACHE, EXIT_NOT_FOUND, EXIT_NETWORK, EXIT_OUTPUT, EXIT_INTERRUPTED
 import lparchive2epub.lib as lib
 from lparchive2epub import main as cli
 from importlib.resources import files
@@ -1425,7 +1425,8 @@ def test_cli_cache_flag(monkeypatch, capsys):
 
     monkeypatch.setattr(cli, "lparchive2epub", fake)
     cli.main(["https://lparchive.org/Some-LP", "out.epub"])
-    assert seen["session"] is None   # no cache unless asked
+    assert type(seen["session"]) is aiohttp.ClientSession   # a plain session: no cache unless asked
+    assert seen["session"].timeout.sock_read == 60          # a stalled host doesn't park a worker for minutes
     with tempfile.TemporaryDirectory() as d:
         cli.main(["--cache", f"{d}/lp", "https://lparchive.org/Some-LP", "out.epub"])
         assert isinstance(seen["session"], CachedSession) and isinstance(seen["session"].cache, SQLiteBackend)
@@ -1808,3 +1809,93 @@ async def test_only_the_full_size_picture_is_downloaded_and_embedded():
     assert any(files[n] == full for n in stored) and not any(files[n] == thumb for n in stored)
     assert re.search(r'<p>\s*<img src="images/[0-9a-f]+\.jpg"/>\s*</p>', page)   # inline, no link around it
     assert len(re.findall(r'<a href="images/', page)) == 1                   # only the prose link remains a link
+
+
+class _SlowSession(_FakeSession):
+    """Every body read takes a moment, and the session records how many reads overlap."""
+
+    def __init__(self):
+        super().__init__("never-matches")
+        self.in_flight = 0
+        self.max_in_flight = 0
+
+    def get(self, url, **kwargs):
+        response = super().get(url, **kwargs)
+        session = self
+
+        class Slow(_FakeResponse):
+            async def read(inner):
+                session.in_flight += 1
+                session.max_in_flight = max(session.max_in_flight, session.in_flight)
+                try:
+                    await asyncio.sleep(0.003)
+                    return inner._body
+                finally:
+                    session.in_flight -= 1
+
+            async def text(inner):
+                return (await inner.read()).decode("utf-8", errors="replace")
+
+        return Slow(response.status, response._body, response.headers.get("Content-Type"))
+
+
+@pytest.mark.asyncio
+async def test_concurrency_limit_caps_downloads_in_flight():
+    url = "https://lparchive.org/X-COM-Terror-from-the-Deep"
+    for limit in (1, 3):
+        session = _SlowSession()
+        with tempfile.TemporaryDirectory() as d:
+            await asyncio.wait_for(do(url, f"{d}/book.epub", session, lambda *_: None,
+                                      fetch=FetchSettings(concurrency=limit)), timeout=60)
+        assert session.max_in_flight == limit
+    session = _SlowSession()
+    with tempfile.TemporaryDirectory() as d:
+        await asyncio.wait_for(do(url, f"{d}/book.epub", session, lambda *_: None), timeout=60)
+    assert 3 < session.max_in_flight <= 32   # the default limit applies
+
+
+@pytest.mark.asyncio
+async def test_retries_setting_is_honoured(monkeypatch):
+    monkeypatch.setattr(lib, "RETRY_BACKOFF_BASE", 0)
+    url = "https://lparchive.org/X-COM-Terror-from-the-Deep"
+    flaky = f"{url}/Update%2003/"
+    for retries in (1, 2, 7):
+        session = _FakeSession("never-matches", responses={flaky: _FakeResponse(503, b"down")})
+        with tempfile.TemporaryDirectory() as d:
+            with pytest.raises(MissingUpdatesError, match=f"after {retries} retries"):
+                await asyncio.wait_for(do(url, f"{d}/book.epub", session, lambda *_: None,
+                                          fetch=FetchSettings(retries=retries)), timeout=30)
+        assert session.requested.count(flaky) == retries
+
+
+@pytest.mark.asyncio
+async def test_quiet_keeps_only_the_report():
+    url = "https://lparchive.org/X-COM-Terror-from-the-Deep"
+    dead = "http://img.example/dead.png"
+    session = _FakeSession("never-matches", responses={dead: _FakeResponse(404, b"gone")})
+    session.responses[f"{url}/Update%2001/"] = _FakeResponse(200, f'<div id="content"><img src="{dead}"/></div>'.encode())
+    loud, quiet = [], []
+    with tempfile.TemporaryDirectory() as d:
+        await asyncio.wait_for(do(url, f"{d}/a.epub", session, loud.append), timeout=30)
+        await asyncio.wait_for(do(url, f"{d}/b.epub", session, quiet.append, fetch=FetchSettings(quiet=True)), timeout=30)
+    assert any(m.startswith("extracting lp from") for m in loud)
+    assert len(quiet) == 1 and "could not be retrieved" in quiet[0] and dead in quiet[0]
+    assert quiet[0] == loud[-1]
+
+
+def test_cli_download_flags(monkeypatch):
+    seen = {}
+
+    async def fake(url, file, session=None, *args, **kwargs):
+        seen.update(kwargs)
+        await session.close()
+
+    monkeypatch.setattr(cli, "lparchive2epub", fake)
+    cli.main(["https://lparchive.org/Some-LP", "out.epub"])
+    assert (seen["fetch"].concurrency, seen["fetch"].retries, seen["fetch"].quiet) == (32, 5, False)
+    cli.main(["--concurrency", "4", "--retries", "1", "--quiet", "https://lparchive.org/Some-LP", "out.epub"])
+    assert (seen["fetch"].concurrency, seen["fetch"].retries, seen["fetch"].quiet) == (4, 1, True)
+    for bad in (["--concurrency", "0"], ["--retries", "0"], ["--retries", "many"]):
+        with pytest.raises(SystemExit) as exit_info:
+            cli.main([*bad, "https://lparchive.org/Some-LP", "out.epub"])
+        assert exit_info.value.code == 2
