@@ -2,6 +2,7 @@ import asyncio
 import datetime
 import hashlib
 import io
+import json
 import os
 import random
 import re
@@ -1491,3 +1492,54 @@ async def test_sqlite_cache_makes_a_second_build_free_of_requests():
             assert len(hits) == 2 * first_hits    # without the cache, everything is fetched again
     finally:
         await server.close()
+
+
+FRONT_PAGE_SNIPPET = """<html><body><script>var x = 1;</script><script>
+  tocdata=[{'t':'Space Quest 1','a':'Son of Bug Jug','u':'/Space-Quest-Series/','ty':'1','tg':['screenshot']},
+           {'t':'Space Quest 2','a':'Son of Bug Jug','u':'/Space-Quest-Series/','ty':'1','tg':['screenshot']},
+           {'t':'007: Nightfire','a':'ThornBrain','u':'/007-Nightfire/','ty':'2','tg':['video']}];
+  other = 2;</script></body></html>"""
+
+
+def test_snapshot_index_groups_series_pages_and_sorts():
+    from util.snapshot_landing_pages import read_index
+    index = read_index(FRONT_PAGE_SNIPPET)
+    assert [e["slug"] for e in index] == ["007-Nightfire", "Space-Quest-Series"]
+    series = index[1]
+    assert series["url"] == "https://lparchive.org/Space-Quest-Series"
+    assert [l["title"] for l in series["listed_as"]] == ["Space Quest 1", "Space Quest 2"]
+    assert series["type"] == "1" and series["tags"] == ["screenshot"]
+
+
+def test_snapshot_zip_is_deterministic_and_lists_failures():
+    from util.snapshot_landing_pages import read_index, write_zip
+    index = read_index(FRONT_PAGE_SNIPPET)
+    pages = {"007-Nightfire": b"<html>nightfire</html>"}
+    failures = {"Space-Quest-Series": "Failed to get resource ..., status code: 404"}
+    with tempfile.TemporaryDirectory() as d:
+        a, b = f"{d}/a.zip", f"{d}/b.zip"
+        write_zip(__import__("pathlib").Path(a), index, pages, failures)
+        write_zip(__import__("pathlib").Path(b), index, pages, failures)
+        with open(a, "rb") as fa, open(b, "rb") as fb:
+            assert fa.read() == fb.read()
+        with zipfile.ZipFile(a) as z:
+            assert z.namelist() == ["index.json", "landing_pages/007-Nightfire.html"]
+            manifest = json.loads(z.read("index.json"))
+            by_slug = {e["slug"]: e for e in manifest["lets_plays"]}
+            assert by_slug["007-Nightfire"]["file"] == "landing_pages/007-Nightfire.html"
+            assert by_slug["Space-Quest-Series"]["file"] is None
+            assert "404" in by_slug["Space-Quest-Series"]["error"]
+            assert all(info.date_time == (1980, 1, 1, 0, 0, 0) for info in z.infolist())
+
+
+def test_landing_page_snapshot_is_complete_and_parses():
+    """The archive snapshot used by the archive-wide tests: every indexed page is present and is an LP page."""
+    path = os.path.join(os.path.dirname(__file__), "resources", "landing_pages.zip")
+    with zipfile.ZipFile(path) as z:
+        manifest = json.loads(z.read("index.json"))
+        entries = manifest["lets_plays"]
+        assert len(entries) > 2500
+        assert all(e["file"] for e in entries), [e["slug"] for e in entries if not e["file"]]
+        assert set(z.namelist()) == {"index.json", *(e["file"] for e in entries)}
+        sample = z.read(entries[0]["file"])
+    assert b'id="content"' in sample and b'id="archival"' in sample

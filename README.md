@@ -37,7 +37,10 @@ options:
                (default: 85)
 ```
 
-The repository also contains the script `util/all_archives.py` that tries to scrape all LPs from lparchive.
+The repository also contains the script `util/all_archives.py` that tries to scrape all LPs from lparchive,
+and `util/snapshot_landing_pages.py`, which refreshes `tests/resources/landing_pages.zip`: a snapshot of
+every Let's Play landing page on the archive, used by the test suite to check the extractor against the
+whole archive rather than a handful of pages.
 
 ## Requirements
 
