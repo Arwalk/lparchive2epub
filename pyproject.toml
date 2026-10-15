@@ -31,7 +31,6 @@ dev = [
     "pytest>=9,<10",
     "coverage>=7.4.0,<8",
     "pytest-asyncio>=0.26.0",
-    "blake3>=1.0.4,<2",
 ]
 
 [tool.uv]
@@ -51,6 +50,7 @@ addopts = [
 ]
 markers = [
   "archive: checks the extractor against every landing page of lparchive.org (tests/resources/landing_pages.zip); skip with -m 'not archive'",
+  "live: builds a few Let's Plays from lparchive.org and compares them with tests/resources/live_checksums.json; only with --live",
 ]
 pythonpath = "."
 asyncio_default_fixture_loop_scope = "session"

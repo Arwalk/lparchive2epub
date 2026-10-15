@@ -10,14 +10,13 @@ import zipfile
 from urllib.parse import unquote
 
 import aiohttp
-from lparchive2epub.lib import Extractor, Chapters, lparchive2epub, BeautifulSoup, normalize_url, build_update, Update, Intro, format_failures_report, ISSUES_URL, do, StrictModeError, MissingUpdatesError, ExtractionError, OutputError, check_output_path, detect_image_type, NotFoundError, NetworkError, RetriesExhaustedError, NotALetsPlayError, normalize_lp_url, fetch_with_retries, Fetched, get_cleaned_html, compose_description, parse_lp_date, reduce_image, ImageProcessing, ImageRegistry, FetchSettings, check_cache_path, safe_file_name, resolve_output_path, resolve_cache_path, CacheError, EXIT_CACHE, EXIT_NOT_FOUND, EXIT_NETWORK, EXIT_OUTPUT, EXIT_INTERRUPTED
+from lparchive2epub.lib import Extractor, Chapters, BeautifulSoup, normalize_url, build_update, Update, Intro, format_failures_report, ISSUES_URL, do, StrictModeError, MissingUpdatesError, ExtractionError, OutputError, check_output_path, detect_image_type, NotFoundError, NetworkError, RetriesExhaustedError, NotALetsPlayError, normalize_lp_url, fetch_with_retries, Fetched, get_cleaned_html, compose_description, parse_lp_date, reduce_image, ImageProcessing, ImageRegistry, FetchSettings, check_cache_path, safe_file_name, resolve_output_path, resolve_cache_path, CacheError, EXIT_CACHE, EXIT_NOT_FOUND, EXIT_NETWORK, EXIT_OUTPUT, EXIT_INTERRUPTED
 import lparchive2epub.lib as lib
 from lparchive2epub import main as cli
 from importlib.resources import files
 import tests.resources as resources
 import pytest
 import tempfile
-from blake3 import blake3
 from aiohttp_client_cache import CachedSession, SQLiteBackend
 
 
@@ -373,20 +372,26 @@ def test_all_images():
     images = Extractor.all_images(content, "https://lparchive.org/X-COM-Terror-from-the-Deep/")
     assert len(images) == 1
 
+LIVE_CHECKSUMS = os.path.join(os.path.dirname(__file__), "resources", "live_checksums.json")
+
+
+def _live_checksums() -> dict:
+    with open(LIVE_CHECKSUMS, encoding="utf-8") as f:
+        return json.load(f)["lets_plays"]
+
+
+@pytest.mark.live
 @pytest.mark.asyncio
-async def test_lparchive2epub(lp, b3sum):
-    pytest.skip("Unable to run until ebooklib update")
-    if not lp or not b3sum:
-        pytest.skip("no tests were collected")
-    cache = SQLiteBackend(f"cache/{lp}", autoclose=False, expire_after=None)
-    url = f"https://lparchive.org/{lp}"
-    with tempfile.NamedTemporaryFile() as temp_file:
-        await lparchive2epub(url, temp_file.name, CachedSession(cache=cache))
-        file_hasher = blake3(max_threads=blake3.AUTO)
-        file_hasher.update_mmap(temp_file.name)
-        file_hash = file_hasher.hexdigest()
-        assert file_hash == b3sum
-    await cache.close()
+@pytest.mark.parametrize("slug", sorted(_live_checksums()))
+async def test_live_build_matches_recorded_checksum(slug):
+    """Builds the Let's Play from lparchive.org and compares the book byte for byte with the last
+    recorded build. A mismatch means the output changed: the tool (then regenerate with
+    util/live_checksums.py) or the site (a dead image host, an edited page)."""
+    from util.live_checksums import build_checksum
+    expected = _live_checksums()[slug]
+    actual = await asyncio.wait_for(build_checksum(slug, None), timeout=600)
+    assert actual == expected, (f"{slug}: the book built today differs from the recorded one. If the tool changed on "
+                                f"purpose, run `uv run python util/live_checksums.py` and commit the new checksums.")
 
 
 @pytest.mark.parametrize(("url", "expected"), [
