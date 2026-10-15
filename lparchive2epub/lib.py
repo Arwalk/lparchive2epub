@@ -1028,6 +1028,9 @@ EMBED_TAGS = ["iframe", "embed", "object", "video", "audio"]
 ATTRIBUTES_TO_DROP = {"border", "align", "valign", "bgcolor", "background", "cellpadding", "cellspacing",
                       "hspace", "vspace", "nowrap", "target", "rel"}
 SPOILER_CLASS = "bbc-spoiler"
+# Block-level elements that EPUB does not allow inside a link (or any inline element)
+BLOCK_TAGS = ["p", "div", "blockquote", "ul", "ol", "table", "pre", "h1", "h2", "h3", "h4", "h5", "h6"]
+INLINE_WRAPPERS = ["a", "b", "i", "u", "s", "em", "strong", "span", "small", "sub", "sup", "code"]
 
 
 def get_cleaned_html(page: str) -> BeautifulSoup:
@@ -1070,6 +1073,8 @@ def sanitize(soup: BeautifulSoup):
         center.name = "div"
         center["style"] = "text-align: center;"
 
+    unnest_blocks_from_inline(soup)
+
     for element in soup.find_all(True):
         for attribute in list(element.attrs):
             if attribute.startswith("on") or attribute in ATTRIBUTES_TO_DROP:
@@ -1085,6 +1090,29 @@ def sanitize(soup: BeautifulSoup):
             element.attrs.pop("style", None)
             if SPOILER_CLASS not in classes:
                 element["class"] = classes + [SPOILER_CLASS]
+
+
+def unnest_blocks_from_inline(soup: BeautifulSoup):
+    """Forum posts contain things like <a href="full.png"><p><img src="thumb.png"/></p></a>: a paragraph
+    inside a link. EPUB only allows inline content in a link, so epubcheck rejects the page.
+    A link (or other inline wrapper) around exactly one block is turned inside out,
+    <p><a href="full.png"><img/></a></p>, keeping both the paragraph and the link; around anything
+    more complicated, the blocks are unwrapped so their content stays, inline, inside the link."""
+    for wrapper in soup.find_all(INLINE_WRAPPERS):
+        blocks = [child for child in wrapper.children if getattr(child, "name", None) in BLOCK_TAGS]
+        if not blocks:
+            continue
+        others = [child for child in wrapper.children
+                  if child not in blocks and (getattr(child, "name", None) is not None or str(child).strip())]
+        if len(blocks) == 1 and not others and not blocks[0].find(BLOCK_TAGS):
+            block = blocks[0]
+            wrapper.replace_with(block)      # the block takes the wrapper's place...
+            block.insert(0, wrapper.extract() if wrapper.parent else wrapper)
+            for child in list(block.children)[1:]:
+                wrapper.append(child.extract())   # ...and the wrapper moves inside it, around its content
+        else:
+            for block in wrapper.find_all(BLOCK_TAGS):
+                block.unwrap()
 
 
 def _hides_its_text(style: str | None) -> bool:

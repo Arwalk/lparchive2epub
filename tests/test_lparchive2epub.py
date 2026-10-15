@@ -1649,3 +1649,24 @@ def test_every_landing_page_extracts_as_recorded(archive, slug):
     assert [[c.original_href_slug, c.txt] for c in intro.chapters] == want["chapters"], \
         f"chapters of {slug} changed; if intended, rerun util/generate_chapter_golden.py and review the diff"
     assert [c.num for c in intro.chapters] == list(range(len(intro.chapters)))
+
+
+def test_blocks_inside_links_are_restructured_so_the_page_validates():
+    html = ('<div id="content">'
+            '<a href="full1.png"><p><img src="thumb1.png"/></p></a>'                    # the Boatmurdered case
+            '<b><p>bold paragraph</p></b>'
+            '<a href="x/"><p>one</p><p>two</p></a>'                                    # several blocks: unwrap
+            '<a href="y/">text <div>and a block</div></a>'                             # mixed: unwrap
+            '<a href="z/"><div><p>nested</p></div></a>'                                 # block in block: unwrap
+            '<p>a normal <a href="w/">link</a> stays</p>'
+            '</div>')
+    out = str(get_cleaned_html(html))
+    assert '<p><a href="full1.png"><img src="thumb1.png"/></a></p>' in out
+    assert '<p><b>bold paragraph</b></p>' in out
+    assert '<a href="x/">onetwo</a>' in out
+    assert '<a href="y/">text and a block</a>' in out
+    assert '<a href="z/">nested</a>' in out
+    assert '<p>a normal <a href="w/">link</a> stays</p>' in out
+    soup = BeautifulSoup(out, "html.parser")
+    for wrapper in soup.find_all(["a", "b", "i", "span"]):
+        assert not wrapper.find(["p", "div", "blockquote", "ul", "table", "pre"]), str(wrapper)
