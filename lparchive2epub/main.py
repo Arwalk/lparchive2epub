@@ -2,10 +2,10 @@ import asyncio
 import sys
 import traceback
 from argparse import ArgumentParser, ArgumentTypeError
-from aiohttp_client_cache import CacheBackend, CachedSession
+from aiohttp_client_cache import CachedSession, SQLiteBackend
 
 from lparchive2epub.lib import lparchive2epub, ExtractionError, ISSUES_URL, EXIT_FAILURE, EXIT_INTERRUPTED, normalize_lp_url, \
-    ImageProcessing
+    ImageProcessing, check_cache_path
 
 
 def is_lparchive_url(arg):
@@ -24,7 +24,11 @@ arg_parser = ArgumentParser(
 arg_parser.add_argument("url", metavar="URL", nargs=1, type=is_lparchive_url,
                         help="Address of the Let's Play on lparchive.org (any page of it will do)")
 arg_parser.add_argument("output", metavar="OUTPUT_FILE", nargs=1, type=str)
-arg_parser.add_argument("--no-cache", action="store_true", help="Don't cache url calls")
+arg_parser.add_argument("--cache", metavar="FILE",
+                        help="Keep every downloaded page and image in a SQLite database at FILE (created if "
+                             "needed, '.sqlite' added when FILE has no extension), so that running again, after a "
+                             "failure or for a newer version of the tool, only downloads what is missing. "
+                             "Off by default: within one run nothing is fetched twice anyway")
 arg_parser.add_argument("--strict", action="store_true",
                         help="Fail instead of skipping resources (images...) that can't be retrieved")
 arg_parser.add_argument("--allow-missing-updates", action="store_true",
@@ -57,10 +61,11 @@ arg_parser.add_argument("--jpeg-quality", metavar="1-100", type=jpeg_quality, de
                         help="JPEG quality used when --max-image-size re-encodes an image (default: 85)")
 
 async def amain(args):
-    if args.no_cache:
-        cache = None
-    else:
-        cache = CachedSession(cache=CacheBackend())
+    cache = None
+    if args.cache:
+        cache_file = check_cache_path(args.cache)
+        print(f"using cache {cache_file}", file=sys.stderr)
+        cache = CachedSession(cache=SQLiteBackend(cache_file, expire_after=-1, fast_save=True, autoclose=True))
     processing = ImageProcessing(args.max_image_size, args.jpeg_quality) if args.max_image_size else None
     await lparchive2epub(args.url[0], args.output[0], cache, strict=args.strict,
                          allow_missing_updates=args.allow_missing_updates, image_processing=processing)

@@ -3,7 +3,7 @@
 this tool (and library) aims at helping people extracting full epubs of Let's Plays from https://lparchive.org/
 
 ```
-usage: lparchive2epub [-h] [--no-cache] [--strict] [--allow-missing-updates]
+usage: lparchive2epub [-h] [--cache FILE] [--strict] [--allow-missing-updates]
                       [--max-image-size PIXELS] [--jpeg-quality 1-100]
                       URL OUTPUT_FILE
 
@@ -16,7 +16,11 @@ positional arguments:
 
 options:
   -h, --help   show this help message and exit
-  --no-cache   Don't cache url calls
+  --cache FILE Keep every downloaded page and image in a SQLite database at
+               FILE (created if needed, '.sqlite' added when FILE has no
+               extension), so that running again, after a failure or for a
+               newer version of the tool, only downloads what is missing. Off
+               by default: within one run nothing is fetched twice anyway
   --strict     Fail instead of skipping resources (images...) that can't be
                retrieved
   --allow-missing-updates
@@ -59,6 +63,15 @@ A standalone executable is available for releases on windows. See the releases p
 
 `uv run --with pyinstaller pyinstaller --onefile --name lparchive2epub lparchive2epub/main.py`
 
+## Cache
+
+Within one run, every image URL is downloaded once however many updates use it, so no cache is
+needed for a single book. Pass `--cache FILE` to keep everything downloaded in a SQLite database:
+building the same LP again (after a failure, or with a newer version of the tool) then takes seconds
+and only fetches what is missing. Failed downloads are never cached, so re-running after a dead host
+comes back works as expected. The database keeps a copy of every image it has seen, so it grows with
+each LP you build; delete the file to start afresh.
+
 ## Image size
 
 By default every image is embedded exactly as lparchive.org serves it, which is the right choice for
@@ -78,6 +91,7 @@ are. A summary of the saving is printed before the book is written.
 | 3 | the Let's Play was not found on lparchive.org (HTTP 404) |
 | 4 | lparchive.org could not be reached or kept failing |
 | 5 | the output file could not be written |
+| 6 | the `--cache` database could not be used (locked, not a database...) |
 | 130 | interrupted with Ctrl-C |
 
 ## Known limitations

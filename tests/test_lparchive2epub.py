@@ -9,7 +9,7 @@ import zipfile
 from urllib.parse import unquote
 
 import aiohttp
-from lparchive2epub.lib import Extractor, Chapters, lparchive2epub, BeautifulSoup, normalize_url, build_update, Update, Intro, format_failures_report, ISSUES_URL, do, StrictModeError, MissingUpdatesError, ExtractionError, OutputError, check_output_path, detect_image_type, NotFoundError, NetworkError, RetriesExhaustedError, NotALetsPlayError, normalize_lp_url, fetch_with_retries, Fetched, get_cleaned_html, compose_description, parse_lp_date, reduce_image, ImageProcessing, ImageRegistry, EXIT_NOT_FOUND, EXIT_NETWORK, EXIT_OUTPUT, EXIT_INTERRUPTED
+from lparchive2epub.lib import Extractor, Chapters, lparchive2epub, BeautifulSoup, normalize_url, build_update, Update, Intro, format_failures_report, ISSUES_URL, do, StrictModeError, MissingUpdatesError, ExtractionError, OutputError, check_output_path, detect_image_type, NotFoundError, NetworkError, RetriesExhaustedError, NotALetsPlayError, normalize_lp_url, fetch_with_retries, Fetched, get_cleaned_html, compose_description, parse_lp_date, reduce_image, ImageProcessing, ImageRegistry, check_cache_path, resolve_cache_path, CacheError, EXIT_CACHE, EXIT_NOT_FOUND, EXIT_NETWORK, EXIT_OUTPUT, EXIT_INTERRUPTED
 import lparchive2epub.lib as lib
 from lparchive2epub import main as cli
 from importlib.resources import files
@@ -802,7 +802,7 @@ def _run_cli_with(monkeypatch, capsys, exc):
         raise exc
     monkeypatch.setattr(cli, "lparchive2epub", fake)
     with pytest.raises(SystemExit) as exit_info:
-        cli.main(["--no-cache", "https://lparchive.org/Some-LP", "out.epub"])
+        cli.main(["https://lparchive.org/Some-LP", "out.epub"])
     return exit_info.value.code, capsys.readouterr().err
 
 
@@ -934,7 +934,7 @@ def test_cli_normalises_the_url_before_extracting(monkeypatch):
         seen["url"] = url
 
     monkeypatch.setattr(cli, "lparchive2epub", fake)
-    cli.main(["--no-cache", "lparchive.org/Some-LP/Update%2007/", "out.epub"])
+    cli.main(["lparchive.org/Some-LP/Update%2007/", "out.epub"])
     assert seen["url"] == "https://lparchive.org/Some-LP"
 
 
@@ -1294,13 +1294,13 @@ def test_cli_image_flags(monkeypatch):
         seen.update(kwargs)
 
     monkeypatch.setattr(cli, "lparchive2epub", fake)
-    cli.main(["--no-cache", "https://lparchive.org/Some-LP", "out.epub"])
+    cli.main(["https://lparchive.org/Some-LP", "out.epub"])
     assert seen["image_processing"] is None
-    cli.main(["--no-cache", "--max-image-size", "1600", "--jpeg-quality", "70", "https://lparchive.org/Some-LP", "out.epub"])
+    cli.main(["--max-image-size", "1600", "--jpeg-quality", "70", "https://lparchive.org/Some-LP", "out.epub"])
     assert (seen["image_processing"].max_size, seen["image_processing"].jpeg_quality) == (1600, 70)
     for bad in (["--max-image-size", "0"], ["--max-image-size", "big"], ["--jpeg-quality", "101"]):
         with pytest.raises(SystemExit) as exit_info:
-            cli.main(["--no-cache", *bad, "https://lparchive.org/Some-LP", "out.epub"])
+            cli.main([*bad, "https://lparchive.org/Some-LP", "out.epub"])
         assert exit_info.value.code == 2
 
 
@@ -1386,3 +1386,108 @@ async def test_identical_bytes_under_different_urls_are_processed_and_stored_onc
     for page in pages:                                               # every page's links rewritten to it
         assert f'src="{stored}"' in page and f'href="{stored}"' in page
     assert processing.changed == 3   # each download is accounted for in the report (plus the intro's image)
+
+
+def test_cache_path_resolution_and_checks():
+    with tempfile.TemporaryDirectory() as d:
+        assert resolve_cache_path(f"{d}/lp") == f"{d}/lp.sqlite"
+        assert resolve_cache_path(f"{d}/lp.db") == f"{d}/lp.db"
+        created = check_cache_path(f"{d}/lp")
+        assert created == f"{d}/lp.sqlite" and os.path.exists(created)
+        with pytest.raises(CacheError, match="is a directory"):
+            check_cache_path(d)
+        with pytest.raises(CacheError, match="does not exist"):
+            check_cache_path(f"{d}/nope/lp")
+        with open(f"{d}/text.sqlite", "w") as f:
+            f.write("this is not a database, it is a text file with enough bytes to have a header")
+        with pytest.raises(CacheError, match="not a SQLite database"):
+            check_cache_path(f"{d}/text.sqlite")
+        import sqlite3
+        holder = sqlite3.connect(created)
+        holder.execute("BEGIN IMMEDIATE")
+        try:
+            with pytest.raises(CacheError, match="locked by another run") as exc_info:
+                check_cache_path(created)
+            assert exc_info.value.exit_code == EXIT_CACHE
+        finally:
+            holder.rollback()
+            holder.close()
+
+
+def test_cli_cache_flag(monkeypatch, capsys):
+    seen = {}
+
+    async def fake(url, file, session=None, *args, **kwargs):
+        seen["session"] = session
+        if session is not None:
+            await session.close()
+
+    monkeypatch.setattr(cli, "lparchive2epub", fake)
+    cli.main(["https://lparchive.org/Some-LP", "out.epub"])
+    assert seen["session"] is None   # no cache unless asked
+    with tempfile.TemporaryDirectory() as d:
+        cli.main(["--cache", f"{d}/lp", "https://lparchive.org/Some-LP", "out.epub"])
+        assert isinstance(seen["session"], CachedSession) and isinstance(seen["session"].cache, SQLiteBackend)
+        assert os.path.exists(f"{d}/lp.sqlite")
+        assert f"using cache {d}/lp.sqlite" in capsys.readouterr().err
+        with pytest.raises(SystemExit) as exit_info:
+            cli.main(["--cache", d, "https://lparchive.org/Some-LP", "out.epub"])
+        assert exit_info.value.code == EXIT_CACHE
+    with pytest.raises(SystemExit) as exit_info:
+        cli.main(["--no-cache", "https://lparchive.org/Some-LP", "out.epub"])
+    assert exit_info.value.code == 2
+
+
+def _mini_lp_app(hits: list):
+    """A tiny Let's Play served by aiohttp: the X-COM landing page, 18 small updates, one image each."""
+    from aiohttp import web
+
+    async def handler(request: web.Request):
+        path = request.path
+        hits.append(path)
+        if path.rstrip("/") == "/X-COM-Terror-from-the-Deep":
+            return web.Response(body=xcom, content_type="text/html")
+        if path.endswith((".jpg", ".png")):
+            return web.Response(body=PNG_BYTES + path.encode(), content_type="image/png")
+        if "/Update" in path:
+            return web.Response(body=f'<div id="content"><p>{path}</p><img src="shot.png"/></div>'.encode(),
+                                content_type="text/html")
+        return web.Response(status=404)
+
+    app = web.Application()
+    app.router.add_get("/{tail:.*}", handler)
+    return app
+
+
+@pytest.mark.asyncio
+async def test_sqlite_cache_makes_a_second_build_free_of_requests():
+    from aiohttp.test_utils import TestServer
+    hits = []
+    server = TestServer(_mini_lp_app(hits))
+    await server.start_server()
+    try:
+        url = str(server.make_url("/X-COM-Terror-from-the-Deep"))
+        with tempfile.TemporaryDirectory() as d:
+            cache_file = check_cache_path(f"{d}/cache")
+
+            async def build(session, out):
+                async with session:
+                    await asyncio.wait_for(do(url, out, session, lambda *_: None), timeout=60)
+                with open(out, "rb") as f:
+                    return f.read()
+
+            def cached():
+                return CachedSession(cache=SQLiteBackend(cache_file, expire_after=-1, fast_save=True, autoclose=True))
+
+            first = await build(cached(), f"{d}/one.epub")
+            first_hits = len(hits)
+            assert first_hits >= 1 + 18 + 18   # landing page, 18 updates, 18 images
+
+            second = await build(cached(), f"{d}/two.epub")
+            assert len(hits) == first_hits        # everything came from the cache
+            assert second == first                # and the book is the same
+
+            await build(aiohttp.ClientSession(), f"{d}/three.epub")
+            assert len(hits) == 2 * first_hits    # without the cache, everything is fetched again
+    finally:
+        await server.close()

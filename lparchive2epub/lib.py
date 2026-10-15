@@ -5,6 +5,7 @@ import io
 import mimetypes
 import os
 import re
+import sqlite3
 import zipfile
 from dataclasses import dataclass, field
 from hashlib import blake2b
@@ -513,6 +514,7 @@ EXIT_USAGE = 2
 EXIT_NOT_FOUND = 3
 EXIT_NETWORK = 4
 EXIT_OUTPUT = 5
+EXIT_CACHE = 6
 EXIT_INTERRUPTED = 130
 
 
@@ -532,6 +534,54 @@ class MissingUpdatesError(ExtractionError):
 class OutputError(ExtractionError):
     """The output file can't be written."""
     exit_code = EXIT_OUTPUT
+
+
+class CacheError(ExtractionError):
+    """The --cache database can't be used."""
+    exit_code = EXIT_CACHE
+
+
+def resolve_cache_path(path: str) -> str:
+    """Where the --cache SQLite file lives: `path`, with .sqlite added when it has no extension."""
+    path = os.path.abspath(os.path.expanduser(path))
+    return path if os.path.splitext(path)[1] else path + ".sqlite"
+
+
+def check_cache_path(path: str) -> str:
+    """Validate the --cache location before any download. Returns the resolved file path.
+
+    Creates the database if it does not exist yet, and fails early if the file is a directory, is
+    not a SQLite database, or is locked by another run."""
+    if os.path.isdir(os.path.expanduser(path)):
+        raise CacheError(f"Cannot use {os.path.abspath(os.path.expanduser(path))} as the cache: it is a directory.")
+    file = resolve_cache_path(path)
+    directory = os.path.dirname(file)
+    if not os.path.isdir(directory):
+        raise CacheError(f"Cannot use {file} as the cache: the directory {directory} does not exist.")
+    # A real write, not just opening: on some mounted filesystems (virtiofs, as used by Docker Desktop)
+    # the very first write to a freshly created database fails with "readonly database" and the next
+    # one succeeds, so one retry is allowed.
+    for attempt in (1, 2):
+        try:
+            connection = sqlite3.connect(file, timeout=1)
+            try:
+                connection.execute("BEGIN IMMEDIATE")   # fails at once if another process holds the database
+                connection.execute("CREATE TABLE IF NOT EXISTS lparchive2epub_probe (x)")
+                connection.execute("DROP TABLE lparchive2epub_probe")
+                connection.commit()
+            finally:
+                connection.close()  # must not linger: an open handle can leave the file locked for the real cache
+            return file
+        except sqlite3.OperationalError as e:
+            reason = str(e)
+            if "readonly" in reason and attempt == 1:
+                continue
+            if "locked" in reason:
+                reason = "it is locked by another run (use a different --cache file, or wait for that run to finish)"
+            raise CacheError(f"Cannot use {file} as the cache: {reason}.") from e
+        except sqlite3.DatabaseError as e:
+            raise CacheError(f"Cannot use {file} as the cache: it is not a SQLite database ({e}).") from e
+    return file
 
 
 class NotFoundError(ExtractionError):
@@ -665,6 +715,9 @@ async def fetch_with_retries(session: aiohttp.ClientSession, url: str, max_retri
             raise
         except aiohttp.InvalidURL as e:
             raise NonRetryableError(f"Invalid URL {url}: {e}", url) from e
+        except sqlite3.Error as e:
+            # The --cache database, not the network: retrying would only hide it behind a network error
+            raise CacheError(f"The cache database failed while fetching {url}: {e}") from e
         except Exception as e:
             last_exception = e
             retry_count += 1
@@ -1133,6 +1186,9 @@ async def do(url: str, file: str, session: aiohttp.ClientSession, writer, strict
 
     if missing_updates:
         missing_updates.sort(key=lambda x: x[0])
+        fatal = [e for _, _, e in missing_updates if isinstance(e, ExtractionError)]
+        if fatal:
+            raise fatal[0]  # e.g. a broken --cache database: not a per-update problem, say so directly
         missing = [SkippedResource(page=c.original_href, url=c.original_href, reason=_describe(e))
                    for _, c, e in missing_updates]
         if not allow_missing_updates:
