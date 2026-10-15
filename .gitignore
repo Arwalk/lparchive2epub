@@ -1,8 +1,6 @@
 .idea
 *.epub
 
-!prebuilt_examples/*
-
 **/__pycache__
 dist/*
 build/*

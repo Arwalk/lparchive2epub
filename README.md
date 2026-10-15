@@ -59,6 +59,12 @@ must find on each of those pages (facts and ordered chapters); `util/generate_ch
 regenerates it after an intended change, and the diff shows exactly which Let's Plays moved.
 Run `pytest -m "not archive"` to skip that archive-wide check while iterating.
 
+## Example
+
+A ready-made book, *Dwarf Fortress - Boatmurdered* (66 updates, 45 MB), is attached to the
+[releases page](https://github.com/Arwalk/lparchive2epub/releases) so you can see what the tool
+produces before installing it.
+
 ## Requirements
 
 ### Dev
