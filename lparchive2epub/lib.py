@@ -209,6 +209,8 @@ FIND_FILES = re.compile(r"([.])[^/.]+$")
 DOT_NOT_IN_A_NUMBER = re.compile(r"(?<!\d)\.|\.(?!\d)")
 # Links to image files, whatever the case of the extension and ignoring any query string or fragment
 IMAGE_FILE_LINK = re.compile(r"\.(jpe?g|png|gif|webp|bmp|svg)(?=[?#]|$)", re.IGNORECASE)
+# lparchive's own wording for a thumbnail's link: "Click here for the full 728x866 image."
+FULL_IMAGE_LINK_TEXT = re.compile(r"\bfull\b.*\bimage\b", re.IGNORECASE | re.DOTALL)
 
 # (media subtype, file extension) by magic number. Checked in order.
 IMAGE_SIGNATURES = (
@@ -322,6 +324,7 @@ class Extractor:
         chapters = Extractor.all_chapters(url, p)
         Extractor.fix_links(content, chapters, url)
 
+        Extractor.inline_full_size_images(content)
         images = Extractor.all_images(content, url)
 
         published_on = archival.find("strong").text
@@ -418,6 +421,40 @@ class Extractor:
 
 
     @staticmethod
+    def inline_full_size_images(content: BeautifulSoup) -> int:
+        """Show the full-size picture where the post shows a thumbnail linking to it.
+
+        Forum posts shrink big pictures and link to the original, in two shapes:
+          <a href="full.png"><img src="thumb.png"/></a>
+          <img src="thumb.png"/><a href="full.png">Click here for the full 728x866 image.</a>
+        A book has no "click to enlarge": the thumbnail becomes the full picture (the stylesheet fits
+        it to the screen) and the link goes. Only the full picture is then downloaded. Links to images
+        with no thumbnail to pair with are left alone. Returns the number of replacements."""
+        replaced = 0
+        for link in content.find_all("a", href=True):
+            href = link["href"].strip()
+            if not IMAGE_FILE_LINK.search(href):
+                continue
+            wrapped = link.find_all("img")
+            if len(wrapped) == 1 and not "".join(link.find_all(string=True)).strip():
+                thumbnail = wrapped[0]            # <a href="full"><img src="thumb"/></a>
+                thumbnail["src"] = href
+                link.replace_with(thumbnail)
+                replaced += 1
+                continue
+            if wrapped or not FULL_IMAGE_LINK_TEXT.search(link.get_text(" ")):
+                continue
+            previous = link.previous_sibling     # <img src="thumb"/> [<br/>] <a href="full">Click here...</a>
+            while previous is not None and (getattr(previous, "name", None) == "br"
+                                            or (getattr(previous, "name", None) is None and not str(previous).strip())):
+                previous = previous.previous_sibling
+            if getattr(previous, "name", None) == "img":
+                previous["src"] = href
+                link.decompose()
+                replaced += 1
+        return replaced
+
+    @staticmethod
     def all_images(content: BeautifulSoup, root_url: str) -> List[Image]:
         # Get direct image tags
         images = content.find_all("img")
@@ -459,6 +496,7 @@ class Extractor:
     @staticmethod
     def get_update(chapters: List[Chapters], p: BeautifulSoup, chapter: Chapters) -> Update:
         content = p.find("div", id="content")
+        Extractor.inline_full_size_images(content)
         images = Extractor.all_images(content, chapter.original_href)
         Extractor.fix_links(content, chapters, chapter.original_href)
         return Update(content=content, images=images)

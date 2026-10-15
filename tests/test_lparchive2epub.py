@@ -1760,3 +1760,51 @@ def test_cli_cover_flags(monkeypatch):
     with pytest.raises(SystemExit) as exit_info:
         cli.main(["--cover", "x.png", "--no-cover", "https://lparchive.org/Some-LP", "out.epub"])
     assert exit_info.value.code == 2
+
+
+def test_thumbnails_are_replaced_by_their_full_size_picture():
+    html = ('<div id="content">'
+            '<a href="map_full.png" rel="nofollow"><img alt="" class="img" src="map_thumb.png"/></a><br/>'            # wrapped
+            '<img alt="" class="img" src="3-shoes.png"/><a href="4-shoes.png"><br/>Click here for the full 728x866 image.</a><br/>'  # text link after
+            '<img src="a.png"/><br/><br/><a href="b.png">Click here for the full 1024x768 image.</a>'                  # over line breaks
+            '<a href="other.png">Here is the in-game result.</a>'                                                     # prose link: kept
+            '<a href="Update%203/">see update 3</a>'
+            '<a href="two.png"><img src="t1.png"/><img src="t2.png"/></a>'                                            # two thumbnails: kept
+            '<a href="cap.png"><img src="c.png"/> captioned</a>'                                                      # link with text: kept
+            '</div>')
+    content = BeautifulSoup(html, "html.parser").find("div", id="content")
+    assert Extractor.inline_full_size_images(content) == 3
+    out = str(content)
+    assert '<img alt="" class="img" src="map_full.png"/><br/>' in out and "map_thumb" not in out
+    assert '<img alt="" class="img" src="4-shoes.png"/><br/>' in out and "3-shoes" not in out and "Click here" not in out
+    assert '<img src="b.png"/><br/><br/>' in out and 'src="a.png"' not in out
+    assert '<a href="other.png">Here is the in-game result.</a>' in out
+    assert '<a href="two.png"><img src="t1.png"/><img src="t2.png"/></a>' in out
+    assert '<a href="cap.png"><img src="c.png"/> captioned</a>' in out
+    images = Extractor.all_images(content, "https://lparchive.org/Some-LP/Update%201/")
+    assert [i.src for i in images] == ["map_full.png", "4-shoes.png", "b.png", "t1.png", "t2.png", "c.png",
+                                       "other.png", "two.png", "cap.png"]
+
+
+@pytest.mark.asyncio
+async def test_only_the_full_size_picture_is_downloaded_and_embedded():
+    url = "https://lparchive.org/X-COM-Terror-from-the-Deep"
+    full = _make_image("JPEG", (2000, 1500), quality=90)
+    thumb = _make_image("JPEG", (200, 150))
+    chapter = f"{url}/Update%2001/"
+    session = _FakeSession("never-matches", responses={
+        chapter: _FakeResponse(200, b'<div id="content"><a href="full.jpg"><p><img src="thumb.jpg"/></p></a>'
+                                    b'<p>and <a href="prose.jpg">a prose link</a></p></div>'),
+        f"{chapter}full.jpg": _FakeResponse(200, full),
+        f"{chapter}thumb.jpg": _FakeResponse(200, thumb),
+        f"{chapter}prose.jpg": _FakeResponse(200, PNG_BYTES + b"prose"),
+    })
+    files = await _build_book(session)
+    page = files["EPUB/update_0.xhtml"].decode()
+    assert session.requested.count(f"{chapter}full.jpg") == 1
+    assert session.requested.count(f"{chapter}thumb.jpg") == 0
+    stored = [n for n in files if n.startswith("EPUB/images/") and "cover" not in n]
+    assert len(stored) == 2 + 1   # full picture, prose-linked picture, the intro's image
+    assert any(files[n] == full for n in stored) and not any(files[n] == thumb for n in stored)
+    assert re.search(r'<p>\s*<img src="images/[0-9a-f]+\.jpg"/>\s*</p>', page)   # inline, no link around it
+    assert len(re.findall(r'<a href="images/', page)) == 1                   # only the prose link remains a link

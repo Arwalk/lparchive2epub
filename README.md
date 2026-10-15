@@ -89,6 +89,13 @@ Every book gets a generated cover (title and author on a plain background) and a
 facts from the landing page: author, number of updates, when it was posted, tags, archival date,
 original thread. `--cover IMAGE` uses your own picture instead, `--no-cover` leaves the cover out.
 
+## Thumbnails
+
+Forum posts often show a small picture linking to the full-size one ("click here for the full image").
+A book has no click-to-enlarge, so the full-size picture is shown in place of the thumbnail, fitted
+to the screen; only the full picture is downloaded. `--max-image-size` applies to it like to any
+other image.
+
 ## Image size
 
 By default every image is embedded exactly as lparchive.org serves it, which is the right choice for
