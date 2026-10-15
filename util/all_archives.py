@@ -1,20 +1,19 @@
 import asyncio
 import json
 import logging
-import multiprocessing
 import os
-import re
+import sys
 from argparse import ArgumentParser
+from pathlib import Path
 
 import aiohttp
-from bs4 import BeautifulSoup
-
-from lparchive2epub.lib import lparchive2epub
 from aiohttp import ClientSession
 from tqdm.asyncio import tqdm
-from aiohttp_client_cache import CachedSession, SQLiteBackend, FileBackend
+from aiohttp_client_cache import CachedSession, SQLiteBackend
 
-processes = multiprocessing.cpu_count()
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from lparchive2epub.lib import lparchive2epub, CURL_HEADERS  # noqa: E402
+from util.snapshot_landing_pages import read_index  # noqa: E402
 
 
 async def do_single(arguments, url, pbar, failed, cache_path):
@@ -46,28 +45,15 @@ async def do_single(arguments, url, pbar, failed, cache_path):
     return url, exc
 
 
-async def get_frontpage():
+async def get_frontpage() -> str:
     async with ClientSession() as session:
-        p = await session.get("https://lparchive.org/")
-
-        soup = BeautifulSoup(await p.text(), "html.parser")
-    return soup
+        async with session.get("https://lparchive.org/", headers=CURL_HEADERS) as r:
+            return await r.text()
 
 
 async def do(arguments):
-    soup = await get_frontpage()
-
-    # now for some "magic"
-    # there's a javascript embedded in the page that contains all the content to populate the table at the bottom
-    # All archived let's plays are mentioned there.
-    # So with a bit of regex we can extract the json that gives us all the let's plays
-    scripts = soup.find_all("script")
-    toc = scripts[13]
-    m = re.search(r'\[.*}];', toc.text)
-    data = m.group(0).replace("tocdata=", "")[:-1].replace("'", "\"")
-    as_json = json.loads(data)
-    urls = [x['u'] for x in as_json]
-    # It's ugly, but it works. And I couldn't find a decent api to ask politely for this data somewhere else.
+    # The front page embeds the whole LP index as JavaScript; read_index knows how to parse it.
+    urls = ["/" + entry["slug"] + "/" for entry in read_index(await get_frontpage())]
 
     logging.basicConfig(filename=f"{arguments.output[0]}{os.path.sep}/errors.log", level=logging.WARN,
                         format='%(asctime)s %(levelname)s %(name)s %(message)s')
@@ -81,7 +67,7 @@ async def do(arguments):
 
     with tqdm(total=len(urls)) as pbar:
         for url in urls:
-           r =  await do_single(arguments, url, pbar, failed, cache_path)
+            await do_single(arguments, url, pbar, failed, cache_path)
 
     for url in failed:
         print(json.dumps(url))

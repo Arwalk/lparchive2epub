@@ -136,44 +136,31 @@ def get_blake2b_hash(content: bytes) -> str:
     hasher.update(content)
     return hasher.hexdigest()
 
-@dataclass(order=True)
+@dataclass
 class Chapters:
-    num: int
-    original_href: str
-    txt: BeautifulSoup
+    num: int                # position in the book; update_<num>.xhtml
+    original_href: str      # absolute URL of the page, slash-terminated
+    txt: str                # title shown in the navigation
     new_href: str
-    original_href_slug: str
-
-    def __hash__(self):
-        return hash((self.original_href, str(self.txt.text)))
-
-    def __post_init__(self):
-        self.sort_index = self.num
+    original_href_slug: str  # "Update%2001/"
 
 
-@dataclass(order=True)
+@dataclass
 class Image:
     num: int
     src: str
     tag: BeautifulSoup      # the <img> (src) or <a> (href) this came from; rewritten in place once downloaded
-    url: str
-    root_url: str
-
-    def __post_init__(self):
-        self.sort_index = self.num
+    url: str | None         # absolute URL, None when it could not be repaired
+    root_url: str           # the page it was found on, for the failure report
 
 
-@dataclass(order=True)
+@dataclass
 class IndexedEpubImage:
-    num: int
+    """A downloaded image as stored in the book, keyed by its original URL (old_name)."""
     hash: str
     old_name: str
     new_name: str
-    root_url: str
     data: EpubImage
-
-    def __post_init__(self):
-        self.sort_index = self.num
 
 
 @dataclass
@@ -521,14 +508,11 @@ class Extractor:
         return Update(content=content, images=images)
 
 
-@dataclass(order=True)
+@dataclass
 class Page:
     num: int
     chapter: EpubHtml
     images: List[IndexedEpubImage]
-
-    def __post_init__(self):
-        self.sort_index = self.num
 
 @dataclass
 class Fetched:
@@ -873,11 +857,9 @@ async def _get_image(session: aiohttp.ClientSession, img: Image, registry: Image
         img_hash = get_blake2b_hash(content)
         new_name = f"images/{img_hash}.{extension}"
         return IndexedEpubImage(
-            img.num,
             img_hash,
             img_url,  # Use the original URL as old_name
             new_name,
-            img.root_url,
             EpubImage(
                 uid=f"i{img_hash}",
                 file_name=new_name,
@@ -894,7 +876,7 @@ async def _get_image(session: aiohttp.ClientSession, img: Image, registry: Image
             known = await registry.by_content[raw_hash]
             if processing is not None:
                 processing.record(len(fetched.body), len(known.data.content))
-            res = IndexedEpubImage(img.num, known.hash, img_url, known.new_name, img.root_url, known.data)
+            res = IndexedEpubImage(known.hash, img_url, known.new_name, known.data)
         else:
             content_future = asyncio.get_running_loop().create_future() if registry is not None else None
             if content_future is not None:
@@ -978,10 +960,6 @@ def point_at_embedded(image: Image, stored: IndexedEpubImage):
     """Make the tag the image came from show the stored copy: src for <img>, href for <a>."""
     image.tag["href" if image.tag.name == "a" else "src"] = stored.new_name
 
-def batch(iterable, n=1):
-    l = len(iterable)
-    for ndx in range(0, l, n):
-        yield iterable[ndx:min(ndx + n, l)]
 
 async def build_update(session: aiohttp.ClientSession, chapter: Chapters, data: Update, intro: Intro, registry: ImageRegistry | None = None,
                        failures: list[SkippedResource] = None, processing: ImageProcessing | None = None,

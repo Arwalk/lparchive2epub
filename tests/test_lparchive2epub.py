@@ -1508,7 +1508,7 @@ def test_snapshot_index_groups_series_pages_and_sorts():
     assert [e["slug"] for e in index] == ["007-Nightfire", "Space-Quest-Series"]
     series = index[1]
     assert series["url"] == "https://lparchive.org/Space-Quest-Series"
-    assert [l["title"] for l in series["listed_as"]] == ["Space Quest 1", "Space Quest 2"]
+    assert [listing["title"] for listing in series["listed_as"]] == ["Space Quest 1", "Space Quest 2"]
     assert series["type"] == "1" and series["tags"] == ["screenshot"]
 
 

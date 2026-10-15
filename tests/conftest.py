@@ -1,7 +1,6 @@
 from importlib.resources import files
 import json
 import random
-import pytest
 
 
 def pytest_addoption(parser):
