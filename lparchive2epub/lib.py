@@ -12,7 +12,7 @@ import zipfile
 from dataclasses import dataclass, field
 from hashlib import blake2b
 from typing import List
-from urllib.parse import urlparse, urljoin, urldefrag, unquote
+from urllib.parse import urlparse, urljoin, urldefrag, unquote, quote
 
 import aiohttp
 from bs4 import BeautifulSoup
@@ -143,6 +143,14 @@ class Chapters:
     txt: str                # title shown in the navigation
     new_href: str
     original_href_slug: str  # "Update%2001/"
+    html: str | None = None  # the page once downloaded (prefetched, or read while following next links)
+    order: float = -1.0      # reading order; a page found through next links sits between two listed ones
+    next_slug: str | None = None  # where the page's own "next" link points, once the page was read
+    fetch_error: Exception | None = None  # why the page could not be downloaded, when it could not
+
+    def __post_init__(self):
+        if self.order < 0:
+            self.order = float(self.num)
 
 
 @dataclass
@@ -1037,8 +1045,10 @@ def add_page(known_images: set, book: EpubBook, toc: List, spine: List, page: Pa
 async def build_single_page(session: aiohttp.ClientSession, intro: Intro, chapter: Chapters, all_chapters: List[Chapters], pbar,
                             registry: ImageRegistry | None = None, failures: list[SkippedResource] = None,
                             processing: ImageProcessing | None = None, fetch: FetchSettings | None = None) -> Page:
-    fetched = await fetch_with_retries(session, chapter.original_href, fetch=fetch)
-    chapter_bs = get_cleaned_html(fetched.text())
+    if chapter.fetch_error is not None:
+        raise chapter.fetch_error
+    html = chapter.html if chapter.html is not None else (await fetch_with_retries(session, chapter.original_href, fetch=fetch)).text()
+    chapter_bs = get_cleaned_html(html)
     update = Extractor.get_update(all_chapters, chapter_bs, chapter)
     page = await build_update(session, chapter, update, intro, registry, failures, processing, fetch)
     pbar.update(1)
@@ -1065,6 +1075,152 @@ def build_placeholder_page(chapter: Chapters, intro: Intro, error: Exception) ->
     div.append(reason)
     placeholder.content = str(content)
     return Page(chapter.num, placeholder, [])
+
+
+# Where the walk starts when the landing page lists no update at all
+FIRST_UPDATE_GUESSES = ("Update%2001/", "Update%201/")
+MAX_UNLISTED_WALK = 5000
+# "<LP title> Part #647 - Robin C" -> "Robin C"
+PART_TITLE = re.compile(r"\bPart #\d+\s*-\s*(.+)$")
+NUMBERED_UPDATE = re.compile(r"^Update%20(\d+)/$")
+
+
+def canonical_slug(slug: str) -> str:
+    """The same page spelled the way the landing page spells it: "Update%20647/" whether the link said
+    "Update 647/" or "Update%20647/"."""
+    return quote(unquote(slug), safe="/()!*'-_.~")
+
+
+def slug_key(slug: str) -> str:
+    """Identity of a page for "have we seen it": like canonical_slug, and "Update%2009/" and
+    "Update%209/" count as the same page (the landing page pads the number, a next link may not).
+    The site itself is strict about the padding in URLs, so this is only for comparisons."""
+    slug = canonical_slug(slug)
+    m = NUMBERED_UPDATE.match(slug)
+    return f"Update%20{int(m.group(1))}/" if m else slug
+
+
+async def prefetch_chapters(session: aiohttp.ClientSession, chapters: list[Chapters], fetch: FetchSettings | None,
+                            pbar=None):
+    """Download the listed pages (HTML only, a few tens of KB each) so that next links can be read
+    before the book is built. A page that fails is left without HTML: building it fails later, with
+    the usual report."""
+    async def one(chapter: Chapters):
+        try:
+            chapter.html = (await fetch_with_retries(session, chapter.original_href, fetch=fetch)).text()
+            chapter.next_slug = _next_slug(_lp_base(chapter), chapter.original_href, chapter.html)
+        except FetchError as e:
+            chapter.fetch_error = e   # reported when the book is built; not retried again here
+        if pbar is not None:
+            pbar.update(1)
+    await asyncio.gather(*(one(c) for c in chapters if c.html is None))
+
+
+def _lp_base(chapter: Chapters) -> str:
+    return chapter.original_href[:-len(chapter.original_href_slug)]
+
+
+async def discover_unlisted_chapters(session: aiohttp.ClientSession, url: str, chapters: list[Chapters],
+                                     fetch: FetchSettings | None = None,
+                                     failures: list[SkippedResource] | None = None) -> list[Chapters]:
+    """Pages the landing page does not list.
+
+    Some landing pages stop listing updates at some point (Fire Emblem Awakening lists 646 of its
+    954 pages), list none at all (The Blackwell Legacy), or skip one (Resident Evil 1's page 59).
+    Three ways to find them, in order: follow each listed page's "next" link while it leads to an
+    unknown page; when nothing is listed, start from "Update 1"; and try the number after the
+    highest "Update N" until the site answers 404. Found pages are placed right after the page that
+    led to them, and keep their HTML so they are not downloaded twice."""
+    base = (url[:-1] if url.endswith("/") else url) + "/"
+    known = {slug_key(c.original_href_slug) for c in chapters}
+    found: list[Chapters] = []
+
+    async def page_html(href: str) -> str | None:
+        try:
+            html = (await fetch_with_retries(session, href, fetch=fetch)).text()
+        except NonRetryableError:
+            return None   # 404 and the like: the chain stops here
+        except FetchError as e:
+            if failures is not None:
+                failures.append(SkippedResource(page=url, url=href, reason=f"while looking for unlisted updates: {e}"))
+            return None
+        # A 200 that is not an update page (a redirect to the index, an error page) ends the chain too
+        return html if 'id="content"' in html else None
+
+    def add(slug: str, html: str, after: Chapters | None, step: int) -> Chapters:
+        num = len(chapters) + len(found)
+        order = after.order + step * 1e-4 if after is not None else float(num)
+        chapter = _chapter_from_page(base, slug, html, num, order)
+        known.add(slug_key(slug))
+        found.append(chapter)
+        return chapter
+
+    async def walk(start: Chapters):
+        current, step = start, 1
+        while len(found) < MAX_UNLISTED_WALK:
+            if current.fetch_error is not None:
+                return
+            if current.html is None:
+                current.html = await page_html(current.original_href)
+                if current.html is None:
+                    return
+                current.next_slug = _next_slug(base, current.original_href, current.html)
+            nxt = current.next_slug
+            if nxt is None or slug_key(nxt) in known:
+                return
+            html = await page_html(base + nxt)
+            if html is None:
+                return
+            current, step = add(nxt, html, start, step), step + 1
+
+    if not chapters:
+        for guess in FIRST_UPDATE_GUESSES:
+            html = await page_html(base + guess)
+            if html is not None:
+                await walk(add(guess, html, None, 0))
+                break
+
+    for chapter in sorted(chapters, key=lambda c: c.order):
+        await walk(chapter)
+
+    # Pages nothing links to: "Update N+1" after the highest number seen
+    numbered = [(int(m.group(1)), len(m.group(1)), c) for c in [*chapters, *found]
+                if (m := NUMBERED_UPDATE.match(canonical_slug(c.original_href_slug)))]
+    if numbered:
+        n, width, last = max(numbered, key=lambda x: x[0])
+        step = 1
+        while len(found) < MAX_UNLISTED_WALK:
+            slug = f"Update%20{n + step:0{width}d}/"
+            if slug_key(slug) in known:
+                break
+            html = await page_html(base + slug)
+            if html is None:
+                break
+            probed = add(slug, html, last, step)
+            await walk(probed)
+            step += 1
+    return found
+
+
+def _next_slug(base: str, page_url: str, html: str) -> str | None:
+    """The slug under the LP root `base` that the page's 'next' navigation link points at, in
+    canonical spelling, if any. The link is relative to the page ("../Update 647/")."""
+    soup = BeautifulSoup(html, "html.parser")
+    link = soup.find("a", class_="next", href=True)
+    if link is None:
+        return None
+    full = Extractor.get_full_url(page_url, link["href"])
+    slug = Extractor.chapter_slug(base, full) if full else None
+    return canonical_slug(slug) if slug else None
+
+
+def _chapter_from_page(base: str, slug: str, html: str, num: int, order: float) -> Chapters:
+    soup = BeautifulSoup(html, "html.parser")
+    title = " ".join(soup.title.get_text(" ").split()) if soup.title else ""
+    m = PART_TITLE.search(title)
+    return Chapters(num=num, original_href=base + slug, txt=(m.group(1) if m else None) or unquote(slug[:-1]),
+                    new_href=f"update_{num}.xhtml", original_href_slug=slug, html=html, order=order,
+                    next_slug=_next_slug(base, base + slug, html))
 
 
 async def lparchive2epub(url: str, file: str | None = None, root_session: aiohttp.ClientSession | None = None,
@@ -1245,6 +1401,15 @@ async def do(url: str, file: str | None, session: aiohttp.ClientSession, writer,
     intro = Extractor.intro(url, landing)
     file = resolve_output_path(file, intro.title, url)
     check_output_path(file)
+    failures: list[SkippedResource] = []
+
+    with tqdm(total=len(intro.chapters), desc="Getting the updates' pages", disable=fetch.quiet) as pbar:
+        await prefetch_chapters(session, intro.chapters, fetch, pbar)
+    say("looking for updates the landing page does not list")
+    unlisted = await discover_unlisted_chapters(session, url, intro.chapters, fetch, failures)
+    if unlisted:
+        say(f"found {len(unlisted)} more update(s) by following the pages' next links")
+        intro.chapters.extend(unlisted)
 
     toc = []
     spine = []
@@ -1270,8 +1435,7 @@ async def do(url: str, file: str | None, session: aiohttp.ClientSession, writer,
 
     say("building intro")
     image_registry = ImageRegistry()
-    failures: list[SkippedResource] = []
-    missing_updates: list[tuple[int, Chapters, Exception]] = []
+    missing_updates: list[tuple[float, Chapters, Exception]] = []
     epub_intro = await build_intro(session, url, intro, image_registry, failures, image_processing, fetch)
 
     known_images: set[str] = set()
@@ -1283,7 +1447,7 @@ async def do(url: str, file: str | None, session: aiohttp.ClientSession, writer,
 
     say("building chapters / updates")
 
-    pages_indexed: list[tuple[int, Page]] = []
+    pages_indexed: list[tuple[float, Page]] = []
 
     with tqdm(total=len(intro.chapters), desc="Gathering and building pages", disable=fetch.quiet) as pbar:
         q: asyncio.Queue = asyncio.Queue()
@@ -1311,8 +1475,8 @@ async def do(url: str, file: str | None, session: aiohttp.ClientSession, writer,
 
         workers = [asyncio.create_task(worker()) for _ in range(CONCURRENCY_LIMIT_PAGES)]
 
-        for i, chapter in enumerate(intro.chapters):
-            await q.put((i, chapter))
+        for chapter in intro.chapters:
+            await q.put((chapter.order, chapter))
 
         await q.join()
         for w in workers:

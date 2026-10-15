@@ -10,7 +10,7 @@ import zipfile
 from urllib.parse import unquote
 
 import aiohttp
-from lparchive2epub.lib import Extractor, Chapters, BeautifulSoup, normalize_url, build_update, Update, Intro, format_failures_report, ISSUES_URL, do, StrictModeError, MissingUpdatesError, ExtractionError, OutputError, check_output_path, detect_image_type, NotFoundError, NetworkError, RetriesExhaustedError, NotALetsPlayError, normalize_lp_url, fetch_with_retries, Fetched, get_cleaned_html, compose_description, parse_lp_date, reduce_image, ImageProcessing, ImageRegistry, FetchSettings, check_cache_path, safe_file_name, resolve_output_path, resolve_cache_path, CacheError, EXIT_CACHE, EXIT_NOT_FOUND, EXIT_NETWORK, EXIT_OUTPUT, EXIT_INTERRUPTED
+from lparchive2epub.lib import Extractor, Chapters, BeautifulSoup, normalize_url, build_update, Update, Intro, format_failures_report, ISSUES_URL, do, StrictModeError, MissingUpdatesError, ExtractionError, OutputError, check_output_path, detect_image_type, NotFoundError, NetworkError, RetriesExhaustedError, NotALetsPlayError, normalize_lp_url, fetch_with_retries, Fetched, get_cleaned_html, compose_description, parse_lp_date, reduce_image, ImageProcessing, ImageRegistry, FetchSettings, check_cache_path, discover_unlisted_chapters, canonical_slug, safe_file_name, resolve_output_path, resolve_cache_path, CacheError, EXIT_CACHE, EXIT_NOT_FOUND, EXIT_NETWORK, EXIT_OUTPUT, EXIT_INTERRUPTED
 import lparchive2epub.lib as lib
 from lparchive2epub import main as cli
 from importlib.resources import files
@@ -499,6 +499,10 @@ class _FakeSession:
         if self.failing_slug in url:
             return _FakeResponse(404, b"not here")
         if "Update" in url:
+            number = re.search(r"Update%20(\d+)/", url)
+            # like the site: only X-COM's 18 updates exist by default, anything else is 404 unless given
+            if not url.startswith("https://lparchive.org/X-COM-Terror-from-the-Deep/") or (number and int(number.group(1)) > 18):
+                return _FakeResponse(404, b"no such update")
             return _FakeResponse(200, f'<div id="content"><h3>{unquote(url)}</h3>some text</div>'.encode())
         return _FakeResponse(200, PNG_BYTES)
 
@@ -863,6 +867,8 @@ class _JitterySession(_FakeSession):
         if url.rstrip("/") == "https://lparchive.org/X-COM-Terror-from-the-Deep":
             return _JitteryResponse(200, xcom, self.rng)
         m = re.search(r"Update%20(\d+)/$", url)
+        if m and int(m.group(1)) > 18:
+            return _JitteryResponse(404, b"no such update", self.rng)
         if m:
             n = int(m.group(1))
             imgs = "".join(f'<img src="{n}-{i}.png"/>' for i in range(6)) + '<img src="../shared.png"/>'
@@ -1456,7 +1462,8 @@ def _mini_lp_app(hits: list):
             return web.Response(body=xcom, content_type="text/html")
         if path.endswith((".jpg", ".png")):
             return web.Response(body=PNG_BYTES + path.encode(), content_type="image/png")
-        if "/Update" in path:
+        number = re.search(r"/Update (\d+)/$", path)
+        if number and int(number.group(1)) <= 18:   # like the site: 18 updates, then 404
             return web.Response(body=f'<div id="content"><p>{path}</p><img src="shot.png"/></div>'.encode(),
                                 content_type="text/html")
         return web.Response(status=404)
@@ -1486,16 +1493,19 @@ async def test_sqlite_cache_makes_a_second_build_free_of_requests():
             def cached():
                 return CachedSession(cache=SQLiteBackend(cache_file, expire_after=-1, fast_save=True, autoclose=True))
 
+            def served():   # the probe for a 19th update answers 404, which is never cached: not counted
+                return [h for h in hits if "Update 19" not in h]
+
             first = await build(cached(), f"{d}/one.epub")
-            first_hits = len(hits)
+            first_hits = len(served())
             assert first_hits >= 1 + 18 + 18   # landing page, 18 updates, 18 images
 
             second = await build(cached(), f"{d}/two.epub")
-            assert len(hits) == first_hits        # everything came from the cache
+            assert len(served()) == first_hits    # everything came from the cache
             assert second == first                # and the book is the same
 
             await build(aiohttp.ClientSession(), f"{d}/three.epub")
-            assert len(hits) == 2 * first_hits    # without the cache, everything is fetched again
+            assert len(served()) == 2 * first_hits    # without the cache, everything is fetched again
     finally:
         await server.close()
 
@@ -1969,3 +1979,137 @@ def test_cli_output_is_optional_and_printed_when_quiet(monkeypatch, capsys):
     cli.main(["--quiet", "https://lparchive.org/Some-LP", "out.epub"])
     assert seen["file"] == "out.epub"
     assert capsys.readouterr().out == "Some LP.epub\n"
+
+
+def _update_page(lp: str, n: int, prev: int | None, nxt: int | None, title: str, width: int = 1) -> bytes:
+    nav = ""
+    if prev is not None:
+        nav += f'<a class="prev" href="../Update {prev:0{width}d}/"><strong>&larr;</strong>Previous</a>'
+    if nxt is not None:
+        nav += f'<a class="next" href="../Update {nxt:0{width}d}/">Next<strong>&rarr;</strong></a>'
+    return (f"<html><head><title>{lp} Part #{n} - {title}</title></head><body>"
+            f'<div class="updatenav">{nav}</div><div id="content"><h3>Part {n}: {title}</h3><p>text {n}</p></div>'
+            f"</body></html>").encode()
+
+
+def test_canonical_slug():
+    assert canonical_slug("Update 647/") == "Update%20647/"
+    assert canonical_slug("Update%20647/") == "Update%20647/"
+    assert canonical_slug("Update%201-41/") == "Update%201-41/"
+    assert canonical_slug("Star-Fox-(by-X)/") == "Star-Fox-(by-X)/"
+
+
+@pytest.mark.asyncio
+async def test_unlisted_updates_are_found_by_following_next_links():
+    url = "https://lparchive.org/Fire-Emblem-Awakening"
+    # the landing page: a two-entry LP; pages 3, 4 and 5 exist but are not listed; 5 has no next link
+    landing = xcom.replace(b"X-COM: Terror from the Deep", b"Fire Emblem: Awakening")
+    landing = re.sub(rb'<ul class="toc">.*?</ul>', b'<ul class="toc"><li><a href="Update%201/">Update 1</a></li>'
+                     b'<li><a href="Update%202/">Update 2</a></li></ul>', landing, flags=re.S)
+    responses = {url: _FakeResponse(200, landing)}
+    for n, (prev, nxt) in {1: (None, 2), 2: (1, 3), 3: (2, 4), 4: (3, 5), 5: (4, None)}.items():
+        responses[f"{url}/Update%20{n}/"] = _FakeResponse(200, _update_page("Fire Emblem: Awakening", n, prev, nxt, f"Chapter {n}"))
+    session = _FakeSession("never-matches", responses=responses)
+    messages = []
+    with tempfile.TemporaryDirectory() as d:
+        out = f"{d}/book.epub"
+        await asyncio.wait_for(do(url, out, session, messages.append), timeout=30)
+        with zipfile.ZipFile(out) as z:
+            nav = z.read("EPUB/nav.xhtml").decode()
+            pages = [n for n in z.namelist() if re.fullmatch(r"EPUB/update_\d+\.xhtml", n)]
+    assert len(pages) == 5
+    assert re.findall(r'<a href="update_\d+\.xhtml">([^<]*)</a>', nav) == ["Update 1", "Update 2", "Chapter 3", "Chapter 4", "Chapter 5"]
+    assert any(m == "found 3 more update(s) by following the pages' next links" for m in messages)
+    # every page downloaded exactly once, the walk's reads included
+    for n in range(1, 6):
+        assert session.requested.count(f"{url}/Update%20{n}/") == 1, n
+
+
+@pytest.mark.asyncio
+async def test_landing_page_without_any_update_link_starts_from_update_one():
+    url = "https://lparchive.org/The-Blackwell-Legacy"
+    landing = re.sub(rb'<ul class="toc">.*?</ul>', b"", xcom, flags=re.S).replace(b"X-COM: Terror from the Deep", b"The Blackwell Legacy")
+    responses = {url: _FakeResponse(200, landing), f"{url}/Update%2001/": _FakeResponse(404, b"no padded")}
+    for n, (prev, nxt) in {1: (None, 2), 2: (1, 3), 3: (2, None)}.items():
+        responses[f"{url}/Update%20{n}/"] = _FakeResponse(200, _update_page("The Blackwell Legacy", n, prev, nxt, f"Rosa {n}"))
+    session = _FakeSession("never-matches", responses=responses)
+    with tempfile.TemporaryDirectory() as d:
+        out = f"{d}/book.epub"
+        await asyncio.wait_for(do(url, out, session, lambda *_: None), timeout=30)
+        with zipfile.ZipFile(out) as z:
+            nav = z.read("EPUB/nav.xhtml").decode()
+    assert re.findall(r'<a href="update_\d+\.xhtml">([^<]*)</a>', nav) == ["Rosa 1", "Rosa 2", "Rosa 3"]
+    assert session.requested.count(f"{url}/Update%2001/") == 1   # the padded guess was tried first
+
+
+@pytest.mark.asyncio
+async def test_walk_stops_on_cycles_and_dead_pages():
+    url = "https://lparchive.org/Some-LP"
+    base = url + "/"
+    chapters = [Chapters(num=0, original_href=base + "Update%201/", txt="Update 1", new_href="update_0.xhtml", original_href_slug="Update%201/")]
+    # next points back at a listed page: nothing found
+    session = _FakeSession("never-matches", responses={base + "Update%201/": _FakeResponse(200, _update_page("Some LP", 1, None, 1, "loop"))})
+    assert await discover_unlisted_chapters(session, url, chapters) == []
+    # next points at a page that answers 404: nothing found, no exception
+    session = _FakeSession("never-matches", responses={base + "Update%201/": _FakeResponse(200, _update_page("Some LP", 1, None, 2, "x")),
+                                                       base + "Update%202/": _FakeResponse(404, b"gone")})
+    assert await discover_unlisted_chapters(session, url, chapters) == []
+    # the last listed page itself is dead: nothing found, and the build will report it as missing
+    session = _FakeSession("never-matches", responses={base + "Update%201/": _FakeResponse(404, b"gone")})
+    assert await discover_unlisted_chapters(session, url, chapters) == []
+    # a 200 that is not an update page (e.g. a redirect to the index) stops the walk
+    session = _FakeSession("never-matches", responses={base + "Update%201/": _FakeResponse(200, _update_page("Some LP", 1, None, 2, "x")),
+                                                       base + "Update%202/": _FakeResponse(200, b"<html><body>The Let's Play Archive index</body></html>")})
+    assert await discover_unlisted_chapters(session, url, chapters) == []
+    # a page with no Part # in its title falls back to the slug
+    session = _FakeSession("never-matches", responses={
+        base + "Update%201/": _FakeResponse(200, _update_page("Some LP", 1, None, 2, "x")),
+        base + "Update%202/": _FakeResponse(200, b'<html><head><title>odd</title></head><body><div id="content">p</div></body></html>')})
+    found = await discover_unlisted_chapters(session, url, chapters)
+    assert [(c.original_href_slug, c.txt, c.num, c.new_href) for c in found] == [("Update%202/", "Update 2", 1, "update_1.xhtml")]
+    assert found[0].html is not None
+
+
+@pytest.mark.asyncio
+async def test_walk_starts_from_every_listed_page_and_keeps_reading_order():
+    """Last Bible: the landing page links Update 14 first (a 'latest update' pointer), then 1..13;
+    15 is only reachable from 14's next link and must come right after 14, not at the end."""
+    url = "https://lparchive.org/Last-Bible"
+    landing = re.sub(rb'<ul class="toc">.*?</ul>', b'<p>Latest: <a href="Update%2014/">Update 14</a></p><ul class="toc">'
+                     + b"".join(f'<li><a href="Update%20{n:02d}/">Update {n}</a></li>'.encode() for n in range(1, 14)) + b"</ul>",
+                     xcom, flags=re.S)
+    responses = {url: _FakeResponse(200, landing), f"{url}/Update%2016/": _FakeResponse(404, b"no")}
+    for n in range(1, 16):
+        responses[f"{url}/Update%20{n:02d}/"] = _FakeResponse(200, _update_page("Last Bible", n, n - 1 if n > 1 else None,
+                                                                                 n + 1 if n < 15 else None, f"Book {n}", width=2))
+    session = _FakeSession("never-matches", responses=responses)
+    with tempfile.TemporaryDirectory() as d:
+        out = f"{d}/book.epub"
+        await asyncio.wait_for(do(url, out, session, lambda *_: None), timeout=30)
+        with zipfile.ZipFile(out) as z:
+            nav = z.read("EPUB/nav.xhtml").decode()
+    titles = re.findall(r'<a href="update_\d+\.xhtml">([^<]*)</a>', nav)
+    assert titles == ["Update 14", "Book 15"] + [f"Update {n}" for n in range(1, 14)]
+    assert session.requested.count(f"{url}/Update%2015/") == 1
+    assert session.requested.count(f"{url}/Update%2016/") == 1   # the numeric probe stops at the first 404
+
+
+@pytest.mark.asyncio
+async def test_pages_nothing_links_to_are_found_by_numbering():
+    """Resident Evil 1: 58 listed pages, page 58 has no next link, page 59 exists anyway, 60 does not."""
+    url = "https://lparchive.org/Resident-Evil-1"
+    landing = re.sub(rb'<ul class="toc">.*?</ul>', b'<ul class="toc"><li><a href="Update%2057/">Update 57</a></li>'
+                     b'<li><a href="Update%2058/">Update 58</a></li></ul>', xcom, flags=re.S)
+    responses = {url: _FakeResponse(200, landing),
+                 f"{url}/Update%2057/": _FakeResponse(200, _update_page("Resident Evil 1", 57, 56, 58, "Episode XXXIX")),
+                 f"{url}/Update%2058/": _FakeResponse(200, _update_page("Resident Evil 1", 58, 57, None, "Episode XL")),
+                 f"{url}/Update%2059/": _FakeResponse(200, _update_page("Resident Evil 1", 59, 58, None, "Prologue")),
+                 f"{url}/Update%2060/": _FakeResponse(404, b"no")}
+    session = _FakeSession("never-matches", responses=responses)
+    with tempfile.TemporaryDirectory() as d:
+        out = f"{d}/book.epub"
+        await asyncio.wait_for(do(url, out, session, lambda *_: None), timeout=30)
+        with zipfile.ZipFile(out) as z:
+            nav = z.read("EPUB/nav.xhtml").decode()
+    assert re.findall(r'<a href="update_\d+\.xhtml">([^<]*)</a>', nav) == ["Update 57", "Update 58", "Prologue"]
+    assert session.requested.count(f"{url}/Update%2060/") == 1 and session.requested.count(f"{url}/Update%2061/") == 0
