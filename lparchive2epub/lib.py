@@ -155,8 +155,7 @@ class Chapters:
 class Image:
     num: int
     src: str
-    media_type: str
-    tag: BeautifulSoup
+    tag: BeautifulSoup      # the <img> (src) or <a> (href) this came from; rewritten in place once downloaded
     url: str
     root_url: str
 
@@ -309,7 +308,7 @@ class Extractor:
 
         Links are resolved against the page they appear on, exactly like a browser would, so
         "../Update%2002/", "/Other-LP/" and "manual.pdf" all end up unambiguous. Links to images
-        that get embedded are rewritten later by replace_img_name, from their absolute URL."""
+        that get embedded are rewritten in place once downloaded (see point_at_embedded)."""
         if not current_url.endswith("/"):
             current_url += "/"
 
@@ -488,17 +487,11 @@ class Extractor:
         images = (x for x in images if x.get("src", None) is not None)
         r = []
 
-        def get_media_type(src: str) -> str:
-            # Only a hint from the URL; the real type is detected from the downloaded bytes.
-            guessed, _ = mimetypes.guess_type(urlparse(src).path)
-            return guessed or "application/octet-stream"
-
         # Add direct images
         for i, x in enumerate(images):
             r.append(Image(
                 num=i,
                 src=x['src'],
-                media_type=get_media_type(x["src"]),
                 tag=x,
                 url=Extractor.get_full_url(root_url, x["src"]),
                 root_url=root_url
@@ -512,7 +505,6 @@ class Extractor:
             r.append(Image(
                 num=i,
                 src=link['href'],
-                media_type=get_media_type(link['href']),
                 tag=link,  # Use the link tag itself
                 url=Extractor.get_full_url(root_url, link['href']),
                 root_url=root_url
@@ -973,26 +965,18 @@ async def build_intro(session: aiohttp.ClientSession, url_root: str, intro: Intr
         else:
             images.append(res)
 
-    for image in images:
-        intro.intro = replace_img_name(intro.intro, image)
+    for image, result in zip(intro.images, results):
+        if not isinstance(result, Exception):
+            point_at_embedded(image, result)
 
     intro_chapter.content = str(intro.intro)
 
     return Page(0, intro_chapter, in_document_order(intro.images, images))
 
 
-def replace_img_name(content: BeautifulSoup, image: IndexedEpubImage) -> BeautifulSoup:
-    # Handle img tags
-    to_change_imgs = (x for x in content.find_all("img") if Extractor.get_full_url(image.root_url, x["src"]) == image.old_name)
-    for item in to_change_imgs:
-        item["src"] = image.new_name
-
-    # Handle linked images
-    to_change_links = (x for x in content.find_all("a") if x.get("href") and Extractor.get_full_url(image.root_url, x["href"]) == image.old_name)
-    for item in to_change_links:
-        item["href"] = image.new_name
-
-    return content
+def point_at_embedded(image: Image, stored: IndexedEpubImage):
+    """Make the tag the image came from show the stored copy: src for <img>, href for <a>."""
+    image.tag["href" if image.tag.name == "a" else "src"] = stored.new_name
 
 def batch(iterable, n=1):
     l = len(iterable)
@@ -1018,7 +1002,7 @@ async def build_update(session: aiohttp.ClientSession, chapter: Chapters, data: 
                 img = await q.get()
                 try:
                     res = await img_builder(img)
-                    replace_img_name(data.content, res)
+                    point_at_embedded(img, res)
                     images.append(res)
                 except Exception as e:
                     # Missing images are not worth failing the whole book: keep the original link
