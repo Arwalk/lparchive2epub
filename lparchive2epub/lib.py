@@ -9,7 +9,7 @@ import sqlite3
 import zipfile
 from dataclasses import dataclass, field
 from hashlib import blake2b
-from typing import List, Tuple
+from typing import List
 from urllib.parse import urlparse, urljoin, urldefrag, unquote
 
 import aiohttp
@@ -204,13 +204,8 @@ class Update:
     images: List[Image]
 
 
-LP_SPECIFIC_NAMES = {
-    "Dwarf-Fortress-Boatmurdered": ["Introduction"],
-    "Arcanum": ["Intro", "Epilogue"],
-    "Martian-Dreams": ["Cast"]
-}
-
 FIND_FILES = re.compile(r"([.])[^/.]+$")
+DOT_NOT_IN_A_NUMBER = re.compile(r"(?<!\d)\.|\.(?!\d)")
 # Links to image files, whatever the case of the extension and ignoring any query string or fragment
 IMAGE_FILE_LINK = re.compile(r"\.(jpe?g|png|gif|webp|bmp|svg)(?=[?#]|$)", re.IGNORECASE)
 
@@ -258,7 +253,6 @@ def detect_image_type(content: bytes, url: str = "", content_type: str | None = 
             return candidate, IMAGE_EXTENSIONS[candidate]
     return None
 INTRO_FILE_NAME = "introduction.xhtml"
-FIND_ANCHOR_LINKS = re.compile(r"(#)[^/.]+$")
 
 # Typos in the scheme part of a URL found in some LPs: "hhttp://", "htttp://", "http:/", "http//"...
 FIXABLE_SCHEME = re.compile(r"^h+t+p+(s?)\s*(?::/*|//+)", re.IGNORECASE)
@@ -310,14 +304,6 @@ class Extractor:
                 link["href"] = full
 
     @staticmethod
-    def get_known_update_names(url: str) -> List[str]:
-        knownUpdateNames = ["Update"]
-        extension = next((x for x in LP_SPECIFIC_NAMES.keys() if x in url), None)
-        if extension:
-            knownUpdateNames.extend(LP_SPECIFIC_NAMES[extension])
-        return knownUpdateNames
-
-    @staticmethod
     def intro(url: str, p: BeautifulSoup) -> Intro:
         content = p.find("div", id="content")
         archival = p.find("li", id="archival")
@@ -363,39 +349,58 @@ class Extractor:
 
     @staticmethod
     def all_chapters(root_url: str, p: BeautifulSoup) -> List[Chapters]:
+        """The pages of the Let's Play, in reading order.
+
+        A chapter is any link whose target is a directory right under the LP's own URL: "Update%2001/",
+        "Introduction/", "Cast/", "Epilogue/"... whatever the author named it. Everything else is
+        structurally not a chapter: files, anchors, other LPs, other sites, the LP root itself.
+        Chapters are taken in document order, each one once: on the archive the landing page's
+        lists and prose interleave freely (checked over every landing page), so document order is
+        the reading order, and preferring <ul class="toc"> entries would scramble it."""
         content = p.find("div", id="content")
+        root = root_url[:-1] if root_url.endswith("/") else root_url
+        base = root + "/"
 
-        chapters = content.find_all("a")
-
-        known_update_names = Extractor.get_known_update_names(root_url)
-        chapters = (x for x in chapters if any(a in x.get("href", "") for a in known_update_names))
-        chapters = (x for x in chapters if "lparchive.org" not in x.get("href", ""))
-        chapters = (x for x in chapters if not FIND_FILES.search(x.get("href", "")))
-        chapters = (x for x in chapters if not FIND_ANCHOR_LINKS.search(x.get("href", "")))
-
-        chapters = list(chapters)
-
-        if not chapters:
-            return []
-
-        def build_chapter(chap: Tuple[int, BeautifulSoup]) -> Chapters:
-            i, c = chap
-            original_href_slug = c.get("href", None)
-            original_href = f"{root_url}/{original_href_slug}"
-            if not original_href.endswith("/"):
-                original_href += "/"
-            txt = c.text if c.text else unquote(original_href_slug[:-1])
-            return Chapters(
-                num=i,
-                original_href=original_href,
-                txt=txt,
-                new_href=f"update_{i}.xhtml",
-                original_href_slug=original_href_slug,
-            )
-
-        chapters = list(map(build_chapter, enumerate(chapters)))
-
+        chapters: list[Chapters] = []
+        seen: set[str] = set()
+        for link in content.find_all("a", href=True):
+            slug = Extractor.chapter_slug(base, link["href"])
+            if slug is None or slug in seen:
+                continue
+            seen.add(slug)
+            text = " ".join(link.get_text(" ").split())
+            chapters.append(Chapters(
+                num=len(chapters),
+                original_href=base + slug,
+                txt=text or unquote(slug[:-1]),
+                new_href=f"update_{len(chapters)}.xhtml",
+                original_href_slug=slug,
+            ))
         return chapters
+
+    @staticmethod
+    def chapter_slug(base: str, href: str) -> str | None:
+        """'Update%2001/' when `href`, seen on a page at `base` (slash-terminated), points at a
+        directory directly under it; None otherwise."""
+        href = href.strip()
+        if not href or href.startswith("#"):
+            return None
+        full = Extractor.get_full_url(base, href)
+        if full is None:
+            return None
+        target, _ = urldefrag(full)
+        if "?" in target or not target.startswith(base):
+            return None
+        rest = target[len(base):]
+        is_directory = rest.endswith("/")
+        rest = rest.rstrip("/")
+        if not rest or "/" in rest:
+            return None
+        # Without a trailing slash, a dot means a file ("map.png", "notes.html", or a broken image link
+        # such as "197-9rO6g."), except between digits: "Update%2012.5" is a page.
+        if not is_directory and DOT_NOT_IN_A_NUMBER.search(rest):
+            return None
+        return rest + "/"
 
     @staticmethod
     def get_full_url(root_url: str, src: str) -> str | None:

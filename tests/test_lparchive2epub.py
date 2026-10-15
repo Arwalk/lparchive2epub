@@ -35,19 +35,19 @@ xcom = load_html("X-COM_ Terror from the Deep.html")
 
 def test_extractor_intro():
     b = BeautifulSoup(re1, "html.parser")
-    intro = Extractor.intro("", b)
+    intro = Extractor.intro("https://lparchive.org/Resident-Evil-1", b)
     assert intro.title == "Resident Evil 1"
     assert intro.author == "The Dark Id"
     assert intro.language == "en"
 
     b = BeautifulSoup(headshoots, "html.parser")
-    intro = Extractor.intro("",b)
+    intro = Extractor.intro("https://lparchive.org/Dwarf-Fortress-Headshoots", b)
     assert intro.title == "Dwarf Fortress - Headshoots"
     assert intro.author == "Various"
     assert intro.language == "en"
 
     b = BeautifulSoup(xcom, "html.parser")
-    intro = Extractor.intro("", b)
+    intro = Extractor.intro("https://lparchive.org/X-COM-Terror-from-the-Deep", b)
     assert intro.title == "X-COM: Terror from the Deep"
     assert intro.author == "GuavaMoment"
     assert intro.language == "en"
@@ -1543,3 +1543,73 @@ def test_landing_page_snapshot_is_complete_and_parses():
         assert set(z.namelist()) == {"index.json", *(e["file"] for e in entries)}
         sample = z.read(entries[0]["file"])
     assert b'id="content"' in sample and b'id="archival"' in sample
+
+
+SNAPSHOT = os.path.join(os.path.dirname(__file__), "resources", "landing_pages.zip")
+
+
+def snapshot_page(slug: str) -> BeautifulSoup:
+    with zipfile.ZipFile(SNAPSHOT) as z:
+        return BeautifulSoup(z.read(f"landing_pages/{slug}.html"), "html.parser")
+
+
+def test_chapter_slug_rules():
+    base = "https://lparchive.org/Some-LP/"
+    slug = Extractor.chapter_slug
+    assert slug(base, "Update%2001/") == "Update%2001/"
+    assert slug(base, "Update%2001") == "Update%2001/"              # no trailing slash
+    assert slug(base, "Update%2012.5/") == "Update%2012.5/"         # a dot inside a number is not an extension
+    assert slug(base, "Update%2012.5") == "Update%2012.5/"
+    assert slug(base, "Update%2045/#FAQ") == "Update%2045/"         # fragment dropped
+    assert slug(base, "Dive%201") == "Dive%201/"                     # any name, not just "Update"
+    assert slug(base, "https://lparchive.org/Some-LP/Epilogue/") == "Epilogue/"
+    assert slug(base, "/Some-LP/Cast/") == "Cast/"
+    for not_a_chapter in ("", "#top", "../", "/", "https://lparchive.org/Some-LP/", "/Other-LP/",
+                          "https://lparchive.org/Other-LP/Update%201/", "http://example.com/Update%201/",
+                          "Images/map.png", "map.png", "notes.html", "197-9rO6g.", "12-Saintskoden.",
+                          "Update%201/map.png", "Update%201/sub/", "Update%201?x=1", "mailto:a@b.c",
+                          "javascript:void(0)"):
+        assert slug(base, not_a_chapter) is None, not_a_chapter
+
+
+def test_all_chapters_is_structural_deduplicated_and_in_document_order():
+    html = """<div id="content">
+      <p>Skip to <a href="Update%203/">the good part</a> or read the <a href="Cast/">cast</a> first.</p>
+      <ul class="toc">
+        <li><a href="Prologue/">Prologue</a></li>
+        <li><a href="Update%201/">Update 1</a></li>
+        <li><a href="Update%202/"></a></li>
+        <li><a href="Update%203/">Update 3</a> (<a href="Update%203/#part2">part 2</a>)</li>
+        <li><a href="Update%203.5/">Interlude</a></li>
+        <li><a href="Update%203/Images/map.png">map</a></li>
+      </ul>
+      <p>Also: <a href="../">index</a>, <a href="/Other-LP/">another LP</a>, <a href="https://example.com/">site</a>,
+         <a href="#top">top</a>, <a href="Epilogue">Epilogue</a>, <a href="Update%201/">Update 1 again</a></p>
+    </div>"""
+    chapters = Extractor.all_chapters("https://lparchive.org/Some-LP", BeautifulSoup(html, "html.parser"))
+    assert [c.original_href_slug for c in chapters] == [
+        "Update%203/", "Cast/", "Prologue/", "Update%201/", "Update%202/", "Update%203.5/", "Epilogue/"]
+    assert [c.txt for c in chapters] == ["the good part", "cast", "Prologue", "Update 1", "Update 2", "Interlude", "Epilogue"]
+    assert [c.num for c in chapters] == list(range(7))
+    assert [c.new_href for c in chapters][:2] == ["update_0.xhtml", "update_1.xhtml"]
+    assert chapters[1].original_href == "https://lparchive.org/Some-LP/Cast/"
+
+
+@pytest.mark.parametrize(("slug", "count", "first", "expected_somewhere"), [
+    ("Dwarf-Fortress-Boatmurdered", 66, "Introduction/", ["Update%201-41/", "Update%202-1/"]),
+    ("Arcanum", None, "Intro/", ["Epilogue/"]),
+    ("Martian-Dreams", None, None, ["Cast/"]),
+    ("Transistor-(by-Non-EuclideanCat)", None, None, ["Dive%201/", "Functions/"]),
+    ("Empire-Total-War", None, "Update%2001/", ["QA%2035/"]),
+    ("Advance-Wars", None, None, ["Update%2073.5/"]),
+])
+def test_chapters_found_without_a_hard_coded_list(slug, count, first, expected_somewhere):
+    chapters = Extractor.all_chapters(f"https://lparchive.org/{slug}", snapshot_page(slug))
+    slugs = [c.original_href_slug for c in chapters]
+    assert len(slugs) == len(set(slugs))
+    if count is not None:
+        assert len(slugs) == count
+    if first is not None:
+        assert slugs[0] == first
+    for expected in expected_somewhere:
+        assert expected in slugs, expected
