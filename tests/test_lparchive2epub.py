@@ -1403,8 +1403,9 @@ async def test_identical_bytes_under_different_urls_are_processed_and_stored_onc
     assert calls.count("image/jpeg") == 1                            # resized once, not three times
     assert len(images) == 1                                          # stored once
     stored = images[0].removeprefix("EPUB/")
+    image_page = "image_" + stored.removeprefix("images/").removesuffix(".jpg") + ".xhtml"
     for page in pages:                                               # every page's links rewritten to it
-        assert f'src="{stored}"' in page and f'href="{stored}"' in page
+        assert f'src="{stored}"' in page and f'href="{image_page}"' in page
     assert processing.changed == 3   # each download is accounted for in the report (plus the intro's image)
 
 
@@ -1833,7 +1834,7 @@ async def test_only_the_full_size_picture_is_downloaded_and_embedded():
     assert len(stored) == 2 + 1   # full picture, prose-linked picture, the intro's image
     assert any(files[n] == full for n in stored) and not any(files[n] == thumb for n in stored)
     assert re.search(r'<p>\s*<img src="images/[0-9a-f]+\.jpg"/>\s*</p>', page)   # inline, no link around it
-    assert len(re.findall(r'<a href="images/', page)) == 1                   # only the prose link remains a link
+    assert len(re.findall(r'<a href="image_[0-9a-f]+\.xhtml"', page)) == 1   # only the prose link remains a link
 
 
 class _SlowSession(_FakeSession):
@@ -2398,3 +2399,31 @@ async def test_identical_images_share_one_spooled_file():
         assert first.size == second.size == len(PNG_BYTES) and first.old_name != second.old_name
         assert os.listdir(d) == [os.path.basename(first.data.path)]
         assert first.data.get_content() == PNG_BYTES and os.listdir(d) == []   # read once, then gone
+
+
+@pytest.mark.asyncio
+async def test_links_to_images_lead_to_a_page_showing_the_image():
+    """An EPUB hyperlink may only lead to a content document (epubcheck RSC-010 otherwise): a link to a
+    picture gets a small page of its own, once per picture, outside the reading order."""
+    url = "https://lparchive.org/X-COM-Terror-from-the-Deep"
+    picture = b"\x89PNG\r\n\x1a\n" + b"the big one"
+    pages = {1: '<p>See <a href="Images/big%20map.png">the full map</a> and <a href="Images/big%20map.png">again</a>.</p>',
+             2: '<p><a href="../Update%2001/Images/big%20map.png">Same picture, other page</a></p>'}
+    session = _FakeSession("never-matches", responses={
+        f"{url}/Update%2001/Images/big%20map.png": _FakeResponse(200, picture),
+        **{f"{url}/Update%200{n}/": _FakeResponse(200, f'<div id="content">{body}</div>'.encode()) for n, body in pages.items()}})
+    files = await _build_book(session)
+    stored = [n for n in files if files[n] == picture]
+    assert len(stored) == 1
+    image_hash = stored[0].removeprefix("EPUB/images/").removesuffix(".png")
+    image_page = f"image_{image_hash}.xhtml"
+    for n in (1, 2):
+        page = files[f"EPUB/update_{n - 1}.xhtml"].decode()
+        assert f'href="{image_page}"' in page and 'href="images/' not in page
+    wrapper = files[f"EPUB/{image_page}"].decode()
+    assert f'<img src="images/{image_hash}.png" alt="big map.png"/>' in wrapper and "<title>big map.png</title>" in wrapper
+    assert 'href="style/lparchive.css"' in wrapper                        # styled like the rest, so the picture fits the screen
+    opf = files["EPUB/content.opf"].decode()
+    assert opf.count(f'href="{image_page}"') == 1                         # one page for the picture, linked from two updates
+    assert f'<itemref idref="image_{image_hash}" linear="no"/>' in opf    # reachable from the link, skipped when turning pages
+    assert image_page not in files["EPUB/nav.xhtml"].decode()

@@ -129,7 +129,9 @@ original thread. `--cover IMAGE` uses your own picture instead, `--no-cover` lea
 Forum posts often show a small picture linking to the full-size one ("click here for the full image").
 A book has no click-to-enlarge, so the full-size picture is shown in place of the thumbnail, fitted
 to the screen; only the full picture is downloaded. `--max-image-size` applies to it like to any
-other image.
+other image. A link to a picture with no thumbnail to pair with (a "see the full map" in the prose)
+stays a link and leads to a page of its own showing the picture, since a book's links may only lead
+to pages, not to image files.
 
 ## Image size
 

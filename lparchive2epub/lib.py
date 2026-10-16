@@ -2,6 +2,7 @@ import asyncio
 import contextlib
 import datetime
 import functools
+import html
 import io
 import mimetypes
 import os
@@ -573,6 +574,9 @@ class Page:
     num: int
     chapter: EpubHtml
     images: List[IndexedEpubImage]
+    # images the page links to (<a href>) rather than shows: each gets a small page of its own, since an
+    # EPUB hyperlink may only lead to a content document, not straight to an image file
+    linked: List[IndexedEpubImage] = field(default_factory=list)
 
 @dataclass
 class Fetched:
@@ -1039,12 +1043,36 @@ async def build_intro(session: aiohttp.ClientSession, url_root: str, intro: Intr
 
     intro_chapter.content = str(intro.intro)
 
-    return Page(0, intro_chapter, in_document_order(intro.images, images))
+    return Page(0, intro_chapter, in_document_order(intro.images, images), linked_images(intro.images, images))
 
 
 def point_at_embedded(image: Image, stored: IndexedEpubImage):
-    """Make the tag the image came from show the stored copy: src for <img>, href for <a>."""
-    image.tag["href" if image.tag.name == "a" else "src"] = stored.new_name
+    """Make the tag the image came from show the stored copy: src for <img>; for <a>, href to the
+    image's own page (see image_page_name)."""
+    if image.tag.name == "a":
+        image.tag["href"] = image_page_name(stored)
+    else:
+        image.tag["src"] = stored.new_name
+
+
+def image_page_name(stored: IndexedEpubImage) -> str:
+    return f"image_{stored.hash}.xhtml"
+
+
+def make_image_page(stored: IndexedEpubImage, lang: str) -> EpubHtml:
+    """The page a link to an image leads to: just the picture, fitted to the screen by the stylesheet.
+    Outside the reading order (linear="no"): reached from the link, not by turning pages."""
+    name = unquote(stored.old_name.rstrip("/").rsplit("/", 1)[-1]) or stored.old_name
+    page = epub.EpubHtml(uid=f"image_{stored.hash}", title=name, file_name=image_page_name(stored), lang=lang)
+    page.add_item(get_style_item())
+    page.content = f'<p class="linked-image"><img src="{stored.new_name}" alt="{html.escape(name, quote=True)}"/></p>'
+    page.is_linear = False
+    return page
+
+
+def linked_images(wanted: List[Image], fetched: List[IndexedEpubImage]) -> List[IndexedEpubImage]:
+    """The downloaded images that `wanted` links to (<a>) rather than shows, in page order."""
+    return in_document_order([image for image in wanted if image.tag.name == "a"], fetched)
 
 
 def mark_unavailable(image: Image):
@@ -1123,7 +1151,7 @@ async def build_update(session: aiohttp.ClientSession, chapter: Chapters, data: 
 
     update_chapter.content = str(data.content)
 
-    return Page(chapter.num, update_chapter, in_document_order(data.images, images))
+    return Page(chapter.num, update_chapter, in_document_order(data.images, images), linked_images(data.images, images))
 
 
 def in_document_order(wanted: List[Image], fetched: List[IndexedEpubImage]) -> List[IndexedEpubImage]:
@@ -1141,7 +1169,10 @@ def in_document_order(wanted: List[Image], fetched: List[IndexedEpubImage]) -> L
     return ordered
 
 
-def add_page(known_images: set, book: EpubBook, toc: List, spine: List, page: Page):
+def add_page(known_images: set, book: EpubBook, toc: List, spine: List, page: Page, lang: str = "en",
+             known_image_pages: set | None = None):
+    """Add the page, its images and, once per image, the page each linked image gets (see Page.linked).
+    `known_images` and `known_image_pages` hold the hashes already added, shared by every call."""
     book.add_item(page.chapter)
     for img in page.images:
         if img.hash not in known_images:
@@ -1149,6 +1180,12 @@ def add_page(known_images: set, book: EpubBook, toc: List, spine: List, page: Pa
             known_images.add(img.hash)
     toc.append(epub.Link(page.chapter.file_name, page.chapter.title, page.chapter.id))
     spine.append(page.chapter)
+    for img in page.linked:
+        if known_image_pages is not None and img.hash not in known_image_pages:
+            image_page = make_image_page(img, lang)
+            book.add_item(image_page)
+            spine.append(image_page)   # linear="no": reachable from the link, skipped when turning pages
+            known_image_pages.add(img.hash)
 
 
 async def build_single_page(session: aiohttp.ClientSession, intro: Intro, chapter: Chapters, all_chapters: List[Chapters], pbar,
@@ -1558,8 +1595,9 @@ async def do(url: str, file: str | None, session: aiohttp.ClientSession, writer,
         epub_intro = await build_intro(session, url, intro, image_registry, failures, image_processing, fetch)
 
         known_images: set[str] = set()
+        known_image_pages: set[str] = set()
 
-        add_page(known_images, book, toc, spine, epub_intro)
+        add_page(known_images, book, toc, spine, epub_intro, intro.language, known_image_pages)
 
         # pages takes a vastly inequal times to get, so it's faster to gather and sort
         # gotta go fast, but also keep the page order.
@@ -1627,7 +1665,7 @@ async def do(url: str, file: str | None, session: aiohttp.ClientSession, writer,
                 url, failures, "No book was written (--strict). Run again without --strict to build it anyway."))
 
         for p in tqdm(pages, desc="Adding pages to book", disable=fetch.quiet):
-            add_page(known_images, book, toc, spine, p)
+            add_page(known_images, book, toc, spine, p, intro.language, known_image_pages)
 
         say("preparing book structure")
         book.toc = toc
