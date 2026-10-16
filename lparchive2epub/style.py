@@ -81,6 +81,12 @@ pre, code, .bbc-block.code, .bbc-block.pre {
   word-wrap: break-word;
 }
 
+/* A picture that could not be downloaded: a note in its place, linking to the original */
+.missing-image {
+  font-size: 0.85em;
+  font-style: italic;
+}
+
 /* Spoilers: on the site they are black on black until hovered, which can't work on a page */
 .bbc-spoiler {
   border: 1px dashed #999999;

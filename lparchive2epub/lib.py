@@ -952,6 +952,7 @@ async def build_intro(session: aiohttp.ClientSession, url_root: str, intro: Intr
         if isinstance(res, Exception):
             if failures is not None:
                 failures.append(_skipped(img, res))
+            mark_unavailable(img)
         else:
             images.append(res)
 
@@ -967,6 +968,31 @@ async def build_intro(session: aiohttp.ClientSession, url_root: str, intro: Intr
 def point_at_embedded(image: Image, stored: IndexedEpubImage):
     """Make the tag the image came from show the stored copy: src for <img>, href for <a>."""
     image.tag["href" if image.tag.name == "a" else "src"] = stored.new_name
+
+
+def mark_unavailable(image: Image):
+    """An <img> that could not be downloaded must not keep its page-relative src: inside the book that
+    is a path to nothing (readers show a broken icon, epubcheck a missing resource). Replace it by a
+    visible note linking to the original, so the reader knows what was there and can still try it
+    online. Links (<a>) need nothing: fix_links already made them absolute."""
+    tag = image.tag
+    if tag.name != "img":
+        return
+    soup = tag
+    while soup.parent is not None:
+        soup = soup.parent
+    name = image.src if image.url is None else (unquote(image.src.rstrip("/").rsplit("/", 1)[-1]) or image.src)
+    alt = " ".join((tag.get("alt") or "").split())
+    note = soup.new_tag("span", attrs={"class": "missing-image"})
+    note.append(f"[image not available: {alt + ' - ' if alt else ''}")
+    if image.url:
+        link = soup.new_tag("a", href=image.url)
+        link.string = name
+        note.append(link)
+    else:
+        note.append(name)
+    note.append("]")
+    tag.replace_with(note)
 
 
 async def build_update(session: aiohttp.ClientSession, chapter: Chapters, data: Update, intro: Intro, registry: ImageRegistry | None = None,
@@ -994,6 +1020,7 @@ async def build_update(session: aiohttp.ClientSession, chapter: Chapters, data: 
                     # Missing images are not worth failing the whole book: keep the original link
                     if failures is not None:
                         failures.append(_skipped(img, e))
+                    mark_unavailable(img)
                 finally:
                     q.task_done()
             except asyncio.CancelledError:
@@ -1546,6 +1573,6 @@ async def do(url: str, file: str | None, session: aiohttp.ClientSession, writer,
     if failures:
         writer(format_failures_report(
             url, failures,
-            "Missing images were left as external links in the book; "
+            "Missing images were replaced by a note linking to the original; "
             "missing updates (--allow-missing-updates) were replaced by a placeholder page linking to the original."))
     return file

@@ -756,8 +756,9 @@ async def test_image_media_type_comes_from_content_and_non_images_are_skipped():
     assert f'src="{jpeg_items[0]}"' in chapter
     assert all(n.endswith((".png", ".jpg")) for n in image_files)
     assert "image/PNG" not in opf and "image/peg" not in opf
-    # the HTML page served instead of an image is not embedded: link left as is and reported
+    # the HTML page served instead of an image is not embedded: a note links to it, and it is reported
     assert dead_host_url in chapter
+    assert f'<span class="missing-image">[image not available: <a href="{dead_host_url}">dead.jpg</a>]</span>' in chapter
     assert not any("html" in n for n in image_files)
     report = "\n".join(messages)
     assert dead_host_url in report and "Not an image" in report and "text/html" in report
@@ -2113,3 +2114,33 @@ async def test_pages_nothing_links_to_are_found_by_numbering():
             nav = z.read("EPUB/nav.xhtml").decode()
     assert re.findall(r'<a href="update_\d+\.xhtml">([^<]*)</a>', nav) == ["Update 57", "Update 58", "Prologue"]
     assert session.requested.count(f"{url}/Update%2060/") == 1 and session.requested.count(f"{url}/Update%2061/") == 0
+
+
+@pytest.mark.asyncio
+async def test_unavailable_images_become_notes_not_dangling_paths():
+    url = "https://lparchive.org/X-COM-Terror-from-the-Deep"
+    chapter_url = f"{url}/Update%2001/"
+    session = _FakeSession("never-matches", responses={
+        chapter_url: _FakeResponse(200, (
+            b'<div id="content"><img alt="the fort" src="2-transportx.gif"/>'       # host answers 0 bytes
+            b'<img src="hhttp://"/>'                                               # URL beyond repair: no link
+            b'<p><a href="gone.png">see this</a></p>'                             # a link: already absolute
+            b'<img src="ok.png"/></div>')),
+        f"{chapter_url}2-transportx.gif": _FakeResponse(200, b"", "image/gif"),
+        f"{chapter_url}gone.png": _FakeResponse(404, b"no"),
+    })
+    files = await _build_book(session)
+    page = files["EPUB/update_0.xhtml"].decode()
+    assert ('<span class="missing-image">[image not available: the fort - '
+            f'<a href="{chapter_url}2-transportx.gif">2-transportx.gif</a>]</span>') in page
+    assert '<span class="missing-image">[image not available: hhttp://]</span>' in page
+    assert f'<a href="{chapter_url}gone.png">see this</a>' in page
+    assert re.search(r'<img src="images/[0-9a-f]+\.png"/>', page)
+    # no src left that points inside the container at nothing
+    for src in re.findall(r'src="([^"]+)"', page):
+        assert src.startswith("images/") and f"EPUB/{src}" in files, src
+    # the landing page's own images get the same treatment
+    intro_session = _FakeSession("never-matches", responses={f"{url}/Images/1-OP80jpg.jpg": _FakeResponse(404, b"no")})
+    files = await _build_book(intro_session)
+    intro = files["EPUB/introduction.xhtml"].decode()
+    assert '[image not available: <a href="https://lparchive.org/X-COM-Terror-from-the-Deep/Images/1-OP80jpg.jpg">1-OP80jpg.jpg</a>]' in intro
