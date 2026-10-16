@@ -2270,3 +2270,39 @@ async def test_all_archives_error_file_records_failures_and_skipped_resources():
     assert all(e["url"] == f"https://lparchive.org/{e['slug']}" and e["time"].endswith("+00:00") for e in entries)
     # no file requested: nothing is written, nothing fails
     assert ErrorLog(None).record("x", "build-failed", "r") is None
+
+
+def test_all_archives_select_resumes_and_skips_videos():
+    from util.all_archives import select
+    index = [{"slug": "Done-LP", "type": "1"}, {"slug": "Video-LP", "type": "2"}, {"slug": "Hybrid-LP", "type": "3"},
+             {"slug": "Untyped-LP", "type": None}]
+    with tempfile.TemporaryDirectory() as d:
+        open(f"{d}/Done-LP.epub", "wb").close()
+        assert select(index, d, skip_videos=False, force=False) == (["Video-LP", "Hybrid-LP", "Untyped-LP"], 0, 1)
+        assert select(index, d, skip_videos=True, force=False) == (["Hybrid-LP", "Untyped-LP"], 1, 1)
+        assert select(index, d, skip_videos=True, force=True) == (["Done-LP", "Hybrid-LP", "Untyped-LP"], 1, 0)
+        assert select(index, d, skip_videos=False, force=True) == (["Done-LP", "Video-LP", "Hybrid-LP", "Untyped-LP"], 0, 0)
+
+
+@pytest.mark.asyncio
+async def test_all_archives_passes_build_options_through():
+    from util.all_archives import build_one, BuildOptions, ErrorLog
+    from lparchive2epub.lib import ImageProcessing, FetchSettings
+    from PIL import Image as PILImage
+    url = "https://lparchive.org/X-COM-Terror-from-the-Deep"
+    big = PILImage.new("RGB", (3000, 1000), "red")
+    out = io.BytesIO()
+    big.save(out, "JPEG")
+    picture = "http://img.example/big.jpg"
+    session = _FakeSession("never-matches", responses={
+        f"{url}/Update%2001/": _FakeResponse(200, f'<div id="content"><img src="{picture}"/></div>'.encode()),
+        picture: _FakeResponse(200, out.getvalue(), "image/jpeg")})
+    processing = ImageProcessing(1600, 70)
+    options = BuildOptions(image_processing=processing, cover=False, fetch=FetchSettings(concurrency=2, retries=1, quiet=True))
+    with tempfile.TemporaryDirectory() as d:
+        assert await asyncio.wait_for(build_one("X-COM-Terror-from-the-Deep", d, d, ErrorLog(None), lambda *_: session, options), timeout=30)
+        with zipfile.ZipFile(f"{d}/X-COM-Terror-from-the-Deep.epub") as z:
+            names = z.namelist()
+            shrunk = [n for n in names if n.endswith(".jpg") or n.endswith(".jpeg")]
+            assert shrunk and PILImage.open(io.BytesIO(z.read(shrunk[0]))).size == (1600, 533)
+    assert processing.changed == 1 and not any("cover" in n for n in names)

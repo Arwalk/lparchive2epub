@@ -1,9 +1,17 @@
 """Build a book for every Let's Play of the archive.
 
-    uv run python util/all_archives.py OUTPUT_DIR [--cache_path DIR] [--errors FILE]
+    uv run python util/all_archives.py OUTPUT_DIR [--cache_path DIR] [--errors FILE] [--skip-videos] [--force]
+                                       [--max-image-size PIXELS] [--jpeg-quality 1-100] [--no-cover]
+                                       [--concurrency N] [--retries N]
 
 Books are written as OUTPUT_DIR/<slug>.epub. Each LP gets its own SQLite cache under the cache
 directory (default OUTPUT_DIR/cache), so a failed LP can be retried without downloading again.
+
+The run resumes by default: an LP whose book already exists in OUTPUT_DIR is skipped, so an
+interrupted run can simply be started again. --force rebuilds every book.
+
+--skip-videos leaves out the LPs the archive indexes as videos (most of the archive: their pages
+hold little more than links to the videos, so the books are near-empty).
 
 --errors FILE keeps everything that went wrong, one JSON object per line, for later analysis:
   {"slug", "url", "time", "kind": "build-failed", "error": "<type>", "message": "...", "report": "..."}
@@ -11,6 +19,9 @@ directory (default OUTPUT_DIR/cache), so a failed LP can be retried without down
 "build-failed" is an LP whose book was not written (missing updates, network, not an LP page...),
 with the full report the tool prints; "skipped-resources" is a book that was written but with images
 the site could not serve, with the tool's report listing them.
+
+--max-image-size, --jpeg-quality, --no-cover, --concurrency and --retries mean the same as for
+the lparchive2epub command and apply to every book.
 """
 import asyncio
 import datetime
@@ -19,6 +30,7 @@ import logging
 import os
 import sys
 from argparse import ArgumentParser
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from aiohttp import ClientSession
@@ -26,10 +38,14 @@ from tqdm.asyncio import tqdm
 from aiohttp_client_cache import CachedSession, SQLiteBackend
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from lparchive2epub.lib import lparchive2epub, CURL_HEADERS, CLIENT_TIMEOUT, FetchSettings, ExtractionError, check_cache_path  # noqa: E402
+from lparchive2epub.lib import lparchive2epub, CURL_HEADERS, CLIENT_TIMEOUT, DEFAULT_CONCURRENCY, DEFAULT_RETRIES, \
+    FetchSettings, ImageProcessing, ExtractionError, check_cache_path  # noqa: E402
+from lparchive2epub.main import positive_int, jpeg_quality  # noqa: E402
 from util.snapshot_landing_pages import read_index  # noqa: E402
 
 LPARCHIVE = "https://lparchive.org"
+# "ty" in the front page index: 1 screenshot LP, 2 video LP, 3 hybrid, 0 unspecified
+VIDEO_TYPE = "2"
 
 
 class ErrorLog:
@@ -54,6 +70,14 @@ class ErrorLog:
             f.write(json.dumps(entry, ensure_ascii=False) + "\n")
 
 
+@dataclass
+class BuildOptions:
+    """What is passed on to every build: the lparchive2epub command's own options."""
+    image_processing: ImageProcessing | None = None
+    cover: bool = True
+    fetch: FetchSettings = field(default_factory=lambda: FetchSettings(quiet=True))
+
+
 def make_session(cache_dir: str, slug: str) -> ClientSession:
     # check_cache_path creates the database and works around filesystems where the first write to a
     # fresh file fails (virtiofs); the CLI goes through the same check
@@ -62,14 +86,21 @@ def make_session(cache_dir: str, slug: str) -> ClientSession:
     return CachedSession(cache=cache, timeout=CLIENT_TIMEOUT)
 
 
-async def build_one(slug: str, output_dir: str, cache_dir: str, errors: ErrorLog, session_factory=make_session) -> bool:
+def book_path(output_dir: str, slug: str) -> str:
+    return os.path.join(output_dir, f"{slug}.epub")
+
+
+async def build_one(slug: str, output_dir: str, cache_dir: str, errors: ErrorLog, session_factory=make_session,
+                    options: BuildOptions | None = None) -> bool:
     """Build one LP. Returns True when the book was written. Everything the tool reports (skipped
     images, failures) goes to the error log."""
     logger = logging.getLogger("all_lp_archive_to_epub")
+    options = options or BuildOptions()
     reports: list[str] = []
     try:
-        await lparchive2epub(f"{LPARCHIVE}/{slug}", os.path.join(output_dir, f"{slug}.epub"),
-                             session_factory(cache_dir, slug), writer=reports.append, fetch=FetchSettings(quiet=True))
+        await lparchive2epub(f"{LPARCHIVE}/{slug}", book_path(output_dir, slug), session_factory(cache_dir, slug),
+                             writer=reports.append, image_processing=options.image_processing, cover=options.cover,
+                             fetch=options.fetch)
     except ExtractionError as e:
         errors.record(slug, "build-failed", str(e), e)
         logger.error("%s: %s", slug, str(e).splitlines()[0])
@@ -83,6 +114,19 @@ async def build_one(slug: str, output_dir: str, cache_dir: str, errors: ErrorLog
     if skipped:
         errors.record(slug, "skipped-resources", "\n".join(skipped))
     return True
+
+
+def select(index: list[dict], output_dir: str, skip_videos: bool, force: bool) -> tuple[list[str], int, int]:
+    """The slugs to build, in index order, and how many were left out: (slugs, videos, already built)."""
+    slugs, videos, done = [], 0, 0
+    for entry in index:
+        if skip_videos and str(entry.get("type")) == VIDEO_TYPE:
+            videos += 1
+        elif not force and os.path.exists(book_path(output_dir, entry["slug"])):
+            done += 1
+        else:
+            slugs.append(entry["slug"])
+    return slugs, videos, done
 
 
 async def get_frontpage() -> str:
@@ -99,14 +143,21 @@ async def do(arguments):
     logging.basicConfig(filename=os.path.join(output_dir, "errors.log"), level=logging.WARN,
                         format="%(asctime)s %(levelname)s %(name)s %(message)s")
     errors = ErrorLog(arguments.errors)
+    options = BuildOptions(
+        image_processing=ImageProcessing(arguments.max_image_size, arguments.jpeg_quality) if arguments.max_image_size else None,
+        cover=not arguments.no_cover,
+        fetch=FetchSettings(concurrency=arguments.concurrency, retries=arguments.retries, quiet=True))
 
     # The front page embeds the whole LP index as JavaScript; read_index knows how to parse it.
-    slugs = [entry["slug"] for entry in read_index(await get_frontpage())]
+    index = read_index(await get_frontpage())
+    slugs, videos, done = select(index, output_dir, arguments.skip_videos, arguments.force)
+    print(f"{len(index)} Let's Plays in the index, {len(slugs)} to build"
+          + (f", {videos} video LPs skipped" if videos else "") + (f", {done} already built" if done else ""))
 
     failed = []
     with tqdm(total=len(slugs)) as pbar:
         for slug in slugs:
-            if not await build_one(slug, output_dir, cache_dir, errors):
+            if not await build_one(slug, output_dir, cache_dir, errors, options=options):
                 failed.append(slug)
                 pbar.write(f"failed: {slug}")
                 await asyncio.sleep(5)
@@ -125,4 +176,16 @@ if __name__ == "__main__":
     arg_parser.add_argument("--cache_path", metavar="DIR", help="directory for the per-LP SQLite caches (default: OUTPUT_DIR/cache)")
     arg_parser.add_argument("--errors", metavar="FILE",
                             help="append every failure and every skipped-resource report to FILE, one JSON object per line")
+    arg_parser.add_argument("--skip-videos", action="store_true", help="leave out the LPs the archive indexes as videos")
+    arg_parser.add_argument("--force", action="store_true",
+                            help="rebuild books that already exist in OUTPUT_DIR (by default they are skipped, so a run resumes)")
+    arg_parser.add_argument("--max-image-size", metavar="PIXELS", type=positive_int,
+                            help="shrink images wider or taller than PIXELS and re-encode them, as the lparchive2epub command does")
+    arg_parser.add_argument("--jpeg-quality", metavar="1-100", type=jpeg_quality, default=85,
+                            help="JPEG quality used when --max-image-size re-encodes an image (default: 85)")
+    arg_parser.add_argument("--no-cover", action="store_true", help="build the books without a cover image")
+    arg_parser.add_argument("--concurrency", metavar="N", type=positive_int, default=DEFAULT_CONCURRENCY,
+                            help=f"downloads in flight at the same time (default: {DEFAULT_CONCURRENCY})")
+    arg_parser.add_argument("--retries", metavar="N", type=positive_int, default=DEFAULT_RETRIES,
+                            help=f"attempts per download before giving up (default: {DEFAULT_RETRIES})")
     asyncio.run(do(arg_parser.parse_args()))
