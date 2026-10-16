@@ -1605,12 +1605,14 @@ def test_all_chapters_is_structural_deduplicated_and_in_document_order():
          <a href="#top">top</a>, <a href="Epilogue">Epilogue</a>, <a href="Update%201/">Update 1 again</a></p>
     </div>"""
     chapters = Extractor.all_chapters("https://lparchive.org/Some-LP", BeautifulSoup(html, "html.parser"))
+    # "Update 3" is mentioned in the prose and listed in the toc: the toc decides its place and its title;
+    # "Cast" is only mentioned in the prose and keeps its place
     assert [c.original_href_slug for c in chapters] == [
-        "Update%203/", "Cast/", "Prologue/", "Update%201/", "Update%202/", "Update%203.5/", "Epilogue/"]
-    assert [c.txt for c in chapters] == ["the good part", "cast", "Prologue", "Update 1", "Update 2", "Interlude", "Epilogue"]
+        "Cast/", "Prologue/", "Update%201/", "Update%202/", "Update%203/", "Update%203.5/", "Epilogue/"]
+    assert [c.txt for c in chapters] == ["cast", "Prologue", "Update 1", "Update 2", "Update 3", "Interlude", "Epilogue"]
     assert [c.num for c in chapters] == list(range(7))
     assert [c.new_href for c in chapters][:2] == ["update_0.xhtml", "update_1.xhtml"]
-    assert chapters[1].original_href == "https://lparchive.org/Some-LP/Cast/"
+    assert chapters[0].original_href == "https://lparchive.org/Some-LP/Cast/"
 
 
 @pytest.mark.parametrize(("slug", "count", "first", "expected_somewhere"), [
@@ -2074,12 +2076,14 @@ async def test_walk_stops_on_cycles_and_dead_pages():
 
 @pytest.mark.asyncio
 async def test_walk_starts_from_every_listed_page_and_keeps_reading_order():
-    """Last Bible: the landing page links Update 14 first (a 'latest update' pointer), then 1..13;
-    15 is only reachable from 14's next link and must come right after 14, not at the end."""
+    """Last Bible: the landing page mentions Update 14 in the prose above the table of contents, then
+    lists 1..14; 15 is only reachable from 14's next link and must come right after 14."""
     url = "https://lparchive.org/Last-Bible"
-    landing = re.sub(rb'<ul class="toc">.*?</ul>', b'<p>Latest: <a href="Update%2014/">Update 14</a></p><ul class="toc">'
-                     + b"".join(f'<li><a href="Update%20{n:02d}/">Update {n}</a></li>'.encode() for n in range(1, 14)) + b"</ul>",
+    landing = re.sub(rb'<ul class="toc">.*?</ul>', b'<ul class="toc">'
+                     + b"".join(f'<li><a href="Update%20{n:02d}/">Update {n}</a></li>'.encode() for n in range(1, 15)) + b"</ul>",
                      xcom, flags=re.S)
+    landing = landing.replace(b"<h1><strong>Table of Contents</strong></h1>",
+                              b'<p>Read <a href="Update%2014/">Matthew</a> after Genesis</p><h1><strong>Table of Contents</strong></h1>')
     responses = {url: _FakeResponse(200, landing), f"{url}/Update%2016/": _FakeResponse(404, b"no")}
     for n in range(1, 16):
         responses[f"{url}/Update%20{n:02d}/"] = _FakeResponse(200, _update_page("Last Bible", n, n - 1 if n > 1 else None,
@@ -2091,7 +2095,7 @@ async def test_walk_starts_from_every_listed_page_and_keeps_reading_order():
         with zipfile.ZipFile(out) as z:
             nav = z.read("EPUB/nav.xhtml").decode()
     titles = re.findall(r'<a href="update_\d+\.xhtml">([^<]*)</a>', nav)
-    assert titles == ["Update 14", "Book 15"] + [f"Update {n}" for n in range(1, 14)]
+    assert titles == [f"Update {n}" for n in range(1, 15)] + ["Book 15"]
     assert session.requested.count(f"{url}/Update%2015/") == 1
     assert session.requested.count(f"{url}/Update%2016/") == 1   # the numeric probe stops at the first 404
 
@@ -2154,3 +2158,66 @@ def test_code_passes_ruff():
     result = subprocess.run([sys.executable, "-m", "ruff", "check", "lparchive2epub", "util", "tests"],
                             cwd=root, capture_output=True, text=True)
     assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_prose_mentions_above_the_table_of_contents_do_not_reorder_chapters():
+    root = "https://lparchive.org/Some-LP"
+
+    def order(body: str) -> list[str]:
+        soup = BeautifulSoup(f'<div id="content">{body}</div>', "html.parser")
+        return [c.original_href_slug + ":" + c.txt for c in Extractor.all_chapters(root, soup)]
+
+    # mentioned in the prose, listed in a ul.toc: the list decides; the list's text is used
+    assert order('<p>Read <a href="Update%203/">three</a> first.</p><ul class="toc"><li><a href="Update%201/">One</a></li>'
+                 '<li><a href="Update%202/">Two</a></li><li><a href="Update%203/">Three</a></li></ul>') == \
+        ["Update%201/:One", "Update%202/:Two", "Update%203/:Three"]
+    # no ul.toc, but a "Table of Contents" heading: everything after it is the list (image links, empty text)
+    assert order('<p>Skip to <a href="Update%203/">Matthew</a>.</p><h1>Table of Contents</h1>'
+                 '<a href="Update%201/"><img src="1.png"/></a><a href="Update%202/"><img src="2.png"/></a>'
+                 '<a href="Update%203/"><img src="3.png"/></a>') == \
+        ["Update%201/:Update 1", "Update%202/:Update 2", "Update%203/:Matthew"]
+    # a page only mentioned in the prose keeps its place; a mention after the list changes nothing
+    assert order('<p><a href="Bonus/">Bonus</a></p><h2>Contents</h2><a href="Update%201/">One</a>'
+                 '<a href="Update%202/">Two</a><p>See <a href="Update%201/">one</a> again.</p>') == \
+        ["Bonus/:Bonus", "Update%201/:One", "Update%202/:Two"]
+    # no list marker at all: document order, first mention wins (the author's own order is respected)
+    assert order('<a href="Update%2065/">Skip ahead</a><br/><a href="Update%201/">One</a><a href="Update%2065/">Sixty-five</a>') == \
+        ["Update%2065/:Skip ahead", "Update%201/:One"]
+
+
+# Let's Plays whose landing page deliberately lists numbered updates out of numeric order (sections,
+# story/gameplay pairs, "read this first" notes, a pointer to a later update with no list marker).
+# Reviewed one by one when the ordering rule was chosen; the book follows the author's order.
+NON_NUMERIC_ORDER = {
+    "Assassins-Creed-IV-Black-Flag", "Buzz-Aldrins-Race-Into-Space", "Dark-Souls-II", "Dead-Space-3",
+    "Dekiru-Otoko-no-Mote-Life", "Descent", "Dragon-Warrior-VII", "Fire-Emblem-Awakening", "Fire-Emblem-Blazing-Sword",
+    "Gothic", "Legend-of-Wulin-Heroes", "Lunar-Dragon-Song", "Lure-of-the-Temptress", "Mega-Man-4-(by-Simply-Simon)",
+    "Mega-Man-5", "Pacific-General", "Paradox-Hohenzollern", "Puzzle-Agent", "Quest-for-Glory-1-5", "Rainbow-Six",
+    "Ryse-Son-of-Rome", "Secret-of-Mana-(by-Ryushikaze)", "Shogo-Mobile-Armor-Division", "Siren-2", "Tropico-3",
+    "Umineko-no-Naku-Koro-ni", "Warcraft-II", "Wing-Commander-III-Standoff",
+}
+UPDATE_NUMBER = re.compile(r"^Update%20([\d-]+)/$")
+
+
+def test_chapter_order_is_coherent_across_the_archive():
+    """Numbered updates come in increasing order everywhere except the reviewed exceptions, so a
+    future change to chapter detection that scrambles an LP's order fails here with its name."""
+    golden = _golden()["lets_plays"]
+    out_of_order = set()
+    for slug, record in golden.items():
+        numbers = [tuple(int(x) for x in m.group(1).split("-")) for c in record["chapters"] if (m := UPDATE_NUMBER.match(c[0]))]
+        if any(b <= a for a, b in zip(numbers, numbers[1:])):
+            out_of_order.add(slug)
+    assert out_of_order <= NON_NUMERIC_ORDER, sorted(out_of_order - NON_NUMERIC_ORDER)
+    # the ones the ordering rule corrected
+    chapters = {slug: [c[0] for c in golden[slug]["chapters"]] for slug in ("Last-Bible", "Omensight", "Legend-of-Wulin-Heroes")}
+    assert chapters["Last-Bible"] == [f"Update%20{n:02d}/" for n in range(1, 15)]
+    assert chapters["Omensight"][:10] == [f"Update%20{n:02d}/" for n in range(1, 11)]
+    wulin = chapters["Legend-of-Wulin-Heroes"]
+    assert wulin.index("Update%2082/") == wulin.index("Update%2081/") + 1   # listed in the toc: moved there
+    assert wulin.index("Update%2041/") < wulin.index("Update%2001/")         # only mentioned in the prose: stays
+    # the Let's Plays the live test builds
+    live = _live_checksums()
+    for slug in live:
+        numbers = [tuple(int(x) for x in m.group(1).split("-")) for c in golden[slug]["chapters"] if (m := UPDATE_NUMBER.match(c[0]))]
+        assert numbers == sorted(numbers), slug

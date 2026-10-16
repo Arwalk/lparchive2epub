@@ -381,23 +381,41 @@ class Extractor:
         structurally not a chapter: files, anchors, other LPs, other sites, the LP root itself.
         Chapters are taken in document order, each one once: on the archive the landing page's
         lists and prose interleave freely (checked over every landing page), so document order is
-        the reading order, and preferring <ul class="toc"> entries would scramble it."""
+        the reading order. One exception: a page mentioned in the prose above the table of contents
+        ("read Matthew right after Genesis", "Character Recap, spoilers after chapter 82") and listed
+        again in it takes its table-of-contents position. The table of contents is every
+        <ul class="toc"> plus everything after a "Table of Contents" heading."""
         content = p.find("div", id="content")
         root = root_url[:-1] if root_url.endswith("/") else root_url
         base = root + "/"
 
-        chapters: list[Chapters] = []
-        seen: set[str] = set()
-        for link in content.find_all("a", href=True):
+        in_toc = {id(a) for toc in content.find_all("ul", class_="toc") for a in toc.find_all("a", href=True)}
+        heading = next((h for h in content.find_all(["h1", "h2", "h3"])
+                        if TOC_HEADING.search(h.get_text(" ", strip=True))), None)
+        if heading is not None:
+            in_toc.update(id(a) for a in heading.find_all_next("a", href=True))
+
+        found: dict[str, tuple[int, str]] = {}      # slug -> (position, text) of the first mention
+        placed: dict[str, tuple[int, str]] = {}     # slug -> (position, text) of the first mention in the toc
+        for position, link in enumerate(content.find_all("a", href=True)):
             slug = Extractor.chapter_slug(base, link["href"])
-            if slug is None or slug in seen:
+            if slug is None:
                 continue
-            seen.add(slug)
             text = " ".join(link.get_text(" ").split())
+            found.setdefault(slug, (position, text))
+            if id(link) in in_toc:
+                placed.setdefault(slug, (position, text))
+
+        def order_key(slug: str) -> int:
+            return placed.get(slug, found[slug])[0]
+
+        chapters: list[Chapters] = []
+        for slug in sorted(found, key=order_key):
+            text = placed.get(slug, ("", ""))[1] or found[slug][1] or unquote(slug[:-1])
             chapters.append(Chapters(
                 num=len(chapters),
                 original_href=base + slug,
-                txt=text or unquote(slug[:-1]),
+                txt=text,
                 new_href=f"update_{len(chapters)}.xhtml",
                 original_href_slug=slug,
             ))
@@ -1110,6 +1128,8 @@ MAX_UNLISTED_WALK = 5000
 # "<LP title> Part #647 - Robin C" -> "Robin C"
 PART_TITLE = re.compile(r"\bPart #\d+\s*-\s*(.+)$")
 NUMBERED_UPDATE = re.compile(r"^Update%20(\d+)/$")
+# The heading above a landing page's list of updates, when the author put one
+TOC_HEADING = re.compile(r"table of contents|^contents$|^index$|^updates$", re.IGNORECASE)
 
 
 def canonical_slug(slug: str) -> str:
