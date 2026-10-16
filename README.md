@@ -79,6 +79,11 @@ uv, python 3.12
 
 python >= 3.12
 
+### Checks
+
+`uv run pytest` runs the test suite (which includes a `ruff check` for unused imports and names);
+`uv run ruff check` runs that lint alone.
+
 ## Installation
 
 `pip install lparchive2epub`

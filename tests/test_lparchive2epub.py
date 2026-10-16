@@ -6,6 +6,7 @@ import json
 import os
 import random
 import re
+import sys
 import zipfile
 from urllib.parse import unquote
 
@@ -2144,3 +2145,12 @@ async def test_unavailable_images_become_notes_not_dangling_paths():
     files = await _build_book(intro_session)
     intro = files["EPUB/introduction.xhtml"].decode()
     assert '[image not available: <a href="https://lparchive.org/X-COM-Terror-from-the-Deep/Images/1-OP80jpg.jpg">1-OP80jpg.jpg</a>]' in intro
+
+
+def test_code_passes_ruff():
+    """Dead imports and names are caught here rather than in review (lparchive2epub-u7y)."""
+    import subprocess
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    result = subprocess.run([sys.executable, "-m", "ruff", "check", "lparchive2epub", "util", "tests"],
+                            cwd=root, capture_output=True, text=True)
+    assert result.returncode == 0, result.stdout + result.stderr
