@@ -1402,6 +1402,25 @@ tags_to_clean = [
 TAGS_TO_DROP = ["script", "noscript", "style", "form", "input", "button", "select", "textarea"]
 # Embedded players: replaced by a plain link to what they were showing, when they point somewhere.
 EMBED_TAGS = ["iframe", "embed", "object", "video", "audio"]
+# Where a Flash-era <object> names its movie: <param name="movie" value="http://www.youtube.com/v/...">
+PLAYER_SOURCE_PARAMS = ("movie", "src", "url")
+
+
+def player_source(element) -> str | None:
+    """What a player was showing: its own src/data, else the movie <param> of a Flash <object>, else the
+    src of a player or <source> nested inside it (2008-era YouTube embeds are an <object> wrapping an
+    <embed>, the address only in those two places)."""
+    source = element.get("src") or element.get("data")
+    if source:
+        return source
+    for param in element.find_all("param"):
+        if (param.get("name") or "").lower() in PLAYER_SOURCE_PARAMS and param.get("value"):
+            return param["value"]
+    for nested in element.find_all(EMBED_TAGS + ["source"]):
+        source = nested.get("src") or nested.get("data")
+        if source:
+            return source
+    return None
 # HTML 4 presentational attributes that are invalid in XHTML 5 and that the stylesheet supersedes anyway.
 ATTRIBUTES_TO_DROP = {"border", "align", "valign", "bgcolor", "background", "cellpadding", "cellspacing",
                       "hspace", "vspace", "nowrap", "target", "rel"}
@@ -1427,7 +1446,9 @@ def sanitize(soup: BeautifulSoup):
         element.decompose()
 
     for element in soup.find_all(EMBED_TAGS):
-        source = element.get("src") or element.get("data")
+        if element.decomposed:
+            continue   # nested in a player handled just before: one link per player, not one per level
+        source = player_source(element)
         if source and HAS_SCHEME.match(source.strip()):
             link = soup.new_tag("a", href=source.strip())
             link.string = source.strip()
@@ -1436,8 +1457,9 @@ def sanitize(soup: BeautifulSoup):
             paragraph.append(link)
             paragraph.append("]")
             element.replace_with(paragraph)
-        else:
-            element.decompose()
+        element.decompose()   # the replaced player too, so its nested players are seen as handled
+    for param in soup.find_all("param"):
+        param.decompose()
 
     # <font color="red"> -> <span style="color: red">, <center> -> <div style="text-align: center">
     for font in soup.find_all("font"):
@@ -1545,10 +1567,16 @@ async def do(url: str, file: str | None, session: aiohttp.ClientSession, writer,
     except (FetchError, aiohttp.ClientError, OSError) as e:
         raise landing_page_error(url, e) from e
 
-    landing = get_cleaned_html(page_text)
+    try:
+        landing = get_cleaned_html(page_text)
+        intro = Extractor.intro(url, landing)
+    except ExtractionError:
+        raise
+    except Exception as e:   # noqa: BLE001 - a parser or sanitiser bug must come out as a report, not a traceback
+        raise ExtractionError(f"Could not read the landing page {url}: {type(e).__name__}: {e}\n"
+                              f"This is a bug. Please open an issue at {ISSUES_URL} with the URL you used.") from e
 
     book = epub.EpubBook()
-    intro = Extractor.intro(url, landing)
     file = resolve_output_path(file, intro.title, url)
     check_output_path(file)
     # Images wait on disk until the book is written (see SpooledImage); the directory goes away with

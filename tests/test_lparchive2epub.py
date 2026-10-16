@@ -1102,6 +1102,63 @@ def test_sanitize_strips_active_content_and_legacy_markup():
     assert "office" in out
 
 
+FLASH_YOUTUBE = """<div class="bbcode_video"><object width="425" height="344">
+  <param name="movie" value="http://www.youtube-nocookie.com/v/xsMN4L8BH8k&amp;hl=en&amp;fs=1">
+  <param name="allowFullScreen" value="true"></param><param name="allowscriptaccess" value="always"></param>
+  <embed src="http://www.youtube-nocookie.com/v/xsMN4L8BH8k&amp;hl=en&amp;fs=1" type="application/x-shockwave-flash"
+         allowscriptaccess="always" allowfullscreen="true" width="425" height="344"></embed>
+</object></div>"""
+FLASH_LINK = '<p>[object: <a href="http://www.youtube-nocookie.com/v/xsMN4L8BH8k&amp;hl=en&amp;fs=1">http://www.youtube-nocookie.com/v/xsMN4L8BH8k&amp;hl=en&amp;fs=1</a>]</p>'
+
+
+@pytest.mark.parametrize(("markup", "expected", "absent"), [
+    # 2008-era YouTube embed: <object> wrapping <embed>, the address in the movie param and the embed.
+    # One link for the whole thing; the nested, already removed <embed> used to crash the sanitiser.
+    (FLASH_YOUTUBE, [FLASH_LINK], ["<object", "<embed", "<param", "allowscriptaccess"]),
+    # the movie param alone is enough
+    ('<object><param name="Movie" value="http://www.youtube.com/v/abc"/></object>',
+     ['<p>[object: <a href="http://www.youtube.com/v/abc">http://www.youtube.com/v/abc</a>]</p>'], ["<object", "<param"]),
+    # no address with a scheme anywhere: dropped, quietly
+    ('<p>before</p><object><embed src="relative.swf"/></object><p>after</p>', ["<p>before</p>", "<p>after</p>"],
+     ["<object", "<embed", "relative.swf"]),
+    # HTML 5 nesting: <video> with <source> children, one link
+    ('<video controls="controls"><source src="https://example.com/clip.mp4" type="video/mp4"/><source src="https://example.com/clip.webm"/></video>',
+     ['<p>[video: <a href="https://example.com/clip.mp4">https://example.com/clip.mp4</a>]</p>'], ["<video", "<source", "clip.webm"]),
+], ids=["flash-youtube", "movie-param-only", "no-scheme", "video-source"])
+def test_sanitize_turns_nested_players_into_one_link(markup, expected, absent):
+    out = str(get_cleaned_html(f'<div id="content">{markup}</div>'))
+    for fragment in expected:
+        assert fragment in out, fragment
+    for fragment in absent:
+        assert fragment not in out, fragment
+    assert out.count("[object:") + out.count("[video:") + out.count("[embed:") <= 1
+
+
+@pytest.mark.asyncio
+async def test_flash_embed_on_the_landing_page_does_not_stop_the_build():
+    """Beyond Divinity: the same markup on the landing page used to end in a bare traceback."""
+    url = "https://lparchive.org/X-COM-Terror-from-the-Deep"
+    opening = xcom.index(b">", xcom.index(b'id="content"')) + 1   # right inside the content div
+    landing = xcom[:opening] + FLASH_YOUTUBE.encode() + xcom[opening:]
+    session = _FakeSession("never-matches", responses={url: _FakeResponse(200, landing)})
+    files = await _build_book(session)
+    intro = files["EPUB/introduction.xhtml"].decode()
+    assert FLASH_LINK in intro and "<object" not in intro and "<embed" not in intro
+
+
+@pytest.mark.asyncio
+async def test_landing_page_parser_bug_is_reported_not_a_bare_traceback(monkeypatch):
+    url = "https://lparchive.org/X-COM-Terror-from-the-Deep"
+
+    def broken_sanitize(soup):
+        raise AttributeError("'NoneType' object has no attribute 'get'")
+
+    monkeypatch.setattr(lib, "sanitize", broken_sanitize)
+    with tempfile.TemporaryDirectory() as d:
+        with pytest.raises(ExtractionError, match=r"Could not read the landing page .*AttributeError.*\n.*bug.*issue") as e:
+            await do(url, f"{d}/book.epub", _FakeSession("never-matches"), lambda *_: None)
+        assert e.value.exit_code == lib.EXIT_FAILURE and os.listdir(d) == []
+
 @pytest.mark.asyncio
 async def test_built_pages_contain_no_handlers_or_legacy_attributes():
     url = "https://lparchive.org/X-COM-Terror-from-the-Deep"
