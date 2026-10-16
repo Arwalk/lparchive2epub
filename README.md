@@ -1,4 +1,4 @@
-# lparchive2pub
+# lparchive2epub
 
 this tool (and library) aims at helping people extracting full epubs of Let's Plays from https://lparchive.org/
 
@@ -78,11 +78,11 @@ produces before installing it.
 
 ### Dev
 
-uv, python 3.12
+uv, which installs a supported Python (3.12 to 3.14) by itself if none is present
 
 ### Users
 
-python >= 3.12
+python 3.12 to 3.14
 
 ### Checks
 
