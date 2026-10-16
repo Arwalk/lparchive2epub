@@ -70,6 +70,10 @@ arg_parser.add_argument("--retries", metavar="N", type=positive_int, default=DEF
                              f"(default: {DEFAULT_RETRIES}; 1 means no retry)")
 arg_parser.add_argument("--quiet", action="store_true",
                         help="No progress bars or progress messages; only the final report and errors")
+arg_parser.add_argument("--images-in-memory", action="store_true",
+                        help="Keep every image in memory until the book is written, instead of in a temporary "
+                             "folder (under TMPDIR); for machines with a small or slow temporary directory. Needs "
+                             "memory of several times the book's size")
 cover_group = arg_parser.add_mutually_exclusive_group()
 cover_group.add_argument("--cover", metavar="IMAGE",
                          help="Use this image file as the cover instead of the generated one (title and author on "
@@ -98,7 +102,7 @@ async def amain(args):
             raise ExtractionError(f"Cannot read the cover image {args.cover}: {e.strerror or e}") from e
     written = await lparchive2epub(args.url, args.output, session, strict=args.strict,
                                    allow_missing_updates=args.allow_missing_updates, image_processing=processing,
-                                   cover=cover, fetch=fetch)
+                                   cover=cover, fetch=fetch, spool_images=not args.images_in_memory)
     if args.quiet:
         print(written)   # the one thing a script wants from a quiet run
 

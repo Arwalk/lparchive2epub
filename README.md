@@ -6,7 +6,7 @@ this tool (and library) aims at helping people extracting full epubs of Let's Pl
 usage: lparchive2epub [-h] [--cache FILE] [--strict] [--allow-missing-updates]
                       [--max-image-size PIXELS] [--jpeg-quality 1-100]
                       [--concurrency N] [--retries N] [--quiet]
-                      [--cover IMAGE | --no-cover]
+                      [--images-in-memory] [--cover IMAGE | --no-cover]
                       URL [OUTPUT]
 
 A tool to transform a Let's Play from lparchive.org to epub format.
@@ -45,6 +45,11 @@ options:
                in between (default: 5; 1 means no retry)
   --quiet      No progress bars or progress messages; only the final report
                and errors
+  --images-in-memory
+               Keep every image in memory until the book is written, instead
+               of in a temporary folder (under TMPDIR); for machines with a
+               small or slow temporary directory. Needs memory of several
+               times the book's size
   --cover IMAGE
                Use this image file as the cover instead of the generated one
                (title and author on a plain background)
@@ -134,6 +139,16 @@ that make e-ink readers crawl or crash. `--max-image-size 1600` shrinks anything
 pixels on its longest edge, re-encodes JPEGs at `--jpeg-quality` (85 by default), optimises PNGs and
 converts WebP and BMP, which many readers can't display, to PNG or JPEG. Animated GIFs are left as they
 are. A summary of the saving is printed before the book is written.
+
+## Memory and disk
+
+Memory use does not grow with the size of the Let's Play: as they are downloaded, images are kept in a
+folder under the system temporary directory (`TMPDIR` to move it) and only read back, one at a time,
+while the book is written; each one is deleted as soon as it is in the book. That directory therefore
+needs free space of about the book's size, and the output directory about twice the book's size while
+it is written. The folder is removed when the build ends, however it ends; if the process is killed
+outright, a leftover `lparchive2epub-*` folder can be deleted by hand. `--images-in-memory` keeps every
+image in memory instead, as earlier versions did, which costs several times the book's size.
 
 ## Exit codes
 

@@ -8,6 +8,7 @@ import os
 import re
 import sqlite3
 import sys
+import tempfile
 import zipfile
 from dataclasses import dataclass, field
 from hashlib import blake2b
@@ -169,6 +170,39 @@ class IndexedEpubImage:
     old_name: str
     new_name: str
     data: EpubImage
+    size: int           # of the stored bytes; kept here so a spooled image need not be read back
+
+
+class SpooledImage(EpubImage):
+    """An image whose bytes wait in a file until the book is written, so that building a large LP
+    does not hold every picture in memory.
+
+    Read once: ebooklib's writer calls get_content() exactly once per item (add_page adds each image
+    once), and the file is deleted as soon as it has been read, so the spool empties as the book
+    fills. A second call would fail with a missing file."""
+
+    def __init__(self, uid: str, file_name: str, media_type: str, path: str, size: int):
+        super().__init__(uid=uid, file_name=file_name, media_type=media_type)
+        self.path = path
+        self.size = size
+
+    def get_content(self, default=None):
+        with open(self.path, "rb") as f:
+            content = f.read()
+        os.remove(self.path)
+        return content
+
+
+class FreedOnWriteImage(EpubImage):
+    """The in-memory alternative (--images-in-memory): the bytes stay in memory until the book is
+    written, but are dropped as soon as ebooklib has read them, so the zip rewrite that follows starts
+    with the images already gone. Read once, like SpooledImage: a second read is a bug and says so."""
+
+    def get_content(self, default=None):
+        if self.content is None:
+            raise RuntimeError(f"{self.file_name} was already written to the book")
+        content, self.content = self.content, None
+        return content
 
 
 @dataclass
@@ -844,6 +878,10 @@ async def fetch_with_retries(session: aiohttp.ClientSession, url: str, max_retri
 class ImageRegistry:
     """Per-run memory of images, shared by every page being built.
 
+    spool_dir: when given, every stored image is written there as <hash>.<ext> right after download
+    and only read back, one at a time, while the book is written (see SpooledImage). Without it the
+    bytes stay in memory until the end, which for a large LP means several times the book's size.
+
     by_url: one future per resolved URL, so a URL referenced from many pages is downloaded once.
     The future is kept after a failure too: later references get the stored error immediately
     instead of re-running the download and its retries (a dead host would otherwise cost
@@ -852,9 +890,26 @@ class ImageRegistry:
     the same bytes reuses the stored image (and skips the optional resize pass) instead of being
     processed and held twice. A future, because identical downloads usually land at the same time."""
 
-    def __init__(self):
+    def __init__(self, spool_dir: str | None = None):
         self.by_url: dict[str, asyncio.Future] = {}
         self.by_content: dict[str, asyncio.Future] = {}
+        self.spool_dir = spool_dir
+
+
+def spool_write(spool_dir: str, name: str, content: bytes) -> str:
+    """Write `content` as `name` in the spool, atomically: two downloads can reduce to the same bytes
+    at the same time and both land on this name, so each writes its own temporary file first."""
+    path = os.path.join(spool_dir, name)
+    fd, partial = tempfile.mkstemp(dir=spool_dir, prefix=name + ".")
+    try:
+        with os.fdopen(fd, "wb") as f:
+            f.write(content)
+        os.replace(partial, path)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            os.remove(partial)
+        raise
+    return path
 
 
 async def _get_image(session: aiohttp.ClientSession, img: Image, registry: ImageRegistry | None = None,
@@ -873,7 +928,7 @@ async def _get_image(session: aiohttp.ClientSession, img: Image, registry: Image
     else:
         future = None
 
-    def build(fetched: Fetched, reduced: tuple[bytes, str, str] | None) -> IndexedEpubImage:
+    async def build(fetched: Fetched, reduced: tuple[bytes, str, str] | None) -> IndexedEpubImage:
         content = fetched.body
         media_type, extension = _detect_or_fail(fetched, img_url)
         if reduced is not None:
@@ -882,16 +937,17 @@ async def _get_image(session: aiohttp.ClientSession, img: Image, registry: Image
             processing.record(len(fetched.body), len(content))
         img_hash = get_blake2b_hash(content)
         new_name = f"images/{img_hash}.{extension}"
-        return IndexedEpubImage(
-            img_hash,
-            img_url,  # Use the original URL as old_name
-            new_name,
-            EpubImage(
-                uid=f"i{img_hash}",
-                file_name=new_name,
-                media_type=media_type,
-                content=content)
-        )
+        spool_dir = registry.spool_dir if registry is not None else None
+        if spool_dir is None:
+            data = FreedOnWriteImage(uid=f"i{img_hash}", file_name=new_name, media_type=media_type, content=content)
+        else:
+            try:
+                # in a thread like the resize: a slow disk must not stall the downloads
+                path = await asyncio.to_thread(spool_write, spool_dir, f"{img_hash}.{extension}", content)
+            except OSError as e:
+                raise OutputError(f"Cannot keep the images for the book in {spool_dir}: {e.strerror or e}") from e
+            data = SpooledImage(f"i{img_hash}", new_name, media_type, path, len(content))
+        return IndexedEpubImage(img_hash, img_url, new_name, data, len(content))  # old_name: the original URL
 
     try:
         fetched = await fetch_with_retries(session, img_url, fetch=fetch)
@@ -901,8 +957,8 @@ async def _get_image(session: aiohttp.ClientSession, img: Image, registry: Image
             # being processed), keeping this URL as old_name so the page's links to it get rewritten.
             known = await registry.by_content[raw_hash]
             if processing is not None:
-                processing.record(len(fetched.body), len(known.data.content))
-            res = IndexedEpubImage(known.hash, img_url, known.new_name, known.data)
+                processing.record(len(fetched.body), known.size)
+            res = IndexedEpubImage(known.hash, img_url, known.new_name, known.data, known.size)
         else:
             content_future = asyncio.get_running_loop().create_future() if registry is not None else None
             if content_future is not None:
@@ -913,7 +969,7 @@ async def _get_image(session: aiohttp.ClientSession, img: Image, registry: Image
                     media_type, _ = _detect_or_fail(fetched, img_url)
                     # CPU-bound (decode, resize, encode): off the event loop so downloads keep flowing
                     reduced = await asyncio.to_thread(reduce_image, fetched.body, media_type, processing)
-                res = build(fetched, reduced)
+                res = await build(fetched, reduced)
             except Exception as e:
                 if content_future is not None:
                     content_future.set_exception(e)
@@ -965,6 +1021,9 @@ async def build_intro(session: aiohttp.ClientSession, url_root: str, intro: Intr
 
     results = await asyncio.gather(*tasks, return_exceptions=True)
 
+    fatal = [res for res in results if isinstance(res, ExtractionError)]
+    if fatal:
+        raise fatal[0]   # not a per-image problem (spool disk full, broken cache...): stop the build
     images = []
     for img, res in zip(intro.images, results):
         if isinstance(res, Exception):
@@ -1025,6 +1084,7 @@ async def build_update(session: aiohttp.ClientSession, chapter: Chapters, data: 
     # Queue-based worker pool to cap concurrency
     q: asyncio.Queue = asyncio.Queue()
     images: list[IndexedEpubImage] = []
+    fatal: list[Exception] = []
 
     async def worker():
         while True:
@@ -1034,6 +1094,10 @@ async def build_update(session: aiohttp.ClientSession, chapter: Chapters, data: 
                     res = await img_builder(img)
                     point_at_embedded(img, res)
                     images.append(res)
+                except ExtractionError as e:
+                    # Not a per-image problem (spool disk full, broken cache...): the build must stop,
+                    # but keep draining the queue so q.join() below returns
+                    fatal.append(e)
                 except Exception as e:
                     # Missing images are not worth failing the whole book: keep the original link
                     if failures is not None:
@@ -1045,17 +1109,17 @@ async def build_update(session: aiohttp.ClientSession, chapter: Chapters, data: 
                 break
 
     workers = [asyncio.create_task(worker()) for _ in range(CONCURRENCY_LIMIT_IMAGES)]
-
-    # Enqueue images with their indices
-    for image in data.images:
-        await q.put(image)
-
-    # Wait for completion and shutdown workers
-    await q.join()
-    for w in workers:
-        w.cancel()
-
-    await asyncio.gather(*workers, return_exceptions=True)
+    try:
+        for image in data.images:
+            await q.put(image)
+        await q.join()
+    finally:
+        # also on cancellation (Ctrl-C), so no worker is left writing to a spool being removed
+        for w in workers:
+            w.cancel()
+        await asyncio.gather(*workers, return_exceptions=True)
+    if fatal:
+        raise fatal[0]
 
     update_chapter.content = str(data.content)
 
@@ -1273,9 +1337,9 @@ def _chapter_from_page(base: str, slug: str, html: str, num: int, order: float) 
 async def lparchive2epub(url: str, file: str | None = None, root_session: aiohttp.ClientSession | None = None,
                          writer=log, strict: bool = False, allow_missing_updates: bool = False,
                          image_processing: ImageProcessing | None = None, cover: bytes | None | bool = True,
-                         fetch: FetchSettings | None = None) -> str:
+                         fetch: FetchSettings | None = None, spool_images: bool = True) -> str:
     """Build the book for `url` at `file` (a path, a directory, or None for "<title>.epub" in the current
-    directory). Returns the path of the written book."""
+    directory). Returns the path of the written book. See `do` for the options."""
     try:
         url = normalize_lp_url(url)
     except ValueError as e:
@@ -1283,7 +1347,7 @@ async def lparchive2epub(url: str, file: str | None = None, root_session: aiohtt
     if root_session is None:
         root_session = aiohttp.ClientSession(timeout=CLIENT_TIMEOUT)
     async with root_session as session:
-        return await do(url, file, session, writer, strict, allow_missing_updates, image_processing, cover, fetch)
+        return await do(url, file, session, writer, strict, allow_missing_updates, image_processing, cover, fetch, spool_images)
 
 
 tags_to_clean = [
@@ -1427,10 +1491,12 @@ def format_failures_report(url: str, failures: list[SkippedResource], outcome: s
 
 async def do(url: str, file: str | None, session: aiohttp.ClientSession, writer, strict: bool = False,
              allow_missing_updates: bool = False, image_processing: ImageProcessing | None = None,
-             cover: bytes | None | bool = True, fetch: FetchSettings | None = None) -> str:
+             cover: bytes | None | bool = True, fetch: FetchSettings | None = None, spool_images: bool = True) -> str:
     """`file`: the book's path, a directory to put "<title>.epub" in, or None for the current directory.
     `cover`: True for a generated text cover, bytes for a custom image, None/False for no cover.
     `writer` gets the final report and summary; progress messages go through it too unless `fetch.quiet`.
+    `spool_images`: keep the downloaded images in a temporary directory until the book is written
+    (memory then stays flat whatever the size of the LP); False keeps them all in memory.
     Returns the path of the written book."""
     fetch = fetch or FetchSettings()
     say = (lambda *_: None) if fetch.quiet else writer
@@ -1448,151 +1514,158 @@ async def do(url: str, file: str | None, session: aiohttp.ClientSession, writer,
     intro = Extractor.intro(url, landing)
     file = resolve_output_path(file, intro.title, url)
     check_output_path(file)
-    failures: list[SkippedResource] = []
+    # Images wait on disk until the book is written (see SpooledImage); the directory goes away with
+    # the build, on success, failure and Ctrl-C alike (ignore_cleanup_errors: a write still in flight
+    # in a thread may land a file after the removal started)
+    spool = (tempfile.TemporaryDirectory(prefix="lparchive2epub-", ignore_cleanup_errors=True) if spool_images
+             else contextlib.nullcontext(None))
+    with spool as spool_dir:
+        failures: list[SkippedResource] = []
 
-    with tqdm(total=len(intro.chapters), desc="Getting the updates' pages", disable=fetch.quiet) as pbar:
-        await prefetch_chapters(session, intro.chapters, fetch, pbar)
-    say("looking for updates the landing page does not list")
-    unlisted = await discover_unlisted_chapters(session, url, intro.chapters, fetch, failures)
-    if unlisted:
-        say(f"found {len(unlisted)} more update(s) by following the pages' next links")
-        intro.chapters.extend(unlisted)
+        with tqdm(total=len(intro.chapters), desc="Getting the updates' pages", disable=fetch.quiet) as pbar:
+            await prefetch_chapters(session, intro.chapters, fetch, pbar)
+        say("looking for updates the landing page does not list")
+        unlisted = await discover_unlisted_chapters(session, url, intro.chapters, fetch, failures)
+        if unlisted:
+            say(f"found {len(unlisted)} more update(s) by following the pages' next links")
+            intro.chapters.extend(unlisted)
 
-    toc = []
-    spine = []
-    description = compose_description(intro, url)
-    if cover:
-        cover_bytes = cover if isinstance(cover, bytes) else make_cover(intro.title, intro.author)
-        cover_type = detect_image_type(cover_bytes)   # by content only: no file name to fall back on
-        if cover_type is None:
-            raise OutputError("The cover is not an image file.")
-        cover_name = COVER_FILE_NAME.rsplit(".", 1)[0] + "." + cover_type[1]
-        # Adds the image (with the cover-image property and the EPUB 2 <meta name="cover">) and a
-        # cover.xhtml page with id "cover"
-        book.set_cover(cover_name, cover_bytes)
-        book.get_item_with_id("cover").is_linear = True   # part of the reading order, not a detached page
-        spine.append("cover")
-    title_page = epub.EpubHtml(title="Title page", file_name=TITLE_PAGE_FILE_NAME, lang=intro.language)
-    title_page.add_item(get_style_item())
-    title_page.content = make_title_page(intro, url, description)
-    book.add_item(title_page)
-    toc.append(epub.Link(title_page.file_name, title_page.title, title_page.id))
-    spine.append(title_page)
-    spine.append("nav")
+        toc = []
+        spine = []
+        description = compose_description(intro, url)
+        if cover:
+            cover_bytes = cover if isinstance(cover, bytes) else make_cover(intro.title, intro.author)
+            cover_type = detect_image_type(cover_bytes)   # by content only: no file name to fall back on
+            if cover_type is None:
+                raise OutputError("The cover is not an image file.")
+            cover_name = COVER_FILE_NAME.rsplit(".", 1)[0] + "." + cover_type[1]
+            # Adds the image (with the cover-image property and the EPUB 2 <meta name="cover">) and a
+            # cover.xhtml page with id "cover"
+            book.set_cover(cover_name, cover_bytes)
+            book.get_item_with_id("cover").is_linear = True   # part of the reading order, not a detached page
+            spine.append("cover")
+        title_page = epub.EpubHtml(title="Title page", file_name=TITLE_PAGE_FILE_NAME, lang=intro.language)
+        title_page.add_item(get_style_item())
+        title_page.content = make_title_page(intro, url, description)
+        book.add_item(title_page)
+        toc.append(epub.Link(title_page.file_name, title_page.title, title_page.id))
+        spine.append(title_page)
+        spine.append("nav")
 
-    say("building intro")
-    image_registry = ImageRegistry()
-    missing_updates: list[tuple[float, Chapters, Exception]] = []
-    epub_intro = await build_intro(session, url, intro, image_registry, failures, image_processing, fetch)
+        say("building intro")
+        image_registry = ImageRegistry(spool_dir)
+        missing_updates: list[tuple[float, Chapters, Exception]] = []
+        epub_intro = await build_intro(session, url, intro, image_registry, failures, image_processing, fetch)
 
-    known_images: set[str] = set()
+        known_images: set[str] = set()
 
-    add_page(known_images, book, toc, spine, epub_intro)
+        add_page(known_images, book, toc, spine, epub_intro)
 
-    # pages takes a vastly inequal times to get, so it's faster to gather and sort
-    # gotta go fast, but also keep the page order.
+        # pages takes a vastly inequal times to get, so it's faster to gather and sort
+        # gotta go fast, but also keep the page order.
 
-    say("building chapters / updates")
+        say("building chapters / updates")
 
-    pages_indexed: list[tuple[float, Page]] = []
+        pages_indexed: list[tuple[float, Page]] = []
 
-    with tqdm(total=len(intro.chapters), desc="Gathering and building pages", disable=fetch.quiet) as pbar:
-        q: asyncio.Queue = asyncio.Queue()
+        with tqdm(total=len(intro.chapters), desc="Gathering and building pages", disable=fetch.quiet) as pbar:
+            q: asyncio.Queue = asyncio.Queue()
 
-        async def worker():
-            while True:
-                try:
-                    i, chapter = await q.get()
-                except asyncio.CancelledError:
-                    break
-                try:
-                    page = await build_single_page(session, intro, chapter, intro.chapters, pbar, image_registry,
-                                                   failures, image_processing, fetch)
-                except asyncio.CancelledError:
-                    raise  # task_done() runs in the finally clause below
-                except Exception as e:
-                    # A chapter that can't be retrieved must not silently vanish from the book: remember it
-                    # so the run fails with a full report (or, on request, gets a placeholder page).
-                    missing_updates.append((i, chapter, e))
-                    pbar.update(1)
-                else:
-                    pages_indexed.append((i, page))
-                finally:
-                    q.task_done()
+            async def worker():
+                while True:
+                    try:
+                        i, chapter = await q.get()
+                    except asyncio.CancelledError:
+                        break
+                    try:
+                        page = await build_single_page(session, intro, chapter, intro.chapters, pbar, image_registry,
+                                                       failures, image_processing, fetch)
+                    except asyncio.CancelledError:
+                        raise  # task_done() runs in the finally clause below
+                    except Exception as e:
+                        # A chapter that can't be retrieved must not silently vanish from the book: remember it
+                        # so the run fails with a full report (or, on request, gets a placeholder page).
+                        missing_updates.append((i, chapter, e))
+                        pbar.update(1)
+                    else:
+                        pages_indexed.append((i, page))
+                    finally:
+                        q.task_done()
 
-        workers = [asyncio.create_task(worker()) for _ in range(CONCURRENCY_LIMIT_PAGES)]
+            workers = [asyncio.create_task(worker()) for _ in range(CONCURRENCY_LIMIT_PAGES)]
+            try:
+                for chapter in intro.chapters:
+                    await q.put((chapter.order, chapter))
+                await q.join()
+            finally:
+                # also on cancellation (Ctrl-C), so the spool is not removed under a running worker
+                for w in workers:
+                    w.cancel()
+                await asyncio.gather(*workers, return_exceptions=True)
 
-        for chapter in intro.chapters:
-            await q.put((chapter.order, chapter))
+        if missing_updates:
+            missing_updates.sort(key=lambda x: x[0])
+            fatal = [e for _, _, e in missing_updates if isinstance(e, ExtractionError)]
+            if fatal:
+                raise fatal[0]  # e.g. a broken --cache database: not a per-update problem, say so directly
+            missing = [SkippedResource(page=c.original_href, url=c.original_href, reason=_describe(e))
+                       for _, c, e in missing_updates]
+            if not allow_missing_updates:
+                raise MissingUpdatesError(format_failures_report(
+                    url, missing,
+                    "No book was written: it would be missing the update(s) above. "
+                    "Run again later, or with --allow-missing-updates to build it anyway with placeholder pages.",
+                    what="update(s)"))
+            failures.extend(missing)
+            for i, chapter, e in missing_updates:
+                pages_indexed.append((i, build_placeholder_page(chapter, intro, e)))
 
-        await q.join()
-        for w in workers:
-            w.cancel()
-        await asyncio.gather(*workers, return_exceptions=True)
+        pages = [p for _, p in sorted(pages_indexed, key=lambda x: x[0])]
 
-    if missing_updates:
-        missing_updates.sort(key=lambda x: x[0])
-        fatal = [e for _, _, e in missing_updates if isinstance(e, ExtractionError)]
-        if fatal:
-            raise fatal[0]  # e.g. a broken --cache database: not a per-update problem, say so directly
-        missing = [SkippedResource(page=c.original_href, url=c.original_href, reason=_describe(e))
-                   for _, c, e in missing_updates]
-        if not allow_missing_updates:
-            raise MissingUpdatesError(format_failures_report(
-                url, missing,
-                "No book was written: it would be missing the update(s) above. "
-                "Run again later, or with --allow-missing-updates to build it anyway with placeholder pages.",
-                what="update(s)"))
-        failures.extend(missing)
-        for i, chapter, e in missing_updates:
-            pages_indexed.append((i, build_placeholder_page(chapter, intro, e)))
+        if failures and strict:
+            raise StrictModeError(format_failures_report(
+                url, failures, "No book was written (--strict). Run again without --strict to build it anyway."))
 
-    pages = [p for _, p in sorted(pages_indexed, key=lambda x: x[0])]
+        for p in tqdm(pages, desc="Adding pages to book", disable=fetch.quiet):
+            add_page(known_images, book, toc, spine, p)
 
-    if failures and strict:
-        raise StrictModeError(format_failures_report(
-            url, failures, "No book was written (--strict). Run again without --strict to build it anyway."))
+        say("preparing book structure")
+        book.toc = toc
 
-    for p in tqdm(pages, desc="Adding pages to book", disable=fetch.quiet):
-        add_page(known_images, book, toc, spine, p)
+        book.add_item(epub.EpubNcx())
+        book.add_item(epub.EpubNav())
 
-    say("preparing book structure")
-    book.toc = toc
+        book.spine = spine
 
-    book.add_item(epub.EpubNcx())
-    book.add_item(epub.EpubNav())
+        book.add_item(get_style_item())
 
-    book.spine = spine
+        book.add_author(intro.author)
+        book.set_title(intro.title)
+        book.set_language(intro.language)
+        book.add_metadata("DC", "source", url)
+        book.add_metadata("DC", "publisher", PUBLISHER)
+        book.add_metadata("DC", "description", description)
+        # Publication date: when the LP was finished, else when it started, else when it was archived
+        published = parse_lp_date(intro.ended) or parse_lp_date(intro.began) or parse_lp_date(intro.published_on)
+        if published:
+            book.add_metadata("DC", "date", published.strftime("%Y-%m-%d"))
+        for subject in ["Let's Play", *intro.tags]:
+            book.add_metadata("DC", "subject", subject)
+        if intro.thread_url:
+            book.add_metadata("DC", "relation", intro.thread_url)
+        # Stable across runs: Python's hash() must not be used here, it is randomised per process.
+        book.set_identifier(f"lparchive2epub-{get_blake2b_hash(intro.title.encode("utf-8"))}-{get_blake2b_hash(intro.author.encode("utf-8"))}-{get_blake2b_hash(url.encode("utf-8"))}")
 
-    book.add_item(get_style_item())
+        mtime = datetime.datetime.strptime(intro.published_on, "%b %d, %Y")
 
-    book.add_author(intro.author)
-    book.set_title(intro.title)
-    book.set_language(intro.language)
-    book.add_metadata("DC", "source", url)
-    book.add_metadata("DC", "publisher", PUBLISHER)
-    book.add_metadata("DC", "description", description)
-    # Publication date: when the LP was finished, else when it started, else when it was archived
-    published = parse_lp_date(intro.ended) or parse_lp_date(intro.began) or parse_lp_date(intro.published_on)
-    if published:
-        book.add_metadata("DC", "date", published.strftime("%Y-%m-%d"))
-    for subject in ["Let's Play", *intro.tags]:
-        book.add_metadata("DC", "subject", subject)
-    if intro.thread_url:
-        book.add_metadata("DC", "relation", intro.thread_url)
-    # Stable across runs: Python's hash() must not be used here, it is randomised per process.
-    book.set_identifier(f"lparchive2epub-{get_blake2b_hash(intro.title.encode("utf-8"))}-{get_blake2b_hash(intro.author.encode("utf-8"))}-{get_blake2b_hash(url.encode("utf-8"))}")
+        if image_processing is not None:
+            writer(image_processing.summary())
+        say(f"Writing book file {file}")
+        write_book(file, book, mtime)
 
-    mtime = datetime.datetime.strptime(intro.published_on, "%b %d, %Y")
-
-    if image_processing is not None:
-        writer(image_processing.summary())
-    say(f"Writing book file {file}")
-    write_book(file, book, mtime)
-
-    if failures:
-        writer(format_failures_report(
-            url, failures,
-            "Missing images were replaced by a note linking to the original; "
-            "missing updates (--allow-missing-updates) were replaced by a placeholder page linking to the original."))
-    return file
+        if failures:
+            writer(format_failures_report(
+                url, failures,
+                "Missing images were replaced by a note linking to the original; "
+                "missing updates (--allow-missing-updates) were replaced by a placeholder page linking to the original."))
+        return file

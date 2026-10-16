@@ -1,7 +1,7 @@
 """Build a book for every Let's Play of the archive.
 
     uv run python util/all_archives.py OUTPUT_DIR [--cache_path DIR] [--errors FILE] [--skip-videos] [--force]
-                                       [--max-image-size PIXELS] [--jpeg-quality 1-100] [--no-cover]
+                                       [--max-image-size PIXELS] [--jpeg-quality 1-100] [--no-cover] [--images-in-memory]
                                        [--concurrency N] [--retries N]
 
 Books are written as OUTPUT_DIR/<slug>.epub. Each LP gets its own SQLite cache under the cache
@@ -20,8 +20,8 @@ hold little more than links to the videos, so the books are near-empty).
 with the full report the tool prints; "skipped-resources" is a book that was written but with images
 the site could not serve, with the tool's report listing them.
 
---max-image-size, --jpeg-quality, --no-cover, --concurrency and --retries mean the same as for
-the lparchive2epub command and apply to every book.
+--max-image-size, --jpeg-quality, --no-cover, --images-in-memory, --concurrency and --retries mean
+the same as for the lparchive2epub command and apply to every book.
 """
 import asyncio
 import datetime
@@ -76,6 +76,7 @@ class BuildOptions:
     image_processing: ImageProcessing | None = None
     cover: bool = True
     fetch: FetchSettings = field(default_factory=lambda: FetchSettings(quiet=True))
+    spool_images: bool = True
 
 
 def make_session(cache_dir: str, slug: str) -> ClientSession:
@@ -100,7 +101,7 @@ async def build_one(slug: str, output_dir: str, cache_dir: str, errors: ErrorLog
     try:
         await lparchive2epub(f"{LPARCHIVE}/{slug}", book_path(output_dir, slug), session_factory(cache_dir, slug),
                              writer=reports.append, image_processing=options.image_processing, cover=options.cover,
-                             fetch=options.fetch)
+                             fetch=options.fetch, spool_images=options.spool_images)
     except ExtractionError as e:
         errors.record(slug, "build-failed", str(e), e)
         logger.error("%s: %s", slug, str(e).splitlines()[0])
@@ -146,7 +147,8 @@ async def do(arguments):
     options = BuildOptions(
         image_processing=ImageProcessing(arguments.max_image_size, arguments.jpeg_quality) if arguments.max_image_size else None,
         cover=not arguments.no_cover,
-        fetch=FetchSettings(concurrency=arguments.concurrency, retries=arguments.retries, quiet=True))
+        fetch=FetchSettings(concurrency=arguments.concurrency, retries=arguments.retries, quiet=True),
+        spool_images=not arguments.images_in_memory)
 
     # The front page embeds the whole LP index as JavaScript; read_index knows how to parse it.
     index = read_index(await get_frontpage())
@@ -184,6 +186,8 @@ if __name__ == "__main__":
     arg_parser.add_argument("--jpeg-quality", metavar="1-100", type=jpeg_quality, default=85,
                             help="JPEG quality used when --max-image-size re-encodes an image (default: 85)")
     arg_parser.add_argument("--no-cover", action="store_true", help="build the books without a cover image")
+    arg_parser.add_argument("--images-in-memory", action="store_true",
+                            help="keep each book's images in memory instead of a temporary folder under TMPDIR")
     arg_parser.add_argument("--concurrency", metavar="N", type=positive_int, default=DEFAULT_CONCURRENCY,
                             help=f"downloads in flight at the same time (default: {DEFAULT_CONCURRENCY})")
     arg_parser.add_argument("--retries", metavar="N", type=positive_int, default=DEFAULT_RETRIES,

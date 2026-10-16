@@ -2306,3 +2306,95 @@ async def test_all_archives_passes_build_options_through():
             shrunk = [n for n in names if n.endswith(".jpg") or n.endswith(".jpeg")]
             assert shrunk and PILImage.open(io.BytesIO(z.read(shrunk[0]))).size == (1600, 533)
     assert processing.changed == 1 and not any("cover" in n for n in names)
+
+
+def _image_items(book):
+    from ebooklib.epub import EpubImage
+    return [i for i in book.get_items() if isinstance(i, EpubImage) and i.file_name.startswith("images/") and "cover" not in i.file_name]
+
+
+@pytest.mark.asyncio
+async def test_images_wait_on_disk_until_the_book_is_written(monkeypatch):
+    """Memory must not grow with the book: images go to a folder under the temporary directory as they
+    are downloaded, are read back one by one while writing, each deleted once in the book, and the
+    folder disappears with the build. --images-in-memory keeps them in memory and writes the same book."""
+    url = "https://lparchive.org/X-COM-Terror-from-the-Deep"
+    real_write = lib.epub.write_epub
+    seen = {}
+
+    def spying_write(name, book, options=None):
+        spools = [p for p in os.listdir(seen["tmp"]) if p.startswith("lparchive2epub-")]
+        items = _image_items(book)
+        seen["spools"], seen["items"] = spools, items
+        if spools:
+            folder = os.path.join(seen["tmp"], spools[0])
+            seen["files"] = {open(os.path.join(folder, f), "rb").read() for f in os.listdir(folder)}
+            assert all(isinstance(i, lib.SpooledImage) and os.path.dirname(i.path) == folder for i in items)
+        else:
+            assert all(isinstance(i, lib.FreedOnWriteImage) and i.content == PNG_BYTES for i in items)
+        real_write(name, book, options)
+        seen["left"] = os.listdir(folder) if spools else None
+
+    monkeypatch.setattr(lib.epub, "write_epub", spying_write)
+    with tempfile.TemporaryDirectory() as tmp, tempfile.TemporaryDirectory() as d:
+        monkeypatch.setenv("TMPDIR", tmp)
+        monkeypatch.setattr(tempfile, "tempdir", None)   # forget the cached location
+        seen["tmp"] = tmp
+        await asyncio.wait_for(do(url, f"{d}/spooled.epub", _FakeSession("never-matches"), lambda *_: None), timeout=30)
+        assert len(seen["spools"]) == 1 and seen["items"] and seen["files"] == {PNG_BYTES}
+        assert seen["left"] == []                         # every image deleted as it went into the book
+        assert os.listdir(tmp) == []                      # the folder itself is gone with the build
+        assert os.listdir(d) == ["spooled.epub"]
+
+        await asyncio.wait_for(do(url, f"{d}/in-memory.epub", _FakeSession("never-matches"), lambda *_: None, spool_images=False), timeout=30)
+        assert seen["spools"] == [] and seen["items"]
+        assert all(i.content is None for i in seen["items"])   # bytes dropped as each image was written
+        with pytest.raises(RuntimeError, match="already written"):
+            seen["items"][0].get_content()
+        with open(f"{d}/spooled.epub", "rb") as a, open(f"{d}/in-memory.epub", "rb") as b:
+            assert a.read() == b.read()
+
+
+@pytest.mark.asyncio
+async def test_spool_disk_error_aborts_the_build_instead_of_skipping_images(monkeypatch):
+    """A full disk under the image folder is not a per-image problem: no book, a clear error, and the
+    folder is removed. Checked for an image of the intro and for one of an update."""
+    url = "https://lparchive.org/X-COM-Terror-from-the-Deep"
+    other = b"\x89PNG\r\n\x1a\n" + b"another png"
+    real_spool_write = lib.spool_write
+
+    def full_disk_for(victim):
+        def spool_write(spool_dir, name, content):
+            if content == victim:
+                raise OSError(28, "No space left on device")
+            return real_spool_write(spool_dir, name, content)
+        return spool_write
+
+    with tempfile.TemporaryDirectory() as tmp, tempfile.TemporaryDirectory() as d:
+        monkeypatch.setenv("TMPDIR", tmp)
+        monkeypatch.setattr(tempfile, "tempdir", None)
+        for victim, responses in [
+                (PNG_BYTES, {}),                                    # the intro's image, like every other
+                (other, {f"{url}/Update%2001/": _FakeResponse(200, b'<div id="content"><img src="other.png"/></div>'),
+                         f"{url}/Update%2001/other.png": _FakeResponse(200, other)})]:
+            monkeypatch.setattr(lib, "spool_write", full_disk_for(victim))
+            messages = []
+            with pytest.raises(OutputError, match="No space left on device"):
+                await asyncio.wait_for(do(url, f"{d}/book.epub", _FakeSession("never-matches", responses=responses), messages.append), timeout=30)
+            assert os.listdir(d) == [] and os.listdir(tmp) == []
+            assert not any("could not be retrieved" in m for m in messages)
+
+
+@pytest.mark.asyncio
+async def test_identical_images_share_one_spooled_file():
+    url = "https://lparchive.org/X-COM-Terror-from-the-Deep"
+    urls = [f"{url}/Update%2001/a.png", f"{url}/Update%2002/b.png"]
+    session = _FakeSession("never-matches", responses={u: _FakeResponse(200, PNG_BYTES) for u in urls})
+    with tempfile.TemporaryDirectory() as d:
+        registry = ImageRegistry(spool_dir=d)
+        images = [lib.Image(n, u, BeautifulSoup("<img/>", "html.parser").img, u, url) for n, u in enumerate(urls)]
+        first, second = await asyncio.gather(*(lib._get_image(session, img, registry) for img in images))
+        assert first.data is second.data and isinstance(first.data, lib.SpooledImage)
+        assert first.size == second.size == len(PNG_BYTES) and first.old_name != second.old_name
+        assert os.listdir(d) == [os.path.basename(first.data.path)]
+        assert first.data.get_content() == PNG_BYTES and os.listdir(d) == []   # read once, then gone
