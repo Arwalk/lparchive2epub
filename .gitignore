@@ -18,3 +18,5 @@ plan.md
 .beads-credential-key
 .beads/proxieddb/
 *.gate.lock*
+
+/error.jsonl

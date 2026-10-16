@@ -510,6 +510,12 @@ class _FakeSession:
     async def close(self):
         pass
 
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *exc):
+        await self.close()
+
 
 def _chapter_files(epub_path: str) -> list[str]:
     with zipfile.ZipFile(epub_path) as z:
@@ -2221,3 +2227,46 @@ def test_chapter_order_is_coherent_across_the_archive():
     for slug in live:
         numbers = [tuple(int(x) for x in m.group(1).split("-")) for c in golden[slug]["chapters"] if (m := UPDATE_NUMBER.match(c[0]))]
         assert numbers == sorted(numbers), slug
+
+
+@pytest.mark.asyncio
+async def test_all_archives_error_file_records_failures_and_skipped_resources():
+    from util.all_archives import build_one, ErrorLog
+    url = "https://lparchive.org/X-COM-Terror-from-the-Deep"
+    dead = "http://img.example/dead.png"
+    sessions = {
+        # builds, but one image is dead -> a "skipped-resources" entry
+        "X-COM-Terror-from-the-Deep": _FakeSession("never-matches", responses={
+            f"{url}/Update%2001/": _FakeResponse(200, f'<div id="content"><img src="{dead}"/></div>'.encode()),
+            dead: _FakeResponse(404, b"gone")}),
+        # an update answers 503 -> the build fails -> a "build-failed" entry with the report
+        "Broken-LP": _FakeSession("never-matches", responses={
+            "https://lparchive.org/Broken-LP": _FakeResponse(200, xcom),
+            "https://lparchive.org/Broken-LP/Update%2003/": _FakeResponse(503, b"down")}),
+        # not an LP page at all
+        "Nope": _FakeSession("never-matches", responses={"https://lparchive.org/Nope": _FakeResponse(200, NOT_AN_LP_PAGE)}),
+    }
+
+    def factory(cache_dir, slug):
+        return sessions[slug]
+
+    with tempfile.TemporaryDirectory() as d:
+        errors = ErrorLog(f"{d}/errors.jsonl")
+        import lparchive2epub.lib as lib_module
+        lib_module.RETRY_BACKOFF_BASE = 0
+        try:
+            results = [await asyncio.wait_for(build_one(slug, d, d, errors, factory), timeout=30) for slug in sessions]
+        finally:
+            lib_module.RETRY_BACKOFF_BASE = 1.0
+        assert results == [True, False, False]
+        assert os.path.exists(f"{d}/X-COM-Terror-from-the-Deep.epub") and not os.path.exists(f"{d}/Broken-LP.epub")
+        with open(f"{d}/errors.jsonl", encoding="utf-8") as f:
+            entries = [json.loads(line) for line in f]
+    assert [(e["slug"], e["kind"]) for e in entries] == [
+        ("X-COM-Terror-from-the-Deep", "skipped-resources"), ("Broken-LP", "build-failed"), ("Nope", "build-failed")]
+    assert dead in entries[0]["report"] and "status code: 404" in entries[0]["report"] and "error" not in entries[0]
+    assert entries[1]["error"] == "MissingUpdatesError" and "Update%2003/" in entries[1]["report"] and "503" in entries[1]["report"]
+    assert entries[2]["error"] == "NotALetsPlayError" and "is not the page of a Let's Play" in entries[2]["message"]
+    assert all(e["url"] == f"https://lparchive.org/{e['slug']}" and e["time"].endswith("+00:00") for e in entries)
+    # no file requested: nothing is written, nothing fails
+    assert ErrorLog(None).record("x", "build-failed", "r") is None
