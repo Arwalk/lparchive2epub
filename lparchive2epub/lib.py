@@ -323,6 +323,11 @@ INTRO_FILE_NAME = "introduction.xhtml"
 # Typos in the scheme part of a URL found in some LPs: "hhttp://", "htttp://", "http:/", "http//"...
 FIXABLE_SCHEME = re.compile(r"^h+t+p+(s?)\s*(?::/*|//+)", re.IGNORECASE)
 HAS_SCHEME = re.compile(r"^[a-zA-Z][a-zA-Z0-9+.-]*:")
+# Forum smilies are referenced as "Smilies/emot-x.gif" or "../Smilies/emot-x.gif", which 404 once resolved
+# against the update page. They all live at https://lparchive.org/Smilies/<name> (128/128 answered on
+# 2026-10-17; only Grandia also has a per-LP copy). Matches any lparchive.org URL ending in Smilies/<name>.
+LPARCHIVE_SMILIE = re.compile(r"^https?://(?:www\.)?lparchive\.org/(?:.*/)?Smilies/([^/?#]+)$", re.IGNORECASE)
+SMILIES_URL = "https://lparchive.org/Smilies/"
 
 
 def normalize_url(url: str) -> str | None:
@@ -335,6 +340,14 @@ def normalize_url(url: str) -> str | None:
     if parsed.scheme.lower() in ("http", "https") and parsed.netloc:
         return url
     return None
+
+
+def repair_lparchive_url(url: str) -> str:
+    """Point an lparchive.org URL that is known to 404 at where the resource actually lives."""
+    smilie = LPARCHIVE_SMILIE.match(url)
+    if smilie:
+        return SMILIES_URL + smilie.group(1)
+    return url
 
 
 class Extractor:
@@ -494,11 +507,12 @@ class Extractor:
         Returns None when `src` can't be an http(s) URL (mailto:, javascript:, broken scheme...)."""
         src = src.strip().replace("\\", "/")
         if FIXABLE_SCHEME.match(src) or src.startswith("//") or HAS_SCHEME.match(src):
-            return normalize_url(src)
+            url = normalize_url(src)
+            return repair_lparchive_url(url) if url is not None else None
         base = str(root_url)
         if not base.endswith("/"):
             base += "/"
-        return urljoin(base, src)
+        return repair_lparchive_url(urljoin(base, src))
 
 
     @staticmethod

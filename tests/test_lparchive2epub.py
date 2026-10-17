@@ -422,7 +422,14 @@ def test_get_full_url():
     assert Extractor.get_full_url(root, "javascript:void(0)") is None
     # site-absolute paths are relative to the host, not to the page
     assert Extractor.get_full_url(root, "/site_images/x.png") == "https://lparchive.org/site_images/x.png"
-    assert Extractor.get_full_url(root, "../Smilies/emot-smith.gif") == "https://lparchive.org/Shin-Megami-Tensei-Devil-Summoner/Smilies/emot-smith.gif"
+    # forum smilies: resolved against the page they 404, they all live under /Smilies/ at the site root
+    assert Extractor.get_full_url(root, "../Smilies/emot-smith.gif") == "https://lparchive.org/Smilies/emot-smith.gif"
+    assert Extractor.get_full_url(root, "Smilies/emot-smith.gif") == "https://lparchive.org/Smilies/emot-smith.gif"
+    assert Extractor.get_full_url(root, "https://lparchive.org/Dark-Souls/Smilies/emot-colbert.gif") == "https://lparchive.org/Smilies/emot-colbert.gif"
+    assert Extractor.get_full_url(root, "/Smilies/emot-smith.gif") == "https://lparchive.org/Smilies/emot-smith.gif"
+    # ...but only on lparchive.org: the forum's own copies are left alone
+    assert Extractor.get_full_url(root, "https://fi.somethingawful.com/images/smilies/emot-argh.gif") == "https://fi.somethingawful.com/images/smilies/emot-argh.gif"
+    assert Extractor.get_full_url(root, "https://lpix.org/x/Smilies/emot-argh.gif") == "https://lpix.org/x/Smilies/emot-argh.gif"
     assert Extractor.get_full_url(root, "//lpix.org/a.png") == "https://lpix.org/a.png"
     assert Extractor.get_full_url(root, " img\\sub\\a.png ") == f"{root}img/sub/a.png"
     assert Extractor.get_full_url(root, "https://lpix.org/a.png") == "https://lpix.org/a.png"
@@ -769,6 +776,32 @@ async def test_image_media_type_comes_from_content_and_non_images_are_skipped():
     assert not any("html" in n for n in image_files)
     report = "\n".join(messages)
     assert dead_host_url in report and "Not an image" in report and "text/html" in report
+
+
+@pytest.mark.asyncio
+async def test_smilies_are_fetched_from_the_site_wide_folder():
+    url = "https://lparchive.org/X-COM-Terror-from-the-Deep"
+    smilie_url = "https://lparchive.org/Smilies/emot-allears.gif"
+    wrong_urls = [f"{url}/Update%2001/Smilies/emot-allears.gif", f"{url}/Smilies/emot-allears.gif"]
+    session = _FakeSession("never-matches", responses={smilie_url: _FakeResponse(200, GIF_BYTES, "image/gif")})
+    for wrong in wrong_urls:
+        session.responses[wrong] = _FakeResponse(404, b"not here")   # like the site
+    session.responses[f"{url}/Update%2001/"] = _FakeResponse(
+        200, b'<div id="content"><img src="Smilies/emot-allears.gif"/> and <img src="../Smilies/emot-allears.gif"/></div>')
+    messages = []
+    with tempfile.TemporaryDirectory() as d:
+        out = f"{d}/book.epub"
+        await asyncio.wait_for(do(url, out, session, messages.append), timeout=30)
+        with zipfile.ZipFile(out) as z:
+            chapter = z.read("EPUB/update_0.xhtml").decode()
+            gifs = [n for n in z.namelist() if n.startswith("EPUB/images/") and n.endswith(".gif")]
+
+    assert session.requested.count(smilie_url) == 1          # both references share one download
+    assert not any(w in session.requested for w in wrong_urls)
+    assert len(gifs) == 1
+    assert chapter.count(f'src="{gifs[0].removeprefix("EPUB/")}"') == 2
+    assert "missing-image" not in chapter
+    assert "Smilies" not in "\n".join(messages)
 
 
 @pytest.mark.asyncio
