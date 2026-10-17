@@ -21,7 +21,7 @@ from aiohttp_client_cache import CachedSession, SQLiteBackend
 from tqdm.asyncio import tqdm
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from lparchive2epub.lib import (CURL_HEADERS, LPARCHIVE_ROOT, FetchError, NonRetryableError, RetriesExhaustedError,  # noqa: E402
+from lparchive2epub.lib import (request_headers, LPARCHIVE_ROOT, FetchError, NonRetryableError, RetriesExhaustedError,  # noqa: E402
                                 check_cache_path, fetch_with_retries)
 
 DEFAULT_OUTPUT = Path(__file__).resolve().parent.parent / "tests" / "resources" / "landing_pages.zip"
@@ -56,7 +56,7 @@ async def snapshot(output: Path, cache_file: str, concurrency: int, limit: int |
     semaphore = asyncio.Semaphore(concurrency)
 
     async with CachedSession(cache=SQLiteBackend(cache_file, expire_after=-1, fast_save=True, autoclose=True)) as session:
-        async with session.get(f"{LPARCHIVE_ROOT}/", headers=CURL_HEADERS) as r:
+        async with session.get(f"{LPARCHIVE_ROOT}/", headers=request_headers()) as r:
             index = read_index(await r.text())
         if limit:
             index = index[:limit]

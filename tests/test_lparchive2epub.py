@@ -1174,6 +1174,23 @@ async def test_non_lp_page_fails_cleanly_through_do():
 
 
 @pytest.mark.asyncio
+async def test_requests_carry_a_descriptive_user_agent():
+    """Bot policies (Wikimedia's, uesp.net's) refuse generic clients; imgur refuses aiohttp's default.
+    Live check of 2026-10-17 in lib.request_headers' docstring."""
+    class _RecordingSession(_FakeSession):
+        def get(self, url, **kwargs):
+            self.headers = kwargs.get("headers")
+            return super().get(url, **kwargs)
+
+    session = _RecordingSession("never-matches")
+    await fetch_with_retries(session, "https://lparchive.org/X-COM-Terror-from-the-Deep/Update%2001/a.png")
+    agent = session.headers["user-agent"]
+    assert re.fullmatch(r"lparchive2epub/\S+ \(\+https://github\.com/Arwalk/lparchive2epub\)", agent), agent
+    assert "aiohttp" not in agent and "curl" not in agent
+    assert session.headers["accept"] == "*/*"
+
+
+@pytest.mark.asyncio
 async def test_fetch_with_retries_returns_body_and_decodes_text():
     url = "https://lparchive.org/X-COM-Terror-from-the-Deep"
     session = _FakeSession("never-matches", responses={url: _FakeResponse(200, "caf\u00e9".encode("utf-8"), "text/html; charset=utf-8")})

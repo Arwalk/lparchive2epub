@@ -59,7 +59,7 @@ addopts = [
 ]
 markers = [
   "archive: checks the extractor against every landing page of lparchive.org (tests/resources/landing_pages.zip); skip with -m 'not archive'",
-  "live: builds a few Let's Plays from lparchive.org and compares them with tests/resources/live_checksums.json; only with --live",
+  "live: builds a few Let's Plays from lparchive.org and compares them with tests/resources/live_checksums.json; skip with --offline",
 ]
 pythonpath = "."
 asyncio_default_fixture_loop_scope = "session"

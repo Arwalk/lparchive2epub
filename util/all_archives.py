@@ -38,7 +38,7 @@ from tqdm.asyncio import tqdm
 from aiohttp_client_cache import CachedSession, SQLiteBackend
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from lparchive2epub.lib import lparchive2epub, CURL_HEADERS, CLIENT_TIMEOUT, DEFAULT_CONCURRENCY, DEFAULT_RETRIES, \
+from lparchive2epub.lib import lparchive2epub, request_headers, CLIENT_TIMEOUT, DEFAULT_CONCURRENCY, DEFAULT_RETRIES, \
     FetchSettings, ImageProcessing, ExtractionError, check_cache_path  # noqa: E402
 from lparchive2epub.main import positive_int, jpeg_quality  # noqa: E402
 from util.snapshot_landing_pages import read_index  # noqa: E402
@@ -132,7 +132,7 @@ def select(index: list[dict], output_dir: str, skip_videos: bool, force: bool) -
 
 async def get_frontpage() -> str:
     async with ClientSession(timeout=CLIENT_TIMEOUT) as session:
-        async with session.get(f"{LPARCHIVE}/", headers=CURL_HEADERS) as r:
+        async with session.get(f"{LPARCHIVE}/", headers=request_headers()) as r:
             return await r.text()
 
 

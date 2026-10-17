@@ -22,7 +22,7 @@ from ebooklib import epub
 from ebooklib.epub import EpubHtml, EpubImage, EpubBook
 from tqdm.asyncio import tqdm
 
-from lparchive2epub.cover import COVER_FILE_NAME, TITLE_PAGE_FILE_NAME, make_cover, make_title_page
+from lparchive2epub.cover import COVER_FILE_NAME, TITLE_PAGE_FILE_NAME, make_cover, make_title_page, tool_version
 from lparchive2epub.style import get_style_item
 
 # Worker pools: how many pages are being built at once, and how many images per page. The number of
@@ -685,10 +685,18 @@ class Fetched:
         return self.body.decode(self.encoding, errors="replace")
 
 
-CURL_HEADERS = {
-    "user-agent": "curl/8.1.1",
-    "accept": "*/*"
-}
+def request_headers() -> dict[str, str]:
+    """Headers sent with every request. A descriptive User-Agent with a contact URL, as bot policies ask
+    for: checked 2026-10-17, i.imgur.com answers 200 to it (429 to aiohttp's default UA, the reason the
+    tool used to pose as curl), www.uesp.net answers 200 (403 to curl/8.1.1), and Wikimedia's policy
+    (https://w.wiki/4wJS) 403s generic clients."""
+    return {
+        "user-agent": f"lparchive2epub/{tool_version()} (+{REPOSITORY_URL})",
+        "accept": "*/*",
+    }
+
+
+REPOSITORY_URL = "https://github.com/Arwalk/lparchive2epub"
 
 class FetchError(RuntimeError):
     """A resource could not be retrieved. `url` and, when known, the HTTP `status` are kept for reporting."""
@@ -947,7 +955,7 @@ async def fetch_with_retries(session: aiohttp.ClientSession, url: str, max_retri
     while retry_count < max_retries:
         try:
             async with (fetch.limit() if fetch is not None else contextlib.nullcontext()), \
-                    session.get(url, headers=CURL_HEADERS) as r:
+                    session.get(url, headers=request_headers()) as r:
                 if 400 <= r.status < 500 and r.status not in RETRYABLE_CLIENT_STATUSES:
                     raise NonRetryableError(f"Failed to get resource {url}, status code: {r.status}", url, r.status)
                 if r.status != 200:
