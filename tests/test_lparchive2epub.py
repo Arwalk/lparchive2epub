@@ -744,6 +744,50 @@ def test_all_images_finds_linked_images_regardless_of_extension_case_or_query():
     assert [i.src for i in images] == ["full.JPG", "full.jpeg", "full.webp?dl=1", "full.png#top"]
 
 
+def test_wiki_file_pages_and_empty_src_are_not_image_references():
+    html = ('<div id="content">'
+            '<a href="https://en.wikipedia.org/wiki/File:San_Francisco_in_ruin_edit2.jpg">1</a> '
+            '<a href="https://en.wikipedia.org/wiki/Redingote#/media/File:Dandies_of_1831.jpg">2</a> '
+            '<a href="http://hard-light.net/wiki/index.php/File:Moloch480x340.jpg">3</a> '
+            '<a href="http://terraria.gamepedia.com/File:Shotgun.png">4</a> '
+            '<a href="https://bulbapedia.bulbagarden.net/wiki/file:VSHoney.png">5</a> '
+            '<a href="https://en.wikipedia.org/wiki/Image:Old_namespace.gif">6</a> '
+            '<a href="article.html#figure.png">7</a> '
+            '<img src=""/> <img src="  "/> <img/> '
+            '<a href="https://upload.wikimedia.org/wikipedia/commons/0/03/Maev.jpg">real</a> '
+            '<a href="https://en.wikipedia.org/wiki/File:Thumb.jpg"><img src="thumb.png"/></a>'
+            '</div>')
+    content = BeautifulSoup(html, "html.parser").find("div", id="content")
+    assert Extractor.inline_full_size_images(content) == 0        # a File: page is not the full-size picture
+    images = Extractor.all_images(content, "https://lparchive.org/Some-LP/Update%2001/")
+    assert [i.src for i in images] == ["thumb.png", "https://upload.wikimedia.org/wikipedia/commons/0/03/Maev.jpg"]
+    assert all(i.url for i in images)
+    assert len(content.find_all("a")) == 9                        # the links stay plain links
+
+
+@pytest.mark.asyncio
+async def test_wiki_file_links_are_kept_and_not_fetched_and_empty_src_is_not_reported():
+    url = "https://lparchive.org/X-COM-Terror-from-the-Deep"
+    page = f"{url}/Update%2001/"
+    wiki = "https://en.wikipedia.org/wiki/File:San_Francisco_in_ruin_edit2.jpg"
+    session = _FakeSession("never-matches", responses={wiki: _FakeResponse(403, b"forbidden")})
+    session.responses[page] = _FakeResponse(
+        200, f'<div id="content"><a href="{wiki}">the picture</a> <img src=""/> <img src="shot.png"/></div>'.encode())
+    messages = []
+    with tempfile.TemporaryDirectory() as d:
+        out = f"{d}/book.epub"
+        await asyncio.wait_for(do(url, out, session, messages.append), timeout=30)
+        with zipfile.ZipFile(out) as z:
+            chapter = z.read("EPUB/update_0.xhtml").decode()
+
+    assert wiki not in session.requested
+    assert session.requested.count(page) == 1                     # not downloaded a second time as an image
+    assert f'<a href="{wiki}">the picture</a>' in chapter
+    assert "missing-image" not in chapter
+    report = "\n".join(messages)
+    assert "could not be retrieved" not in report and "url:    \n" not in report
+
+
 @pytest.mark.asyncio
 async def test_image_media_type_comes_from_content_and_non_images_are_skipped():
     url = "https://lparchive.org/X-COM-Terror-from-the-Deep"

@@ -271,7 +271,17 @@ class NotAnUpdatePageError(RuntimeError):
     """A chapter's page has no post in it: not an update page."""
 DOT_NOT_IN_A_NUMBER = re.compile(r"(?<!\d)\.|\.(?!\d)")
 # Links to image files, whatever the case of the extension and ignoring any query string or fragment
-IMAGE_FILE_LINK = re.compile(r"\.(jpe?g|png|gif|webp|bmp|svg)(?=[?#]|$)", re.IGNORECASE)
+IMAGE_FILE_LINK = re.compile(r"\.(jpe?g|png|gif|webp|bmp|svg)(?=\?|$)", re.IGNORECASE)
+# Wiki file-description pages ("/wiki/File:X.jpg", "/index.php/File:X.jpg", "/File:X.jpg") are HTML, not pictures
+WIKI_FILE_PAGE = re.compile(r"/(?:File|Image):", re.IGNORECASE)
+
+
+def is_image_link(href: str) -> bool:
+    """Whether a link points at a picture file, judging by its name: the extension ends the path, a
+    query string may follow. The fragment does not count ("Redingote#/media/File:X.jpg" is an
+    article), and neither do wiki file-description pages, which are HTML."""
+    target = urldefrag(href.strip())[0]
+    return bool(IMAGE_FILE_LINK.search(target)) and not WIKI_FILE_PAGE.search(target)
 # lparchive's own wording for a thumbnail's link: "Click here for the full 728x866 image."
 FULL_IMAGE_LINK_TEXT = re.compile(r"\bfull\b.*\bimage\b", re.IGNORECASE | re.DOTALL)
 
@@ -567,7 +577,7 @@ class Extractor:
         replaced = 0
         for link in content.find_all("a", href=True):
             href = link["href"].strip()
-            if not IMAGE_FILE_LINK.search(href):
+            if not is_image_link(href):
                 continue
             wrapped = link.find_all("img")
             if len(wrapped) == 1 and not "".join(link.find_all(string=True)).strip():
@@ -592,7 +602,7 @@ class Extractor:
     def all_images(content: BeautifulSoup, root_url: str) -> List[Image]:
         # Get direct image tags
         images = content.find_all("img")
-        images = (x for x in images if x.get("src", None) is not None)
+        images = (x for x in images if (x.get("src") or "").strip())   # <img src=""> would resolve to the page itself
         r = []
 
         # Add direct images
@@ -606,7 +616,7 @@ class Extractor:
             ))
 
         # Find image links - typically "Click here for full image" links
-        image_links = content.find_all("a", href=lambda x: x and IMAGE_FILE_LINK.search(x))
+        image_links = content.find_all("a", href=lambda x: x and is_image_link(x))
 
         # Add linked images to be saved, but don't modify the HTML structure
         for i, link in enumerate(image_links, start=len(r)):
