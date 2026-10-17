@@ -412,6 +412,8 @@ async def test_live_build_matches_recorded_checksum(slug):
 
 @pytest.mark.parametrize(("url", "expected"), [
     ("hhttp://lpix.org/2495492/purski.png", "http://lpix.org/2495492/purski.png"),
+    ("ttp://lpix.org/582487/mons051.png", "http://lpix.org/582487/mons051.png"),   # a missing h (Legend-of-Mana)
+    ("ttps://example.com/a.png", "https://example.com/a.png"),
     ("htttps://example.com/a.png", "https://example.com/a.png"),
     ("HTTP://example.com/a.png", "http://example.com/a.png"),
     ("http:/example.com/a.png", "http://example.com/a.png"),
@@ -735,6 +737,8 @@ async def test_write_failure_is_reported_and_leaves_no_partial_file(monkeypatch)
     (GIF_BYTES, "http://x/a.GIF", None, ("image/gif", "gif")),
     (WEBP_BYTES, "http://x/a", None, ("image/webp", "webp")),
     (b"BMfake", "http://x/a.bmp", None, ("image/bmp", "bmp")),
+    (b"MM\x00*fake", "http://x/1-map14.tiff.", "application/octet-stream", ("image/tiff", "tiff")),
+    (b"II*\x00fake", "http://x/a", None, ("image/tiff", "tiff")),
     (b'<svg xmlns="http://www.w3.org/2000/svg"></svg>', "http://x/a", None, ("image/svg+xml", "svg")),
     (b"\x00\x01unknown", "http://x/a.webp", None, ("image/webp", "webp")),             # URL fallback
     (b"\x00\x01unknown", "http://x/a", "image/gif; charset=binary", ("image/gif", "gif")),  # header fallback
@@ -1655,6 +1659,40 @@ def test_reduce_image_shrinks_and_reencodes_as_promised():
 
     assert reduce_image(GIF_BYTES, "image/gif", settings) is None          # GIFs are never touched
     assert reduce_image(b"\x89PNG\r\n\x1a\ncorrupted", "image/png", settings) is None  # undecodable: kept
+
+
+def test_reduce_image_turns_tiff_into_png():
+    tiff = _make_image("TIFF", (40, 30), mode="RGBA")
+    assert tiff.startswith((b"II*\x00", b"MM\x00*"))
+    data, media_type, extension = reduce_image(tiff, "image/tiff", ImageProcessing(max_size=1600))
+    assert (media_type, extension) == ("image/png", "png") and data.startswith(b"\x89PNG")
+    data, media_type, extension = lib.convert_for_readers(_make_image("TIFF", (3000, 1000)), "image/tiff")
+    from PIL import Image as PILImage
+    assert media_type == "image/png" and PILImage.open(io.BytesIO(data)).size == (3000, 1000)   # full size: not a resize
+
+
+@pytest.mark.asyncio
+async def test_tiff_ends_up_in_the_book_as_png_even_without_image_processing():
+    url = "https://lparchive.org/X-COM-Terror-from-the-Deep"
+    page = f"{url}/Update%2001/"
+    session = _FakeSession("never-matches", responses={
+        f"{page}1-map14.tiff.": _FakeResponse(200, _make_image("TIFF", (60, 40), mode="RGBA"), "application/octet-stream")})
+    session.responses[page] = _FakeResponse(200, b'<div id="content"><img src="1-map14.tiff."/></div>')
+    for processing in (None, ImageProcessing(max_size=1600)):
+        messages = []
+        with tempfile.TemporaryDirectory() as d:
+            await asyncio.wait_for(do(url, f"{d}/book.epub", session, messages.append, image_processing=processing), timeout=30)
+            with zipfile.ZipFile(f"{d}/book.epub") as z:
+                names = z.namelist()
+                opf = z.read("EPUB/content.opf").decode()
+                chapter = z.read("EPUB/update_0.xhtml").decode()
+                assert "missing-image" not in chapter
+                shown = re.search(r'src="(images/[0-9a-f]+\.png)"', chapter).group(1)   # the map, now a PNG
+                from PIL import Image as PILImage
+                converted = PILImage.open(io.BytesIO(z.read(f"EPUB/{shown}")))
+                assert converted.format == "PNG" and converted.size == (60, 40)
+        assert not any(n.endswith((".tiff", ".tif")) for n in names) and "image/tiff" not in opf
+        assert not any("could not be retrieved" in m for m in messages)
 
 
 def test_reduce_image_leaves_animated_gifs_alone_even_when_asked_about_png():

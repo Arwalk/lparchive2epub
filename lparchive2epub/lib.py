@@ -77,14 +77,22 @@ class ImageProcessing:
 
 
 # Formats the optimiser may rewrite. GIF is left alone (animations), SVG is text.
-REDUCIBLE_TYPES = {"image/jpeg", "image/png", "image/webp", "image/bmp"}
+REDUCIBLE_TYPES = {"image/jpeg", "image/png", "image/webp", "image/bmp", "image/tiff"}
+# Formats no EPUB reader displays: converted whether or not --max-image-size was asked for
+UNREADABLE_TYPES = {"image/tiff"}
+
+
+def convert_for_readers(content: bytes, media_type: str) -> tuple[bytes, str, str] | None:
+    """A TIFF (Myth-II-Soulblighter's maps) as PNG, at full size: readers do not show TIFF at all."""
+    return reduce_image(content, media_type, ImageProcessing(max_size=sys.maxsize))
 
 
 def reduce_image(content: bytes, media_type: str, settings: ImageProcessing) -> tuple[bytes, str, str] | None:
     """Shrink an image to at most `settings.max_size` pixels on its longest edge and re-encode it.
 
     JPEG stays JPEG (at `jpeg_quality`), PNG stays PNG. WebP and BMP, which many readers can't show,
-    become PNG (with transparency) or JPEG (without). Returns (bytes, media type, extension), or
+    become PNG (with transparency) or JPEG (without); TIFF, which none shows, becomes PNG (lossless:
+    they are maps and scans). Returns (bytes, media type, extension), or
     None when the image is left untouched: not a reducible format, animated, undecodable, or the
     re-encoded version would not be smaller."""
     if media_type not in REDUCIBLE_TYPES:
@@ -111,7 +119,7 @@ def reduce_image(content: bytes, media_type: str, settings: ImageProcessing) -> 
         if not resized:
             return None  # re-encoding a JPEG that already fits only loses quality
         target = "JPEG"
-    elif media_type == "image/png":
+    elif media_type in ("image/png", "image/tiff"):
         target = "PNG"
     else:  # webp, bmp: pick a format every reader understands
         target = "PNG" if has_alpha else "JPEG"
@@ -292,6 +300,8 @@ IMAGE_SIGNATURES = (
     (b"GIF89a", "gif", "gif"),
     (b"\xff\xd8\xff", "jpeg", "jpg"),
     (b"BM", "bmp", "bmp"),
+    (b"II*\x00", "tiff", "tiff"),   # little-endian TIFF...
+    (b"MM\x00*", "tiff", "tiff"),   # ...and big-endian (Myth-II-Soulblighter's maps)
 )
 IMAGE_EXTENSIONS = {
     "image/jpeg": "jpg",
@@ -300,6 +310,7 @@ IMAGE_EXTENSIONS = {
     "image/webp": "webp",
     "image/bmp": "bmp",
     "image/svg+xml": "svg",
+    "image/tiff": "tiff",
 }
 
 
@@ -330,8 +341,8 @@ def detect_image_type(content: bytes, url: str = "", content_type: str | None = 
     return None
 INTRO_FILE_NAME = "introduction.xhtml"
 
-# Typos in the scheme part of a URL found in some LPs: "hhttp://", "htttp://", "http:/", "http//"...
-FIXABLE_SCHEME = re.compile(r"^h+t+p+(s?)\s*(?::/*|//+)", re.IGNORECASE)
+# Typos in the scheme part of a URL found in some LPs: "hhttp://", "htttp://", "ttp://", "http:/", "http//"...
+FIXABLE_SCHEME = re.compile(r"^h*t+p+(s?)\s*(?::/*|//+)", re.IGNORECASE)
 HAS_SCHEME = re.compile(r"^[a-zA-Z][a-zA-Z0-9+.-]*:")
 # Forum smilies are referenced as "Smilies/emot-x.gif" or "../Smilies/emot-x.gif". Some LPs keep their own
 # copy in <LP>/Smilies/ (Arcanum, Dwarf-Fortress-Headshoots, Grandia...), with bytes of their own and a few
@@ -1120,10 +1131,12 @@ async def _get_image(session: aiohttp.ClientSession, img: Image, registry: Image
                 registry.by_content[raw_hash] = content_future
             try:
                 reduced = None
+                media_type, _ = _detect_or_fail(fetched, img_url)
                 if processing is not None:
-                    media_type, _ = _detect_or_fail(fetched, img_url)
                     # CPU-bound (decode, resize, encode): off the event loop so downloads keep flowing
                     reduced = await asyncio.to_thread(reduce_image, fetched.body, media_type, processing)
+                elif media_type in UNREADABLE_TYPES:
+                    reduced = await asyncio.to_thread(convert_for_readers, fetched.body, media_type)
                 res = await build(fetched, reduced)
             except Exception as e:
                 if content_future is not None:

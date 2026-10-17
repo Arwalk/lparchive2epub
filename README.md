@@ -141,7 +141,8 @@ By default every image is embedded exactly as lparchive.org serves it, which is 
 tablets and for archiving. Some LPs carry very large pictures (a single 17 MB photo is not unheard of)
 that make e-ink readers crawl or crash. `--max-image-size 1600` shrinks anything larger than 1600
 pixels on its longest edge, re-encodes JPEGs at `--jpeg-quality` (85 by default), optimises PNGs and
-converts WebP and BMP, which many readers can't display, to PNG or JPEG. Animated GIFs are left as they
+converts WebP and BMP, which many readers can't display, to PNG or JPEG. TIFF, which no reader displays,
+is converted to PNG whether or not `--max-image-size` is given. Animated GIFs are left as they
 are. A summary of the saving is printed before the book is written.
 
 ## Memory and disk
