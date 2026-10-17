@@ -1594,6 +1594,18 @@ def player_source(element) -> str | None:
 ATTRIBUTES_TO_DROP = {"border", "align", "valign", "bgcolor", "background", "cellpadding", "cellspacing",
                       "hspace", "vspace", "nowrap", "target", "rel"}
 SPOILER_CLASS = "bbc-spoiler"
+# HTML 4 inline elements that XHTML 5 dropped (epubcheck RSC-005 "element not allowed here"), and what
+# shows the same thing today: <tt> is seen in 8 landing pages of the archive, the others are there for
+# completeness. (<u> and <s> are still HTML.)
+LEGACY_INLINE_TAGS = {
+    "tt": ("code", None),
+    "big": ("span", "font-size: larger;"),
+    "strike": ("s", None),
+    "acronym": ("abbr", None),
+    "nobr": ("span", "white-space: nowrap;"),
+    "blink": ("span", None),
+    "marquee": ("span", None),
+}
 # Block-level elements that EPUB does not allow inside a link (or any inline element)
 BLOCK_TAGS = ["p", "div", "blockquote", "ul", "ol", "table", "pre", "h1", "h2", "h3", "h4", "h5", "h6"]
 INLINE_WRAPPERS = ["a", "b", "i", "u", "s", "em", "strong", "span", "small", "sub", "sup", "code"]
@@ -1641,6 +1653,10 @@ def sanitize(soup: BeautifulSoup):
     for center in soup.find_all("center"):
         center.name = "div"
         center["style"] = "text-align: center;"
+    for legacy in soup.find_all(list(LEGACY_INLINE_TAGS)):
+        legacy.name, style = LEGACY_INLINE_TAGS[legacy.name]
+        if style:
+            legacy["style"] = style
 
     unnest_blocks_from_inline(soup)
 

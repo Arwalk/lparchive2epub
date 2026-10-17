@@ -1423,6 +1423,7 @@ def test_sanitize_strips_active_content_and_legacy_markup():
       <a name="part2">anchor</a><a name="part3" id="keep">anchor with id</a>
       <font color="red" size="3" face="Arial">red text</font>
       <center>centered</center>
+      <tt>mono</tt> <big>large</big> <strike>struck</strike> <acronym title="Let's Play">LP</acronym> <nobr>no break</nobr> <blink>hi</blink>
       <table border="1" cellpadding="2" cellspacing="0" align="center"><tr><td valign="top" bgcolor="#fff" nowrap="nowrap">cell</td></tr></table>
       <span style="color: #336699;">speaker colour kept</span>
       <span class="bbc-spoiler" onmouseout="x()" onmouseover="y()" style="color: rgb(0, 0, 0); background-color: rgb(0, 0, 0);">hidden</span>
@@ -1431,6 +1432,11 @@ def test_sanitize_strips_active_content_and_legacy_markup():
     </div>"""
     soup = get_cleaned_html(html)
     out = str(soup)
+    # HTML 4 inline elements XHTML 5 dropped (epubcheck RSC-005 on The-Blackwell-Legacy's <tt>)
+    assert "<code>mono</code>" in out and '<span style="font-size: larger;">large</span>' in out
+    assert "<s>struck</s>" in out and '<abbr title="Let\'s Play">LP</abbr>' in out
+    assert '<span style="white-space: nowrap;">no break</span>' in out and "<span>hi</span>" in out
+    assert not re.search(r"<(tt|big|strike|acronym|nobr|blink)\b", out)
 
     for gone in ("<script", "<noscript", "<style", "<form", "<input", "<button", "<select", "<textarea",
                  "<iframe", "<embed", "<object", "<font", "<center", "<o:p", "onclick", "onmouseout", "onmouseover",
