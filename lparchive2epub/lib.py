@@ -46,13 +46,22 @@ class FetchSettings:
     """How downloads behave: how many at once, how many attempts, and whether to say anything."""
     concurrency: int = DEFAULT_CONCURRENCY
     retries: int = DEFAULT_RETRIES
-    quiet: bool = False
+    quiet: bool = False          # no progress messages through the writer, and no progress bars unless `bars` says so
+    bars: bool | None = None     # progress bars on stderr: None follows `quiet`; True shows them for a quiet build
+                                 # too, for a caller that builds many books under its own bar and wants to see
+                                 # the one in hand advance (the bars nest under its own and clear when done)
     _semaphore: asyncio.Semaphore | None = field(default=None, repr=False, compare=False)
 
     def limit(self) -> asyncio.Semaphore:
         if self._semaphore is None:
             self._semaphore = asyncio.Semaphore(self.concurrency)   # created inside the running loop
         return self._semaphore
+
+    def progress_bar(self, iterable=None, total: int | None = None, desc: str | None = None) -> tqdm:
+        """A bar for one step of the build. Nested under a caller's own bar, it clears once the step is done
+        (tqdm's leave=None), so that caller keeps one line for its run and one for the step in hand."""
+        shown = self.bars if self.bars is not None else not self.quiet
+        return tqdm(iterable, total=total, desc=desc, disable=not shown, leave=None)
 
 @dataclass
 class ImageProcessing:
@@ -1826,7 +1835,7 @@ async def do(url: str, file: str | None, session: aiohttp.ClientSession, writer,
     with spool as spool_dir:
         failures: list[SkippedResource] = []
 
-        with tqdm(total=len(intro.chapters), desc="Getting the updates' pages", disable=fetch.quiet) as pbar:
+        with fetch.progress_bar(total=len(intro.chapters), desc="Getting the updates' pages") as pbar:
             await prefetch_chapters(session, intro.chapters, fetch, pbar)
         say("looking for updates the landing page does not list")
         unlisted = await discover_unlisted_chapters(session, url, intro.chapters, fetch, failures)
@@ -1873,7 +1882,7 @@ async def do(url: str, file: str | None, session: aiohttp.ClientSession, writer,
 
         pages_indexed: list[tuple[float, Page]] = []
 
-        with tqdm(total=len(intro.chapters), desc="Gathering and building pages", disable=fetch.quiet) as pbar:
+        with fetch.progress_bar(total=len(intro.chapters), desc="Gathering and building pages") as pbar:
             q: asyncio.Queue = asyncio.Queue()
 
             async def worker():
@@ -1932,7 +1941,7 @@ async def do(url: str, file: str | None, session: aiohttp.ClientSession, writer,
             raise StrictModeError(format_failures_report(
                 url, failures, "No book was written (--strict). Run again without --strict to build it anyway."))
 
-        for p in tqdm(pages, desc="Adding pages to book", disable=fetch.quiet):
+        for p in fetch.progress_bar(pages, desc="Adding pages to book"):
             add_page(known_images, book, toc, spine, p, intro.language, known_image_pages)
 
         say("preparing book structure")

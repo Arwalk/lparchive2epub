@@ -11,6 +11,7 @@ import zipfile
 from urllib.parse import unquote
 
 import aiohttp
+from tqdm.asyncio import tqdm
 from lparchive2epub.lib import Extractor, Chapters, BeautifulSoup, normalize_url, build_update, Update, Intro, format_failures_report, ISSUES_URL, do, StrictModeError, MissingUpdatesError, ExtractionError, OutputError, check_output_path, detect_image_type, NotFoundError, NetworkError, RetriesExhaustedError, NotALetsPlayError, normalize_lp_url, fetch_with_retries, Fetched, get_cleaned_html, compose_description, parse_lp_date, reduce_image, ImageProcessing, ImageRegistry, FetchSettings, check_cache_path, discover_unlisted_chapters, canonical_slug, safe_file_name, resolve_output_path, resolve_cache_path, CacheError, EXIT_CACHE, EXIT_NOT_FOUND, EXIT_NETWORK, EXIT_OUTPUT, EXIT_INTERRUPTED
 import lparchive2epub.lib as lib
 from lparchive2epub import main as cli
@@ -2361,6 +2362,25 @@ async def test_quiet_keeps_only_the_report():
     assert any(m.startswith("extracting lp from") for m in loud)
     assert len(quiet) == 1 and "could not be retrieved" in quiet[0] and dead in quiet[0]
     assert quiet[0] == loud[-1]
+
+
+@pytest.mark.asyncio
+async def test_quiet_build_can_keep_its_progress_bars(capsys):
+    """bars=True: a quiet build (no messages through the writer) still draws its step bars on stderr, for a
+    caller that builds many books under its own bar; the bars are transient so they nest under it."""
+    url = "https://lparchive.org/X-COM-Terror-from-the-Deep"
+    session = _FakeSession("never-matches")
+    with tempfile.TemporaryDirectory() as d:
+        silent: list[str] = []
+        await asyncio.wait_for(do(url, f"{d}/a.epub", session, silent.append, fetch=FetchSettings(quiet=True)), timeout=30)
+        assert silent == [] and "Gathering and building pages" not in capsys.readouterr().err
+        with tqdm(total=1, desc="run") as run:
+            await asyncio.wait_for(do(url, f"{d}/b.epub", session, silent.append,
+                                      fetch=FetchSettings(quiet=True, bars=True)), timeout=30)
+            bar = FetchSettings(quiet=True, bars=True).progress_bar(total=1, desc="step")
+            assert bar.pos != run.pos and bar.leave is None   # nested under the caller's bar, cleared when done
+            bar.close()
+        assert silent == [] and "Gathering and building pages" in capsys.readouterr().err
 
 
 def test_cli_download_flags(monkeypatch):

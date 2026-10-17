@@ -25,6 +25,9 @@ epubcheck found fault with, with the tool's report and its findings parsed out.
 --max-image-size, --jpeg-quality, --no-cover, --images-in-memory, --concurrency, --retries and --check
 mean the same as for the lparchive2epub command and apply to every book. --check also prints, at the
 end, how many books epubcheck faulted and its most frequent message IDs.
+
+Progress goes to stderr: one bar for the run, naming the LP in hand, and under it the bar of the step
+that LP is at (its pages, its images, the book), so a long LP can be seen advancing.
 """
 import asyncio
 import datetime
@@ -93,7 +96,8 @@ class BuildOptions:
     """What is passed on to every build: the lparchive2epub command's own options."""
     image_processing: ImageProcessing | None = None
     cover: bool = True
-    fetch: FetchSettings = field(default_factory=lambda: FetchSettings(quiet=True))
+    # quiet: the progress messages stay out of the reports; bars: the step in hand still shows under the run's bar
+    fetch: FetchSettings = field(default_factory=lambda: FetchSettings(quiet=True, bars=True))
     spool_images: bool = True
     check: bool = False
 
@@ -168,7 +172,7 @@ async def do(arguments):
     options = BuildOptions(
         image_processing=ImageProcessing(arguments.max_image_size, arguments.jpeg_quality) if arguments.max_image_size else None,
         cover=not arguments.no_cover,
-        fetch=FetchSettings(concurrency=arguments.concurrency, retries=arguments.retries, quiet=True),
+        fetch=FetchSettings(concurrency=arguments.concurrency, retries=arguments.retries, quiet=True, bars=True),
         spool_images=not arguments.images_in_memory,
         check=arguments.check)
 
@@ -179,8 +183,9 @@ async def do(arguments):
           + (f", {videos} video LPs skipped" if videos else "") + (f", {done} already built" if done else ""))
 
     failed = []
-    with tqdm(total=len(slugs)) as pbar:
+    with tqdm(total=len(slugs), desc="Building books") as pbar:
         for slug in slugs:
+            pbar.set_postfix_str(slug)
             if not await build_one(slug, output_dir, cache_dir, errors, options=options):
                 failed.append(slug)
                 pbar.write(f"failed: {slug}")
