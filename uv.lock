@@ -363,6 +363,20 @@ wheels = [
 ]
 
 [[package]]
+name = "epubcheck"
+version = "5.3.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "tablib" },
+    { name = "xlrd" },
+    { name = "xlwt" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/1e/f9/d177c9f31925d79b27c6682698d59def1283977741841334fe07be60474f/epubcheck-5.3.0.tar.gz", hash = "sha256:bbbceffba069a0e7fb3de24e1fa340b19073d1a2256a6c350427f521326bd22a", size = 33506596, upload-time = "2026-08-18T10:52:28.875Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/d5/f0/5abcd96da7c5d16e15b4086da946f06918210d671297e3ca5ab5254c0b3d/epubcheck-5.3.0-py3-none-any.whl", hash = "sha256:b320e417e3b32d08981a66c07f17c7b3b0e3efd2d6aeaca1c5b69ea1d9ce4882", size = 33518122, upload-time = "2026-08-18T10:52:25.845Z" },
+]
+
+[[package]]
 name = "frozenlist"
 version = "1.8.0"
 source = { registry = "https://pypi.org/simple" }
@@ -500,9 +514,15 @@ dependencies = [
     { name = "tqdm" },
 ]
 
+[package.optional-dependencies]
+check = [
+    { name = "epubcheck" },
+]
+
 [package.dev-dependencies]
 dev = [
     { name = "coverage" },
+    { name = "epubcheck" },
     { name = "pytest" },
     { name = "pytest-asyncio" },
     { name = "ruff" },
@@ -514,13 +534,16 @@ requires-dist = [
     { name = "aiohttp-client-cache", extras = ["all"], specifier = ">=0.14" },
     { name = "beautifulsoup4", specifier = ">=4.12.2,<5" },
     { name = "ebooklib", specifier = ">=0.20" },
+    { name = "epubcheck", marker = "extra == 'check'", specifier = ">=5.3.0" },
     { name = "pillow", specifier = "==12.3.0" },
     { name = "tqdm", specifier = ">=4.66.4,<5" },
 ]
+provides-extras = ["check"]
 
 [package.metadata.requires-dev]
 dev = [
     { name = "coverage", specifier = ">=7.4.0,<8" },
+    { name = "epubcheck", specifier = ">=5.3.0" },
     { name = "pytest", specifier = ">=9,<10" },
     { name = "pytest-asyncio", specifier = ">=0.26.0" },
     { name = "ruff", specifier = ">=0.17.1" },
@@ -1056,6 +1079,15 @@ wheels = [
 ]
 
 [[package]]
+name = "tablib"
+version = "3.10.0"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/96/b9/59d9c8b9c34642e7a718e8a1a7a91af3eb9b48f79bac794263702d41519c/tablib-3.10.0.tar.gz", hash = "sha256:781cfa9a42de8f33c52aff857fd0a04e483de4fd1c53eaaa9a6aeac62bad11de", size = 127128, upload-time = "2026-07-31T17:30:15.577Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/fc/0f/3ae17545ff976687f679ed3a101df7017135ee04769e858a4ccea0cc3f3e/tablib-3.10.0-py3-none-any.whl", hash = "sha256:5721bf3a52d491f8f843628a3a3200db164f6ad9e92fb6eaa64dc3f945f30ad9", size = 50170, upload-time = "2026-07-31T17:30:04.925Z" },
+]
+
+[[package]]
 name = "tqdm"
 version = "4.67.3"
 source = { registry = "https://pypi.org/simple" }
@@ -1144,6 +1176,24 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/79/d9/7cfd5a312760ac4dd8bf0184a6ee9e43c33e47f3dadc303032ce012b8fa3/wrapt-1.17.3-cp314-cp314t-win_amd64.whl", hash = "sha256:73d496de46cd2cdbdbcce4ae4bcdb4afb6a11234a1df9c085249d55166b95116", size = 41334, upload-time = "2025-08-12T05:53:14.178Z" },
     { url = "https://files.pythonhosted.org/packages/46/78/10ad9781128ed2f99dbc474f43283b13fea8ba58723e98844367531c18e9/wrapt-1.17.3-cp314-cp314t-win_arm64.whl", hash = "sha256:f38e60678850c42461d4202739f9bf1e3a737c7ad283638251e79cc49effb6b6", size = 38471, upload-time = "2025-08-12T05:52:57.784Z" },
     { url = "https://files.pythonhosted.org/packages/1f/f6/a933bd70f98e9cf3e08167fc5cd7aaaca49147e48411c0bd5ae701bb2194/wrapt-1.17.3-py3-none-any.whl", hash = "sha256:7171ae35d2c33d326ac19dd8facb1e82e5fd04ef8c6c0e394d7af55a55051c22", size = 23591, upload-time = "2025-08-12T05:53:20.674Z" },
+]
+
+[[package]]
+name = "xlrd"
+version = "2.0.2"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/07/5a/377161c2d3538d1990d7af382c79f3b2372e880b65de21b01b1a2b78691e/xlrd-2.0.2.tar.gz", hash = "sha256:08b5e25de58f21ce71dc7db3b3b8106c1fa776f3024c54e45b45b374e89234c9", size = 100167, upload-time = "2025-06-14T08:46:39.039Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/1a/62/c8d562e7766786ba6587d09c5a8ba9f718ed3fa8af7f4553e8f91c36f302/xlrd-2.0.2-py2.py3-none-any.whl", hash = "sha256:ea762c3d29f4cca48d82df517b6d89fbce4db3107f9d78713e48cd321d5c9aa9", size = 96555, upload-time = "2025-06-14T08:46:37.766Z" },
+]
+
+[[package]]
+name = "xlwt"
+version = "1.3.0"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/06/97/56a6f56ce44578a69343449aa5a0d98eefe04085d69da539f3034e2cd5c1/xlwt-1.3.0.tar.gz", hash = "sha256:c59912717a9b28f1a3c2a98fd60741014b06b043936dcecbc113eaaada156c88", size = 153929, upload-time = "2017-08-22T06:47:16.498Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/44/48/def306413b25c3d01753603b1a222a011b8621aed27cd7f89cbc27e6b0f4/xlwt-1.3.0-py2.py3-none-any.whl", hash = "sha256:a082260524678ba48a297d922cc385f58278b8aa68741596a87de01a9c628b2e", size = 99981, upload-time = "2017-08-22T06:47:15.281Z" },
 ]
 
 [[package]]

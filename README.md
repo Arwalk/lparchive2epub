@@ -154,6 +154,20 @@ it is written. The folder is removed when the build ends, however it ends; if th
 outright, a leftover `lparchive2epub-*` folder can be deleted by hand. `--images-in-memory` keeps every
 image in memory instead, as earlier versions did, which costs several times the book's size.
 
+## Checking the book
+
+`--check` validates the written book with [epubcheck](https://www.w3.org/publishing/epubcheck/), the
+W3C's EPUB checker, and prints what it finds, one line per message with its severity, ID and the file
+and line inside the book. The book is written whether or not epubcheck objects; with `--strict`, errors
+(not warnings) make the run fail with exit code 7. It needs the `check` extra, which brings the
+epubcheck package with the Java program inside it, and a Java runtime on the machine:
+
+`pip install lparchive2epub[check]`
+
+Every finding is the tool's doing, since the book is built from scratch, so the report asks you to
+paste it in an issue. `util/all_archives.py --check` runs the check on every book of an archive-wide
+run and records the findings in its `--errors` file.
+
 ## Exit codes
 
 | code | meaning |
@@ -165,6 +179,7 @@ image in memory instead, as earlier versions did, which costs several times the 
 | 4 | lparchive.org could not be reached or kept failing |
 | 5 | the output file could not be written |
 | 6 | the `--cache` database could not be used (locked, not a database...) |
+| 7 | the book was written, but `--check` found errors (with `--strict`) or epubcheck could not run |
 | 130 | interrupted with Ctrl-C |
 
 ## Known limitations

@@ -1118,6 +1118,8 @@ def _run_cli_with(monkeypatch, capsys, exc):
     (OutputError("Cannot write"), EXIT_OUTPUT, "Cannot write"),
     (StrictModeError("strict report"), 1, "strict report"),
     (MissingUpdatesError("missing report"), 1, "missing report"),
+    (lib.CheckError("The book was written at x, but epubcheck could not run: boom"), lib.EXIT_CHECK, "epubcheck could not run"),
+    (lib.InvalidBookError("check report"), lib.EXIT_CHECK, "check report"),
     (KeyboardInterrupt(), EXIT_INTERRUPTED, "Interrupted. No book was written."),
 ])
 def test_cli_exit_codes_and_messages(monkeypatch, capsys, exc, code, text):
@@ -2333,6 +2335,217 @@ def test_cli_download_flags(monkeypatch):
         with pytest.raises(SystemExit) as exit_info:
             cli.main([*bad, "https://lparchive.org/Some-LP", "out.epub"])
         assert exit_info.value.code == 2
+
+
+EPUBCHECK_JSON = {   # the shape of epubcheck 5.3's --json output, trimmed
+    "messages": [
+        {"ID": "RSC-007", "severity": "ERROR", "message": 'Referenced resource "EPUB/images/missing.png" could not be found in the EPUB.',
+         "locations": [{"path": "EPUB/update_0.xhtml", "line": 71, "column": 70}], "suggestion": None},
+        {"ID": "OPF-003", "severity": "WARNING", "message": 'Item "EPUB/stray.txt" exists in the EPUB, but is not declared in the OPF manifest.',
+         "locations": [{"path": "EPUB/stray.txt", "line": -1, "column": -1}], "suggestion": None},
+        {"ID": "PKG-012", "severity": "FATAL", "message": "File name contains characters disallowed.", "locations": []},
+        {"ID": "ACC-013", "severity": "USAGE", "message": "Content Documents should include a title.", "locations": []},
+    ],
+    "checker": {"checkerVersion": "5.3.0", "nFatal": 1, "nError": 1, "nWarning": 1, "nUsage": 1},
+}
+
+
+def test_epubcheck_findings_are_parsed_reported_and_parsed_back():
+    from lparchive2epub import check
+    result = check.parse_epubcheck(EPUBCHECK_JSON)
+    assert result.version == "5.3.0"
+    assert [(f.severity, f.id, f.where()) for f in result.findings] == [
+        ("ERROR", "RSC-007", "EPUB/update_0.xhtml:71"), ("WARNING", "OPF-003", "EPUB/stray.txt"), ("FATAL", "PKG-012", "")]
+    assert len(result.errors) == 2 and len(result.warnings) == 1       # USAGE advice is not a finding
+
+    report = check.format_check_report("/books/x.epub", result, "outcome line")
+    assert "lparchive2epub: epubcheck 5.3.0 found 2 error(s) and 1 warning(s) in /books/x.epub" in report
+    assert '  - ERROR RSC-007 EPUB/update_0.xhtml:71: Referenced resource "EPUB/images/missing.png" could not be found in the EPUB.' in report
+    assert "  - WARNING OPF-003 EPUB/stray.txt: Item" in report
+    assert "  - FATAL PKG-012: File name contains characters disallowed." in report
+    assert report.index("outcome line") < report.index(ISSUES_URL)
+    assert check.parse_check_report(report) == [
+        {"severity": "ERROR", "id": "RSC-007", "path": "EPUB/update_0.xhtml", "line": 71,
+         "message": 'Referenced resource "EPUB/images/missing.png" could not be found in the EPUB.'},
+        {"severity": "WARNING", "id": "OPF-003", "path": "EPUB/stray.txt", "line": None,
+         "message": 'Item "EPUB/stray.txt" exists in the EPUB, but is not declared in the OPF manifest.'},
+        {"severity": "FATAL", "id": "PKG-012", "path": None, "line": None, "message": "File name contains characters disallowed."},
+    ]
+    assert check.parse_epubcheck({"messages": [], "checker": {"checkerVersion": "5.3.0"}}).findings == []
+    warnings_only = check.CheckResult("5.3.0", result.warnings)
+    assert "found 1 warning(s) in" in check.format_check_report("x.epub", warnings_only, "o")
+
+
+def test_check_availability_is_explained(monkeypatch):
+    from lparchive2epub import check
+    import shutil
+    monkeypatch.setattr(shutil, "which", lambda name: None)
+    reason = check.unavailable_reason()
+    assert reason is not None and "Java" in reason
+    monkeypatch.setattr(shutil, "which", lambda name: "/usr/bin/java")
+    assert check.unavailable_reason() is None
+    # the CLI refuses --check before downloading anything
+    monkeypatch.setattr(check, "unavailable_reason", lambda: "--check needs a Java runtime: 'java' was not found on the PATH")
+    called = []
+
+    async def fake(*args, **kwargs):
+        called.append(kwargs)
+
+    monkeypatch.setattr(cli, "lparchive2epub", fake)
+    with pytest.raises(SystemExit) as exit_info:
+        cli.main(["--check", "https://lparchive.org/Some-LP", "out.epub"])
+    assert exit_info.value.code == 2 and called == []
+    # and passes the flag through when it can
+    monkeypatch.setattr(check, "unavailable_reason", lambda: None)
+
+    async def fake_ok(url, file, session=None, *args, **kwargs):
+        called.append(kwargs)
+        await session.close()
+
+    monkeypatch.setattr(cli, "lparchive2epub", fake_ok)
+    cli.main(["https://lparchive.org/Some-LP", "out.epub"])
+    cli.main(["--check", "https://lparchive.org/Some-LP", "out.epub"])
+    assert [k["check"] for k in called] == [False, True]
+
+
+def _epubcheck_result(*findings):
+    from lparchive2epub import check
+    return check.CheckResult("5.3.0", [check.Finding(*f) for f in findings])
+
+
+@pytest.mark.asyncio
+async def test_check_reports_epubcheck_findings_after_the_book_is_written(monkeypatch):
+    from lparchive2epub import check
+    url = "https://lparchive.org/X-COM-Terror-from-the-Deep"
+    checked = []
+
+    def fake_run(path):
+        checked.append(path)
+        assert os.path.exists(path)                      # the check runs on the written book
+        return fake_run.result
+
+    monkeypatch.setattr(check, "run_epubcheck", fake_run)
+    error = ("ERROR", "RSC-007", 'Referenced resource "EPUB/x.png" could not be found in the EPUB.', "EPUB/update_0.xhtml", 71)
+    warning = ("WARNING", "OPF-003", "Item exists but is not declared.", "EPUB/stray.txt", None)
+    with tempfile.TemporaryDirectory() as d:
+        # findings: reported, the book kept, exit status 0 (no exception)
+        fake_run.result = _epubcheck_result(error, warning)
+        messages = []
+        out = await asyncio.wait_for(do(url, f"{d}/a.epub", _FakeSession("never-matches"), messages.append, check=True), timeout=30)
+        assert checked == [out] and os.path.exists(out)
+        assert "epubcheck 5.3.0 found 1 error(s) and 1 warning(s)" in messages[-1] and "RSC-007" in messages[-1]
+        assert "a strict reader may refuse it" in messages[-1] and ISSUES_URL in messages[-1]
+        # nothing found: no report, a progress line only
+        fake_run.result = _epubcheck_result()
+        messages = []
+        await asyncio.wait_for(do(url, f"{d}/b.epub", _FakeSession("never-matches"), messages.append, check=True), timeout=30)
+        assert not any("lparchive2epub: epubcheck" in m for m in messages)   # no report...
+        assert any("epubcheck 5.3.0: no problems found" in m for m in messages)   # ...a progress line
+        quiet = []
+        await asyncio.wait_for(do(url, f"{d}/c.epub", _FakeSession("never-matches"), quiet.append, check=True,
+                                  fetch=FetchSettings(quiet=True)), timeout=30)
+        assert quiet == []
+        # --strict: errors fail the run (the book is kept), warnings do not
+        fake_run.result = _epubcheck_result(error)
+        with pytest.raises(lib.InvalidBookError, match="--strict was requested") as e:
+            await asyncio.wait_for(do(url, f"{d}/d.epub", _FakeSession("never-matches"), lambda *_: None, strict=True, check=True), timeout=30)
+        assert e.value.exit_code == lib.EXIT_CHECK and os.path.exists(f"{d}/d.epub")
+        fake_run.result = _epubcheck_result(warning)
+        messages = []
+        await asyncio.wait_for(do(url, f"{d}/e.epub", _FakeSession("never-matches"), messages.append, strict=True, check=True), timeout=30)
+        assert "found 1 warning(s)" in messages[-1] and "readers accept the book" in messages[-1]
+        # without --check epubcheck never runs
+        checked.clear()
+        await asyncio.wait_for(do(url, f"{d}/f.epub", _FakeSession("never-matches"), lambda *_: None), timeout=30)
+        assert checked == []
+
+
+def test_run_epubcheck_failures_are_check_errors(monkeypatch):
+    import subprocess
+    from lparchive2epub import check
+
+    class _Completed:
+        def __init__(self, stdout=b"", stderr=b"", returncode=1):
+            self.stdout, self.stderr, self.returncode = stdout, stderr, returncode
+
+    monkeypatch.setattr(subprocess, "run", lambda *a, **k: _Completed(b"", b"Error occurred during initialization of VM\nCould not reserve enough space", 1))
+    with pytest.raises(lib.CheckError, match="Could not reserve enough space") as e:
+        check.run_epubcheck("/books/x.epub")
+    assert e.value.exit_code == lib.EXIT_CHECK and "written at /books/x.epub" in str(e.value)
+
+    def timeout(*a, **k):
+        raise subprocess.TimeoutExpired(a[0], check.CHECK_TIMEOUT)
+
+    monkeypatch.setattr(subprocess, "run", timeout)
+    with pytest.raises(lib.CheckError, match="did not finish"):
+        check.run_epubcheck("/books/x.epub")
+    monkeypatch.setattr(subprocess, "run", lambda *a, **k: _Completed(json.dumps(EPUBCHECK_JSON).encode(), b"", 1))
+    assert len(check.run_epubcheck("/books/x.epub").findings) == 3
+
+
+@pytest.mark.asyncio
+async def test_a_built_book_passes_the_real_epubcheck():
+    """The one check that is not written by hand: epubcheck itself, on a book with pictures, image pages,
+    a cover and an intro. Needs the epubcheck package and Java; skipped without them."""
+    from lparchive2epub import check
+    reason = check.unavailable_reason()
+    if reason:
+        pytest.skip(reason)
+    url = "https://lparchive.org/X-COM-Terror-from-the-Deep"
+    full = f"{url}/Update%2001/full.png"
+    picture = _make_image("PNG", (40, 30))   # a real picture: epubcheck decodes images (PNG_BYTES would be PKG-021)
+    session = _FakeSession("never-matches", responses={full: _FakeResponse(200, picture),
+                                                       f"{url}/Update%2001/shot.png": _FakeResponse(200, picture)})
+    session.responses[f"{url}/Update%2001/"] = _FakeResponse(
+        200, b'<div id="content"><img src="shot.png"/> <a href="full.png">see the full map</a> '
+             b'<a href="https://en.wikipedia.org/wiki/File:X.jpg">wiki</a> <img src="http://img.example/dead.png"/></div>')
+    session.responses["http://img.example/dead.png"] = _FakeResponse(404, b"gone")
+    default_get = session.get
+
+    def real_pictures(url_, **kwargs):   # the landing page's own images too: the fake session's stand-in bytes are not a PNG
+        response = default_get(url_, **kwargs)
+        return _FakeResponse(200, picture) if response._body == PNG_BYTES else response
+
+    session.get = real_pictures
+    messages = []
+    with tempfile.TemporaryDirectory() as d:
+        out = await asyncio.wait_for(do(url, f"{d}/book.epub", session, messages.append, check=True), timeout=120)
+        result = await asyncio.to_thread(check.run_epubcheck, out)
+    assert result.findings == [], check.format_check_report(out, result, "")
+    assert any("no problems found" in m for m in messages)
+
+
+@pytest.mark.asyncio
+async def test_all_archives_records_epubcheck_findings(monkeypatch):
+    from util.all_archives import build_one, BuildOptions, ErrorLog
+    from lparchive2epub import check
+    results = iter([
+        _epubcheck_result(("ERROR", "RSC-007", "missing", "EPUB/update_0.xhtml", 71), ("WARNING", "OPF-003", "stray", "EPUB/s.txt", None)),
+        _epubcheck_result(),
+        _epubcheck_result(("ERROR", "RSC-007", "missing again", "EPUB/update_1.xhtml", 3)),
+    ])
+    monkeypatch.setattr(check, "run_epubcheck", lambda path: next(results))
+    slug = "X-COM-Terror-from-the-Deep"
+    with tempfile.TemporaryDirectory() as d:
+        errors = ErrorLog(f"{d}/errors.jsonl")
+        for n in range(3):   # the same LP three times, in three output directories
+            os.mkdir(f"{d}/{n}")
+            session = _FakeSession("never-matches")
+            assert await asyncio.wait_for(build_one(slug, f"{d}/{n}", f"{d}/{n}", errors, lambda *_: session, BuildOptions(check=True)), timeout=30)
+        with open(f"{d}/errors.jsonl", encoding="utf-8") as f:
+            entries = [json.loads(line) for line in f]
+    assert [(e["slug"], e["kind"]) for e in entries] == [(slug, "epubcheck"), (slug, "epubcheck")]
+    assert "epubcheck 5.3.0 found 1 error(s) and 1 warning(s)" in entries[0]["report"]
+    assert "epubcheck 5.3.0 found 1 error(s) in" in entries[1]["report"]
+    assert entries[0]["messages"] == [
+        {"severity": "ERROR", "id": "RSC-007", "path": "EPUB/update_0.xhtml", "line": 71, "message": "missing"},
+        {"severity": "WARNING", "id": "OPF-003", "path": "EPUB/s.txt", "line": None, "message": "stray"}]
+    assert errors.check_summary() == "epubcheck found fault with 2 book(s); most frequent: RSC-007 2, OPF-003 1"
+    assert ErrorLog(None).check_summary() == "epubcheck found no fault with any book"
+    # without --check nothing is recorded and epubcheck is never run (the iterator is exhausted: a call would fail)
+    with tempfile.TemporaryDirectory() as d:
+        session = _FakeSession("never-matches")
+        assert await asyncio.wait_for(build_one("X-COM-Terror-from-the-Deep", d, d, ErrorLog(None), lambda *_: session), timeout=30)
 
 
 @pytest.mark.parametrize(("title", "expected"), [

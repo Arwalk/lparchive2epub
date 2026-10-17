@@ -20,6 +20,10 @@ dependencies = [
     "pillow==12.3.0",
 ]
 
+[project.optional-dependencies]
+# --check: validate the written book with epubcheck (the package bundles the Java jar; Java is needed)
+check = ["epubcheck>=5.3.0"]
+
 [project.urls]
 Repository = "https://github.com/Arwalk/lparchive2epub"
 
@@ -32,6 +36,7 @@ dev = [
     "coverage>=7.4.0,<8",
     "pytest-asyncio>=0.26.0",
     "ruff>=0.17.1",
+    "epubcheck>=5.3.0",
 ]
 
 [tool.uv]

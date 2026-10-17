@@ -762,6 +762,7 @@ EXIT_NOT_FOUND = 3
 EXIT_NETWORK = 4
 EXIT_OUTPUT = 5
 EXIT_CACHE = 6
+EXIT_CHECK = 7
 EXIT_INTERRUPTED = 130
 
 
@@ -786,6 +787,16 @@ class OutputError(ExtractionError):
 class CacheError(ExtractionError):
     """The --cache database can't be used."""
     exit_code = EXIT_CACHE
+
+
+class CheckError(ExtractionError):
+    """--check: epubcheck could not run or finish. The book was written all the same."""
+    exit_code = EXIT_CHECK
+
+
+class InvalidBookError(ExtractionError):
+    """--check --strict: epubcheck found errors in the book, which was written all the same."""
+    exit_code = EXIT_CHECK
 
 
 def resolve_cache_path(path: str) -> str:
@@ -1531,7 +1542,7 @@ def _chapter_from_page(base: str, slug: str, html: str, num: int, order: float) 
 async def lparchive2epub(url: str, file: str | None = None, root_session: aiohttp.ClientSession | None = None,
                          writer=log, strict: bool = False, allow_missing_updates: bool = False,
                          image_processing: ImageProcessing | None = None, cover: bytes | None | bool = True,
-                         fetch: FetchSettings | None = None, spool_images: bool = True) -> str:
+                         fetch: FetchSettings | None = None, spool_images: bool = True, check: bool = False) -> str:
     """Build the book for `url` at `file` (a path, a directory, or None for "<title>.epub" in the current
     directory). Returns the path of the written book. See `do` for the options."""
     try:
@@ -1541,7 +1552,8 @@ async def lparchive2epub(url: str, file: str | None = None, root_session: aiohtt
     if root_session is None:
         root_session = aiohttp.ClientSession(timeout=CLIENT_TIMEOUT)
     async with root_session as session:
-        return await do(url, file, session, writer, strict, allow_missing_updates, image_processing, cover, fetch, spool_images)
+        return await do(url, file, session, writer, strict, allow_missing_updates, image_processing, cover, fetch,
+                        spool_images, check)
 
 
 tags_to_clean = [
@@ -1745,12 +1757,15 @@ def format_failures_report(url: str, failures: list[SkippedResource], outcome: s
 
 async def do(url: str, file: str | None, session: aiohttp.ClientSession, writer, strict: bool = False,
              allow_missing_updates: bool = False, image_processing: ImageProcessing | None = None,
-             cover: bytes | None | bool = True, fetch: FetchSettings | None = None, spool_images: bool = True) -> str:
+             cover: bytes | None | bool = True, fetch: FetchSettings | None = None, spool_images: bool = True,
+             check: bool = False) -> str:
     """`file`: the book's path, a directory to put "<title>.epub" in, or None for the current directory.
     `cover`: True for a generated text cover, bytes for a custom image, None/False for no cover.
     `writer` gets the final report and summary; progress messages go through it too unless `fetch.quiet`.
     `spool_images`: keep the downloaded images in a temporary directory until the book is written
     (memory then stays flat whatever the size of the LP); False keeps them all in memory.
+    `check`: validate the written book with epubcheck (see lparchive2epub.check) and report its findings;
+    with `strict`, errors raise InvalidBookError (the book is kept).
     Returns the path of the written book."""
     fetch = fetch or FetchSettings()
     say = (lambda *_: None) if fetch.quiet else writer
@@ -1930,4 +1945,19 @@ async def do(url: str, file: str | None, session: aiohttp.ClientSession, writer,
                 url, failures,
                 "Missing images were replaced by a note linking to the original; "
                 "missing updates (--allow-missing-updates) were replaced by a placeholder page linking to the original."))
+        if check:
+            from lparchive2epub.check import run_epubcheck, format_check_report   # optional dependency
+            say("checking the book with epubcheck")
+            result = await asyncio.to_thread(run_epubcheck, file)   # a JVM run: off the event loop
+            if strict and result.errors:
+                raise InvalidBookError(format_check_report(
+                    file, result, f"The book was written at {file} all the same, but --strict was requested."))
+            if result.findings:
+                writer(format_check_report(
+                    file, result,
+                    f"The book was written at {file} all the same; "
+                    + ("a strict reader may refuse it or show it wrong." if result.errors
+                       else "warnings are advice, readers accept the book.")))
+            else:
+                say(f"epubcheck {result.version}: no problems found")
         return file
