@@ -63,11 +63,12 @@ whole archive rather than a handful of pages. `tests/resources/chapters.json` re
 must find on each of those pages (facts and ordered chapters); `util/generate_chapter_golden.py`
 regenerates it after an intended change, and the diff shows exactly which Let's Plays moved.
 Run `pytest -m "not archive"` to skip that archive-wide check while iterating.
-The suite also builds six Let's Plays from the site and compares the books byte for byte with
-`tests/resources/live_checksums.json` (about a minute; `pytest --offline` skips them, but they are the
-only check against the real site, so run them before committing). After an intended change to the
-output, regenerate that file with `uv run python util/live_checksums.py`. The books are deterministic,
-so a mismatch is either the tool or the site having changed.
+The suite also builds six Let's Plays from the site and compares the books' content (every file in
+the EPUB, the tool's version on the title page left out) with `tests/resources/live_checksums.json`
+(about a minute; `pytest --offline` skips them, but they are the only check against the real site, so
+run them before committing). After an intended change to the output, regenerate that file with
+`uv run python util/live_checksums.py`. The books are deterministic, so a mismatch is either the tool
+or the site having changed.
 
 ## Example
 

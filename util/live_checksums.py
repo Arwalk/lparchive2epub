@@ -1,5 +1,6 @@
-"""Regenerate tests/resources/live_checksums.json: the sha256 of the book the tool builds, today,
-for a handful of Let's Plays fetched live from lparchive.org.
+"""Regenerate tests/resources/live_checksums.json: a checksum of the book the tool builds, today,
+for a handful of Let's Plays fetched live from lparchive.org (see book_checksum: the content of the
+book, the tool's version left out).
 
     uv run python util/live_checksums.py [--cache FILE]
 
@@ -12,14 +13,17 @@ import asyncio
 import datetime
 import hashlib
 import json
+import re
 import sys
 import tempfile
+import zipfile
 from pathlib import Path
 
 import aiohttp
 from aiohttp_client_cache import CachedSession, SQLiteBackend
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from lparchive2epub.cover import TITLE_PAGE_FILE_NAME  # noqa: E402
 from lparchive2epub.lib import CLIENT_TIMEOUT, FetchSettings, check_cache_path, lparchive2epub  # noqa: E402
 
 CHECKSUMS = Path(__file__).resolve().parent.parent / "tests" / "resources" / "live_checksums.json"
@@ -38,11 +42,23 @@ LETS_PLAYS = [
 ]
 
 
-def sha256_of(path: str) -> str:
+# The title page says "Converted by lparchive2epub 2.0.0.": the one part of a book that changes with a
+# release and not with the tool's behaviour.
+COLOPHON_VERSION = re.compile(rb"Converted by lparchive2epub [^<]*\.</p>")
+
+
+def book_checksum(path: str) -> str:
+    """sha256 of the book's content: the name and bytes of every file in the EPUB, in order, with the
+    tool's version taken out of the title page. A release must not flip every recorded checksum."""
     digest = hashlib.sha256()
-    with open(path, "rb") as f:
-        for chunk in iter(lambda: f.read(1 << 20), b""):
-            digest.update(chunk)
+    with zipfile.ZipFile(path) as z:
+        for info in z.infolist():
+            data = z.read(info.filename)
+            if info.filename == f"EPUB/{TITLE_PAGE_FILE_NAME}":
+                data = COLOPHON_VERSION.sub(b"Converted by lparchive2epub.</p>", data)
+            digest.update(info.filename.encode("utf-8"))
+            digest.update(b"\0")
+            digest.update(data)
     return digest.hexdigest()
 
 
@@ -55,7 +71,7 @@ async def build_checksum(slug: str, cache_file: str | None) -> str:
     with tempfile.TemporaryDirectory() as d:
         written = await lparchive2epub(f"https://lparchive.org/{slug}", f"{d}/book.epub", session,
                                        writer=lambda *_: None, fetch=FetchSettings(quiet=True))
-        return sha256_of(written)
+        return book_checksum(written)
 
 
 async def main_async(cache_file: str | None):

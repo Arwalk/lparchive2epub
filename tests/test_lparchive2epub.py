@@ -381,6 +381,21 @@ def _live_checksums() -> dict:
         return json.load(f)["lets_plays"]
 
 
+def test_live_checksum_ignores_the_tool_version_but_nothing_else():
+    from util.live_checksums import book_checksum
+
+    def book(version: str, text: str = "hello") -> str:
+        path = tempfile.mktemp(suffix=".epub")
+        with zipfile.ZipFile(path, "w") as z:
+            z.writestr("mimetype", "application/epub+zip")
+            z.writestr("EPUB/title_page.xhtml", f'<p class="colophon">Converted by lparchive2epub {version}.</p>')
+            z.writestr("EPUB/update_0.xhtml", text)
+        return path
+
+    assert book_checksum(book("1.4.2")) == book_checksum(book("2.0.0")) == book_checksum(book("dev"))
+    assert book_checksum(book("2.0.0")) != book_checksum(book("2.0.0", "other text"))
+
+
 @pytest.mark.live
 @pytest.mark.asyncio
 @pytest.mark.parametrize("slug", sorted(_live_checksums()))
