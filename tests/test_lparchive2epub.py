@@ -2484,3 +2484,61 @@ async def test_links_to_images_lead_to_a_page_showing_the_image():
     assert opf.count(f'href="{image_page}"') == 1                         # one page for the picture, linked from two updates
     assert f'<itemref idref="image_{image_hash}" linear="no"/>' in opf    # reachable from the link, skipped when turning pages
     assert image_page not in files["EPUB/nav.xhtml"].decode()
+
+
+# A page the archive serves raw, as the author's source file, instead of through its template: no
+# <div id="content">, the post sits between marker comments (Vanguard Bandits' Contest1/ .. Contest13/).
+RAW_UPDATE_PAGE = """<html>
+
+<head>
+<meta http-equiv="content-type" content="text/html; charset=utf-8" />
+<meta http-equiv="content-language" content="en" />
+</head>
+
+<body>
+<!-- NOTE: Don't change the layout of these, it will be parsed by a script. -->
+
+<!-- Chapter Titles are specified in the TOC in the index -->
+
+<!-- !!DO NOT REMOVE!! BEGIN_CONTENT !!DO NOT REMOVE!! -->
+		Challenges? I'll bite.<br />
+<br />
+<img src="entry.png" /> See <a href="../Update%2001/">the first update</a>.
+<!-- !!DO NOT REMOVE!! END_CONTENT !!DO NOT REMOVE!! -->
+</body>
+</html>
+<!-- date  -->
+"""
+
+
+def test_raw_update_page_is_read_between_its_content_markers():
+    root = "https://lparchive.org/Vanguard-Bandits/"
+    chapters = [Chapters(0, root + "Update%2001/", "Update 01", "update_0.xhtml", "Update%2001/"),
+                Chapters(1, root + "Contest1/", "Simply Simon", "update_1.xhtml", "Contest1/")]
+    update = Extractor.get_update(chapters, get_cleaned_html(RAW_UPDATE_PAGE), chapters[1])
+    out = str(update.content)
+    assert out.startswith('<div id="content">') and out.endswith("</div>")
+    assert "Challenges? I'll bite." in out
+    assert "<!--" not in out   # the markers and the comments around them stay out of the book
+    assert [i.url for i in update.images] == [root + "Contest1/entry.png"]
+    assert 'href="update_0.xhtml"' in out   # links are resolved like on any other page
+
+
+def test_page_without_any_content_block_is_not_an_update_page():
+    chapter = Chapters(0, "https://lparchive.org/Some-LP/Index/", "Index", "update_0.xhtml", "Index/")
+    with pytest.raises(lib.NotAnUpdatePageError, match="not an update page"):
+        Extractor.get_update([chapter], get_cleaned_html("<html><body><p>Not a post.</p></body></html>"), chapter)
+
+
+@pytest.mark.asyncio
+async def test_raw_update_page_ends_up_in_the_book():
+    url = "https://lparchive.org/X-COM-Terror-from-the-Deep"
+    session = _FakeSession("nothing-fails", responses={f"{url}/Update%2005/": _FakeResponse(200, RAW_UPDATE_PAGE.encode())})
+    with tempfile.TemporaryDirectory() as d:
+        out = f"{d}/book.epub"
+        await asyncio.wait_for(do(url, out, session, lambda *_: None), timeout=30)
+        assert len(_chapter_files(out)) == 18
+        with zipfile.ZipFile(out) as z:
+            page = z.read("EPUB/update_4.xhtml").decode()
+    assert "Challenges? I'll bite." in page
+    assert "DO NOT REMOVE" not in page

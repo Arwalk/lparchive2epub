@@ -17,7 +17,7 @@ from typing import List
 from urllib.parse import urlparse, urljoin, urldefrag, unquote, quote
 
 import aiohttp
-from bs4 import BeautifulSoup
+from bs4 import BeautifulSoup, Comment
 from ebooklib import epub
 from ebooklib.epub import EpubHtml, EpubImage, EpubBook
 from tqdm.asyncio import tqdm
@@ -262,6 +262,13 @@ class Update:
 
 
 FIND_FILES = re.compile(r"([.])[^/.]+$")
+# Markers around the post in a raw (un-templated) update page, see Extractor.content_block
+RAW_CONTENT_BEGIN = "BEGIN_CONTENT"
+RAW_CONTENT_END = "END_CONTENT"
+
+
+class NotAnUpdatePageError(RuntimeError):
+    """A chapter's page has no post in it: not an update page."""
 DOT_NOT_IN_A_NUMBER = re.compile(r"(?<!\d)\.|\.(?!\d)")
 # Links to image files, whatever the case of the extension and ignoring any query string or fragment
 IMAGE_FILE_LINK = re.compile(r"\.(jpe?g|png|gif|webp|bmp|svg)(?=[?#]|$)", re.IGNORECASE)
@@ -561,8 +568,35 @@ class Extractor:
         return r
 
     @staticmethod
-    def get_update(chapters: List[Chapters], p: BeautifulSoup, chapter: Chapters) -> Update:
+    def content_block(p: BeautifulSoup):
+        """The post of an update page: <div id="content"> on the archive's templated pages.
+
+        A few pages are served raw, as the author's source file instead of the templated page
+        (Vanguard Bandits' contest entries, linked from the landing page's prose): no <div id="content">,
+        the post sits between <!-- BEGIN_CONTENT --> and <!-- END_CONTENT --> comments. The post is moved
+        into a fresh content div so the rest of the build does not need to know. A page with neither is
+        not an update page (an error page or an index served with status 200)."""
         content = p.find("div", id="content")
+        if content is not None:
+            return content
+        begin = p.find(string=lambda s: isinstance(s, Comment) and RAW_CONTENT_BEGIN in s)
+        if begin is None:
+            raise NotAnUpdatePageError("the page has no content block: not an update page")
+        content = p.new_tag("div", id="content")
+        begin.replace_with(content)
+        node = content.next_sibling
+        while node is not None:
+            following = node.next_sibling
+            if isinstance(node, Comment) and RAW_CONTENT_END in node:
+                node.extract()
+                break
+            content.append(node.extract())
+            node = following
+        return content
+
+    @staticmethod
+    def get_update(chapters: List[Chapters], p: BeautifulSoup, chapter: Chapters) -> Update:
+        content = Extractor.content_block(p)
         Extractor.inline_full_size_images(content)
         images = Extractor.all_images(content, chapter.original_href)
         Extractor.fix_links(content, chapters, chapter.original_href)
