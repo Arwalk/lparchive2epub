@@ -333,11 +333,11 @@ INTRO_FILE_NAME = "introduction.xhtml"
 # Typos in the scheme part of a URL found in some LPs: "hhttp://", "htttp://", "http:/", "http//"...
 FIXABLE_SCHEME = re.compile(r"^h+t+p+(s?)\s*(?::/*|//+)", re.IGNORECASE)
 HAS_SCHEME = re.compile(r"^[a-zA-Z][a-zA-Z0-9+.-]*:")
-# Forum smilies are referenced as "Smilies/emot-x.gif" or "../Smilies/emot-x.gif", which 404 once resolved
-# against the update page. They all live at https://lparchive.org/Smilies/<name> (128/128 answered on
-# 2026-10-17; only Grandia also has a per-LP copy). Matches any lparchive.org URL ending in Smilies/<name>.
-LPARCHIVE_SMILIE = re.compile(r"^https?://(?:www\.)?lparchive\.org/(?:.*/)?Smilies/([^/?#]+)$", re.IGNORECASE)
-SMILIES_URL = "https://lparchive.org/Smilies/"
+# Forum smilies are referenced as "Smilies/emot-x.gif" or "../Smilies/emot-x.gif". Some LPs keep their own
+# copy in <LP>/Smilies/ (Arcanum, Dwarf-Fortress-Headshoots, Grandia...), with bytes of their own and a few
+# names of their own; the site-wide folder https://lparchive.org/Smilies/ has every name the archive-wide
+# run found missing (128/128 on 2026-10-17). Groups: the LP slug, the smilie file name.
+SMILIE_PATH = re.compile(r"^/(?P<lp>[^/]+)/(?:.*/)?Smilies/(?P<name>[^/]+)$", re.IGNORECASE)
 
 
 def normalize_url(url: str) -> str | None:
@@ -352,14 +352,6 @@ def normalize_url(url: str) -> str | None:
     return None
 
 
-def repair_lparchive_url(url: str) -> str:
-    """Point an lparchive.org URL that is known to 404 at where the resource actually lives."""
-    smilie = LPARCHIVE_SMILIE.match(url)
-    if smilie:
-        return SMILIES_URL + smilie.group(1)
-    return url
-
-
 def is_lparchive_url(url: str) -> bool:
     return urlparse(url).hostname in ("lparchive.org", "www.lparchive.org")
 
@@ -369,6 +361,9 @@ def lparchive_fallback_urls(url: str) -> list[str]:
 
     - The archiver saved some files under the literal name "...Pole&amp;Paddle.jpg"; the page's
       "&amp;" was decoded into "&" by the HTML parser, and the file exists only under the entity.
+    - A smilie referenced relative to the update page ("Smilies/emot-x.gif" -> <LP>/Update 3/Smilies/)
+      is in the LP's own Smilies/ folder when it has one, else in the site-wide one (437 of the
+      failures in the archive-wide run).
     - A landing page links its pictures as "62-B04.png", but they live in the LP's Images/ folder
       (Ratchet-Clank-Into-the-Nexus: 50 pictures, 404 in a browser too).
     External URLs are never respelled: their '&' separate real query parameters."""
@@ -378,8 +373,12 @@ def lparchive_fallback_urls(url: str) -> list[str]:
     paths = [parsed.path]
     if "&" in parsed.path and "&amp;" not in parsed.path:
         paths += [p.replace("&", "&amp;") for p in paths]
+    smilie = SMILIE_PATH.match(parsed.path)
+    if smilie:
+        paths += [p for p in (f"/{smilie['lp']}/Smilies/{smilie['name']}", f"/Smilies/{smilie['name']}") if p not in paths]
     segments = parsed.path.split("/")
-    if len(segments) == 3 and all(segments[1:]):   # "/<LP>/<file>": a picture next to the landing page
+    if len(segments) == 3 and all(segments[1:]) and segments[1].lower() != "smilies":
+        # "/<LP>/<file>": a picture next to the landing page
         paths += [p.replace(f"/{segments[1]}/", f"/{segments[1]}/Images/", 1) for p in paths]
     return [urlunsplit(parsed._replace(path=p)) for p in paths[1:]]
 
@@ -541,12 +540,11 @@ class Extractor:
         Returns None when `src` can't be an http(s) URL (mailto:, javascript:, broken scheme...)."""
         src = src.strip().replace("\\", "/")
         if FIXABLE_SCHEME.match(src) or src.startswith("//") or HAS_SCHEME.match(src):
-            url = normalize_url(src)
-            return repair_lparchive_url(url) if url is not None else None
+            return normalize_url(src)
         base = str(root_url)
         if not base.endswith("/"):
             base += "/"
-        return repair_lparchive_url(urljoin(base, src))
+        return urljoin(base, src)
 
     @staticmethod
     def get_image_url(root_url: str, src: str) -> str | None:
@@ -963,6 +961,10 @@ async def fetch_with_retries(session: aiohttp.ClientSession, url: str, max_retri
             raise
         except aiohttp.InvalidURL as e:
             raise NonRetryableError(f"Invalid URL {url}: {e}", url) from e
+        except aiohttp.TooManyRedirects as e:
+            # Renamed LPs (Homeworld-Cataclysm -> cataclysmberry) 301-loop forever between the old and the
+            # new slug for pages that do not exist: trying again would loop again
+            raise NonRetryableError(f"Failed to get resource {url}: too many redirects", url) from e
         except sqlite3.Error as e:
             # The --cache database, not the network: retrying would only hide it behind a network error
             raise CacheError(f"The cache database failed while fetching {url}: {e}") from e

@@ -422,14 +422,11 @@ def test_get_full_url():
     assert Extractor.get_full_url(root, "javascript:void(0)") is None
     # site-absolute paths are relative to the host, not to the page
     assert Extractor.get_full_url(root, "/site_images/x.png") == "https://lparchive.org/site_images/x.png"
-    # forum smilies: resolved against the page they 404, they all live under /Smilies/ at the site root
-    assert Extractor.get_full_url(root, "../Smilies/emot-smith.gif") == "https://lparchive.org/Smilies/emot-smith.gif"
-    assert Extractor.get_full_url(root, "Smilies/emot-smith.gif") == "https://lparchive.org/Smilies/emot-smith.gif"
-    assert Extractor.get_full_url(root, "https://lparchive.org/Dark-Souls/Smilies/emot-colbert.gif") == "https://lparchive.org/Smilies/emot-colbert.gif"
+    # forum smilies resolve like anything else; where they really live is a download-time concern
+    # (see test_lparchive_fallback_urls)
+    assert Extractor.get_full_url(root, "../Smilies/emot-smith.gif") == "https://lparchive.org/Shin-Megami-Tensei-Devil-Summoner/Smilies/emot-smith.gif"
+    assert Extractor.get_full_url(root, "Smilies/emot-smith.gif") == f"{root}Smilies/emot-smith.gif"
     assert Extractor.get_full_url(root, "/Smilies/emot-smith.gif") == "https://lparchive.org/Smilies/emot-smith.gif"
-    # ...but only on lparchive.org: the forum's own copies are left alone
-    assert Extractor.get_full_url(root, "https://fi.somethingawful.com/images/smilies/emot-argh.gif") == "https://fi.somethingawful.com/images/smilies/emot-argh.gif"
-    assert Extractor.get_full_url(root, "https://lpix.org/x/Smilies/emot-argh.gif") == "https://lpix.org/x/Smilies/emot-argh.gif"
     assert Extractor.get_full_url(root, "//lpix.org/a.png") == "https://lpix.org/a.png"
     assert Extractor.get_full_url(root, " img\\sub\\a.png ") == f"{root}img/sub/a.png"
     assert Extractor.get_full_url(root, "https://lpix.org/a.png") == "https://lpix.org/a.png"
@@ -836,7 +833,7 @@ def test_get_image_url_keeps_question_mark_and_hash_in_archived_file_names():
     assert Extractor.get_image_url(root, "//lpix.org/a.php?id=2") == "https://lpix.org/a.php?id=2"
     assert Extractor.get_image_url(root, "https://lparchive.org.evil.example/a.png?1") == "https://lparchive.org.evil.example/a.png?1"
     # and everything get_full_url does still applies
-    assert Extractor.get_image_url(root, "../Smilies/emot-smith.gif") == "https://lparchive.org/Smilies/emot-smith.gif"
+    assert Extractor.get_image_url(root, "../Smilies/emot-smith.gif") == "https://lparchive.org/Advance-Wars/Smilies/emot-smith.gif"
     assert Extractor.get_image_url(root, "javascript:void(0)") is None
     assert Extractor.get_image_url(root, "hhttp://lpix.org/a.png") == "http://lpix.org/a.png"
 
@@ -853,9 +850,16 @@ def test_lparchive_fallback_urls():
     assert lib.lparchive_fallback_urls(f"{root}/Images/62-B04.png") == []
     assert lib.lparchive_fallback_urls(f"{root}/Update%2001/62-B04.png") == []
     assert lib.lparchive_fallback_urls(f"{root}/") == []
-    assert lib.lparchive_fallback_urls("https://lparchive.org/Smilies/emot-argh.gif") == ["https://lparchive.org/Smilies/Images/emot-argh.gif"]
     assert lib.lparchive_fallback_urls(f"{root}/1-a&b.png") == [
         f"{root}/1-a&amp;b.png", f"{root}/Images/1-a&b.png", f"{root}/Images/1-a&amp;b.png"]
+    # smilies: the LP's own Smilies/ folder first (its copies differ, and some names exist only there),
+    # then the site-wide one
+    assert lib.lparchive_fallback_urls("https://lparchive.org/Grandia/Update%20195/Smilies/emot-allears.gif") == [
+        "https://lparchive.org/Grandia/Smilies/emot-allears.gif", "https://lparchive.org/Smilies/emot-allears.gif"]
+    assert lib.lparchive_fallback_urls("https://lparchive.org/Dark-Souls/Smilies/emot-colbert.gif") == [
+        "https://lparchive.org/Smilies/emot-colbert.gif"]
+    assert lib.lparchive_fallback_urls("https://lparchive.org/Smilies/emot-argh.gif") == []
+    assert lib.lparchive_fallback_urls("https://fi.somethingawful.com/images/smilies/emot-argh.gif") == []
 
 
 @pytest.mark.asyncio
@@ -926,15 +930,22 @@ async def test_archived_names_with_url_syntax_are_fetched_and_the_entity_spellin
 
 
 @pytest.mark.asyncio
-async def test_smilies_are_fetched_from_the_site_wide_folder():
+async def test_smilies_come_from_the_lp_s_own_folder_or_else_the_site_wide_one():
     url = "https://lparchive.org/X-COM-Terror-from-the-Deep"
-    smilie_url = "https://lparchive.org/Smilies/emot-allears.gif"
-    wrong_urls = [f"{url}/Update%2001/Smilies/emot-allears.gif", f"{url}/Smilies/emot-allears.gif"]
-    session = _FakeSession("never-matches", responses={smilie_url: _FakeResponse(200, GIF_BYTES, "image/gif")})
-    for wrong in wrong_urls:
-        session.responses[wrong] = _FakeResponse(404, b"not here")   # like the site
-    session.responses[f"{url}/Update%2001/"] = _FakeResponse(
-        200, b'<div id="content"><img src="Smilies/emot-allears.gif"/> and <img src="../Smilies/emot-allears.gif"/></div>')
+    page = f"{url}/Update%2001/"
+    site_wide = "https://lparchive.org/Smilies/emot-allears.gif"
+    own_copy = f"{url}/Smilies/emot-2bong.png"                    # exists only in this LP's folder (Headshoots)
+    session = _FakeSession("never-matches", responses={
+        f"{page}Smilies/emot-allears.gif": _FakeResponse(404, b"not here"),     # like the site: resolved
+        f"{url}/Smilies/emot-allears.gif": _FakeResponse(404, b"not here"),     # against the page, they 404
+        site_wide: _FakeResponse(200, GIF_BYTES, "image/gif"),
+        f"{page}Smilies/emot-2bong.png": _FakeResponse(404, b"not here"),
+        own_copy: _FakeResponse(200, PNG_BYTES, "image/png"),
+        "https://lparchive.org/Smilies/emot-2bong.png": _FakeResponse(404, b"not here"),
+    })
+    session.responses[page] = _FakeResponse(200, (
+        b'<div id="content"><img src="Smilies/emot-allears.gif"/> and <img src="../Smilies/emot-allears.gif"/>'
+        b' <img src="Smilies/emot-2bong.png"/></div>'))
     messages = []
     with tempfile.TemporaryDirectory() as d:
         out = f"{d}/book.epub"
@@ -943,9 +954,10 @@ async def test_smilies_are_fetched_from_the_site_wide_folder():
             chapter = z.read("EPUB/update_0.xhtml").decode()
             gifs = [n for n in z.namelist() if n.startswith("EPUB/images/") and n.endswith(".gif")]
 
-    assert session.requested.count(smilie_url) == 1          # both references share one download
-    assert not any(w in session.requested for w in wrong_urls)
-    assert len(gifs) == 1
+    # the page's own spelling is tried first, so an LP's own copy wins when it has one
+    assert session.requested.index(f"{page}Smilies/emot-allears.gif") < session.requested.index(site_wide)
+    assert own_copy in session.requested and "https://lparchive.org/Smilies/emot-2bong.png" not in session.requested
+    assert len(gifs) == 1                                        # the two references to allears share one file
     assert chapter.count(f'src="{gifs[0].removeprefix("EPUB/")}"') == 2
     assert "missing-image" not in chapter
     assert "Smilies" not in "\n".join(messages)
@@ -1170,6 +1182,52 @@ async def test_fetch_with_retries_returns_body_and_decodes_text():
     assert fetched.body == "caf\u00e9".encode("utf-8") and fetched.text() == "caf\u00e9"
     assert fetched.content_type == "text/html; charset=utf-8"
     assert session.requested == [url]
+
+
+def _redirect_loop(url: str) -> aiohttp.TooManyRedirects:
+    """What aiohttp raises on a renamed LP: a ClientResponseError with status 0 and an empty message."""
+    from multidict import CIMultiDict, CIMultiDictProxy
+    from yarl import URL
+    info = aiohttp.RequestInfo(URL(url), "GET", CIMultiDictProxy(CIMultiDict()), URL(url))
+    return aiohttp.TooManyRedirects(info, ())
+
+
+class _RenamedLpSession(_FakeSession):
+    """X-COM, except that the given pages 301-loop (like a renamed LP's missing updates) instead of answering 404."""
+
+    def __init__(self, looping: set[str]):
+        super().__init__("never-matches")
+        self.looping = looping
+
+    def get(self, url, **kwargs):
+        if url in self.looping:
+            self.requested.append(url)
+            raise _redirect_loop(url)
+        return super().get(url, **kwargs)
+
+
+@pytest.mark.asyncio
+async def test_redirect_loops_fail_at_once_and_end_the_search_for_unlisted_updates_silently(monkeypatch):
+    monkeypatch.setattr(lib, "RETRY_BACKOFF_BASE", 0)
+    url = "https://lparchive.org/Homeworld-Cataclysm/Update%2001/"
+    session = _RenamedLpSession({url})
+    with pytest.raises(lib.NonRetryableError, match="too many redirects") as e:
+        await fetch_with_retries(session, url, max_retries=5)
+    assert session.requested == [url]              # no retries, no backoff
+    assert isinstance(e.value.__cause__, aiohttp.TooManyRedirects)
+
+    # through the build: the probe for the page after the last listed one loops; the book is complete
+    # and nothing is reported, exactly as if the site had answered 404
+    probe = "https://lparchive.org/X-COM-Terror-from-the-Deep/Update%2019/"
+    session = _RenamedLpSession({probe})
+    messages = []
+    with tempfile.TemporaryDirectory() as d:
+        out = f"{d}/book.epub"
+        await asyncio.wait_for(do("https://lparchive.org/X-COM-Terror-from-the-Deep", out, session, messages.append), timeout=30)
+        chapters = _chapter_files(out)
+    assert session.requested.count(probe) == 1
+    assert len(chapters) == 18
+    assert "unlisted" not in "\n".join(messages) and "could not be retrieved" not in "\n".join(messages)
 
 
 @pytest.mark.asyncio
