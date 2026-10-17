@@ -350,6 +350,21 @@ def repair_lparchive_url(url: str) -> str:
     return url
 
 
+def is_lparchive_url(url: str) -> bool:
+    return urlparse(url).hostname in ("lparchive.org", "www.lparchive.org")
+
+
+def lparchive_fallback_urls(url: str) -> list[str]:
+    """Other spellings of an lparchive.org URL worth trying after it answered 404.
+
+    The archiver saved some files under the literal name "...Pole&amp;Paddle.jpg"; the page's
+    "&amp;" was decoded into "&" by the HTML parser, and the file exists only under the entity.
+    External URLs are never respelled: their '&' separate real query parameters."""
+    if is_lparchive_url(url) and "&" in url and "&amp;" not in url:
+        return [url.replace("&", "&amp;")]
+    return []
+
+
 class Extractor:
 
     @staticmethod
@@ -514,6 +529,21 @@ class Extractor:
             base += "/"
         return repair_lparchive_url(urljoin(base, src))
 
+    @staticmethod
+    def get_image_url(root_url: str, src: str) -> str | None:
+        """get_full_url for a picture. A reference to an lparchive.org file (relative, or absolute on
+        that host) names an archived file, and the archiver kept names such as
+        "37-attachment.php?postid=402560042." and "16-60954.jpg?1315256898.": '?' and '#' are
+        file-name characters there, never a query or a fragment, so they are percent-encoded.
+        Absolute URLs elsewhere keep their query string."""
+        src = src.strip().replace("\\", "/")
+        absolute = FIXABLE_SCHEME.match(src) or src.startswith("//") or HAS_SCHEME.match(src)
+        if not absolute:
+            src = src.replace("?", "%3F").replace("#", "%23")
+        url = Extractor.get_full_url(root_url, src)
+        if url is not None and absolute and is_lparchive_url(url):
+            url = url.replace("?", "%3F").replace("#", "%23")
+        return url
 
     @staticmethod
     def inline_full_size_images(content: BeautifulSoup) -> int:
@@ -562,7 +592,7 @@ class Extractor:
                 num=i,
                 src=x['src'],
                 tag=x,
-                url=Extractor.get_full_url(root_url, x["src"]),
+                url=Extractor.get_image_url(root_url, x["src"]),
                 root_url=root_url
             ))
 
@@ -575,7 +605,7 @@ class Extractor:
                 num=i,
                 src=link['href'],
                 tag=link,  # Use the link tag itself
-                url=Extractor.get_full_url(root_url, link['href']),
+                url=Extractor.get_image_url(root_url, link['href']),
                 root_url=root_url
             ))
 
@@ -1002,7 +1032,7 @@ async def _get_image(session: aiohttp.ClientSession, img: Image, registry: Image
         return IndexedEpubImage(img_hash, img_url, new_name, data, len(content))  # old_name: the original URL
 
     try:
-        fetched = await fetch_with_retries(session, img_url, fetch=fetch)
+        fetched = await _fetch_image(session, img_url, fetch)
         raw_hash = get_blake2b_hash(fetched.body)
         if registry is not None and raw_hash in registry.by_content:
             # Same bytes already seen under another URL: share the stored image (it may still be
@@ -1039,6 +1069,22 @@ async def _get_image(session: aiohttp.ClientSession, img: Image, registry: Image
             # The future stays in the registry: the failure is remembered for the rest of the run.
             future.exception()
         raise
+
+async def _fetch_image(session: aiohttp.ClientSession, img_url: str, fetch: FetchSettings | None) -> Fetched:
+    """Download the image, trying the other spellings lparchive may have saved it under after a 404.
+    The error raised is the one for the URL the page gave, the fallbacks being an implementation detail."""
+    try:
+        return await fetch_with_retries(session, img_url, fetch=fetch)
+    except NonRetryableError as first:
+        if first.status != 404:
+            raise
+        for alternative in lparchive_fallback_urls(img_url):
+            try:
+                return await fetch_with_retries(session, alternative, fetch=fetch)
+            except NonRetryableError:
+                continue
+        raise first
+
 
 def _detect_or_fail(fetched: Fetched, img_url: str) -> tuple[str, str]:
     detected = detect_image_type(fetched.body, img_url, fetched.content_type)

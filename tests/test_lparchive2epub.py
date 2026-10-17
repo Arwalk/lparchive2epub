@@ -778,6 +778,76 @@ async def test_image_media_type_comes_from_content_and_non_images_are_skipped():
     assert dead_host_url in report and "Not an image" in report and "text/html" in report
 
 
+def test_get_image_url_keeps_question_mark_and_hash_in_archived_file_names():
+    root = "https://lparchive.org/Advance-Wars/Update%2001/"
+    assert Extractor.get_image_url(root, "37-attachment.php?postid=402560042.") == f"{root}37-attachment.php%3Fpostid=402560042."
+    assert Extractor.get_image_url(root, "16-60954.jpg?1315256898") == f"{root}16-60954.jpg%3F1315256898"
+    assert Extractor.get_image_url(root, "../Images/pic.png#frag") == "https://lparchive.org/Advance-Wars/Images/pic.png%23frag"
+    assert Extractor.get_image_url(root, "21-Ashley?.png") == f"{root}21-Ashley%3F.png"
+    # the same for absolute references to lparchive.org (the landing page writes them that way)
+    assert Extractor.get_image_url("https://lparchive.org/Dead-Rising-2", "https://lparchive.org/Dead-Rising-2/Images/13-Kkg3RCP.jpg?1.") == "https://lparchive.org/Dead-Rising-2/Images/13-Kkg3RCP.jpg%3F1."
+    assert Extractor.get_image_url(root, "hhttp://lparchive.org/Some-LP/Images/a.png?1") == "http://lparchive.org/Some-LP/Images/a.png%3F1"
+    # absolute URLs elsewhere keep a real query string and fragment
+    assert Extractor.get_image_url(root, "https://lpix.org/a.png?x=1#f") == "https://lpix.org/a.png?x=1#f"
+    assert Extractor.get_image_url(root, "//lpix.org/a.php?id=2") == "https://lpix.org/a.php?id=2"
+    assert Extractor.get_image_url(root, "https://lparchive.org.evil.example/a.png?1") == "https://lparchive.org.evil.example/a.png?1"
+    # and everything get_full_url does still applies
+    assert Extractor.get_image_url(root, "../Smilies/emot-smith.gif") == "https://lparchive.org/Smilies/emot-smith.gif"
+    assert Extractor.get_image_url(root, "javascript:void(0)") is None
+    assert Extractor.get_image_url(root, "hhttp://lpix.org/a.png") == "http://lpix.org/a.png"
+
+
+def test_lparchive_fallback_urls():
+    assert lib.lparchive_fallback_urls("https://lparchive.org/Echo-Night/Images/40-Pole&Paddle.jpg") == [
+        "https://lparchive.org/Echo-Night/Images/40-Pole&amp;Paddle.jpg"]
+    assert lib.lparchive_fallback_urls("https://lparchive.org/Echo-Night/Images/40-Pole&amp;Paddle.jpg") == []
+    assert lib.lparchive_fallback_urls("https://lparchive.org/Echo-Night/Images/40-Pole.jpg") == []
+    assert lib.lparchive_fallback_urls("https://img.example/show.php?a=1&b=2") == []   # a real query string
+
+
+@pytest.mark.asyncio
+async def test_archived_names_with_url_syntax_are_fetched_and_the_entity_spelling_is_tried_after_a_404():
+    url = "https://lparchive.org/X-COM-Terror-from-the-Deep"
+    page = f"{url}/Update%2001/"
+    attachment_as_query = f"{page}37-attachment.php?postid=402560042."       # what urljoin would produce
+    attachment = f"{page}37-attachment.php%3Fpostid=402560042."
+    pole_decoded = f"{url}/Images/40-Pole&Paddle.jpg"                         # what the HTML parser yields
+    pole_entity = f"{url}/Images/40-Pole&amp;Paddle.jpg"                      # the archived file name
+    stored_decoded = f"{page}41-Fish&Chips.jpg"                               # a '&' name that does exist as such
+    external = "http://img.example/show.php?a=1&b=2"                          # external 404: not respelled
+    session = _FakeSession("never-matches", responses={
+        attachment_as_query: _FakeResponse(404, b"not here"),
+        attachment: _FakeResponse(200, PNG_BYTES, "application/octet-stream"),
+        pole_decoded: _FakeResponse(404, b"not here"),
+        pole_entity: _FakeResponse(200, JPEG_BYTES, "image/jpeg"),
+        stored_decoded: _FakeResponse(200, GIF_BYTES, "image/gif"),
+        external: _FakeResponse(404, b"gone"),
+    })
+    session.responses[page] = _FakeResponse(200, (
+        '<div id="content"><img src="37-attachment.php?postid=402560042."/>'
+        '<img src="../Images/40-Pole&amp;Paddle.jpg"/>'
+        '<img src="41-Fish&amp;Chips.jpg"/>'
+        f'<img src="{external.replace("&", "&amp;")}"/></div>').encode())
+    messages = []
+    with tempfile.TemporaryDirectory() as d:
+        out = f"{d}/book.epub"
+        await asyncio.wait_for(do(url, out, session, messages.append), timeout=30)
+        with zipfile.ZipFile(out) as z:
+            chapter = z.read("EPUB/update_0.xhtml").decode()
+            stored = [n for n in z.namelist() if n.startswith("EPUB/images/")]
+
+    assert attachment in session.requested and attachment_as_query not in session.requested
+    assert session.requested.count(pole_decoded) == 1 and session.requested.count(pole_entity) == 1
+    assert session.requested.index(pole_decoded) < session.requested.index(pole_entity)
+    assert session.requested.count(stored_decoded) == 1 and stored_decoded.replace("&", "&amp;") not in session.requested
+    assert session.requested.count(external) == 1 and external.replace("&", "&amp;") not in session.requested
+    assert sorted(n.rsplit(".", 1)[1] for n in stored if "cover" not in n) == ["gif", "jpg", "png"]
+    assert chapter.count("missing-image") == 1 and f'href="{external.replace("&", "&amp;")}"' in chapter
+    report = "\n".join(messages)
+    assert external in report and "status code: 404" in report
+    assert "Pole" not in report and "attachment" not in report and "Fish" not in report
+
+
 @pytest.mark.asyncio
 async def test_smilies_are_fetched_from_the_site_wide_folder():
     url = "https://lparchive.org/X-COM-Terror-from-the-Deep"
