@@ -803,6 +803,39 @@ def test_lparchive_fallback_urls():
     assert lib.lparchive_fallback_urls("https://lparchive.org/Echo-Night/Images/40-Pole&amp;Paddle.jpg") == []
     assert lib.lparchive_fallback_urls("https://lparchive.org/Echo-Night/Images/40-Pole.jpg") == []
     assert lib.lparchive_fallback_urls("https://img.example/show.php?a=1&b=2") == []   # a real query string
+    # a picture referenced next to the landing page normally lives in the LP's Images/ folder
+    root = "https://lparchive.org/Ratchet-Clank-Into-the-Nexus"
+    assert lib.lparchive_fallback_urls(f"{root}/62-B04.png") == [f"{root}/Images/62-B04.png"]
+    assert lib.lparchive_fallback_urls(f"{root}/Images/62-B04.png") == []
+    assert lib.lparchive_fallback_urls(f"{root}/Update%2001/62-B04.png") == []
+    assert lib.lparchive_fallback_urls(f"{root}/") == []
+    assert lib.lparchive_fallback_urls("https://lparchive.org/Smilies/emot-argh.gif") == ["https://lparchive.org/Smilies/Images/emot-argh.gif"]
+    assert lib.lparchive_fallback_urls(f"{root}/1-a&b.png") == [
+        f"{root}/1-a&amp;b.png", f"{root}/Images/1-a&b.png", f"{root}/Images/1-a&amp;b.png"]
+
+
+@pytest.mark.asyncio
+async def test_landing_page_picture_missing_the_images_folder_is_fetched_from_it():
+    root = "https://lparchive.org/Ratchet-Clank-Into-the-Nexus"
+    wrong, right = f"{root}/62-B04.png", f"{root}/Images/62-B04.png"
+    session = _FakeSession("never-matches", responses={
+        wrong: _FakeResponse(404, b"not here"), right: _FakeResponse(200, PNG_BYTES, "image/png")})
+    tag = BeautifulSoup('<a href="62-B04.png" target="_blank">B04</a>', "html.parser").a
+    image = lib.Image(num=0, src="62-B04.png", tag=tag, url=Extractor.get_image_url(root, "62-B04.png"), root_url=root)
+    assert image.url == wrong
+
+    stored = await asyncio.wait_for(lib._get_image(session, image, ImageRegistry()), timeout=5)
+
+    assert session.requested == [wrong, right]
+    assert stored.old_name == wrong          # the page's reference is what gets rewritten
+    assert stored.new_name.endswith(".png")
+
+    # a picture that is nowhere stays reported under the URL the page gave
+    nowhere = lib.Image(num=1, src="99-X.png", tag=tag, url=f"{root}/99-X.png", root_url=root)
+    session.responses[f"{root}/99-X.png"] = _FakeResponse(404, b"no")
+    session.responses[f"{root}/Images/99-X.png"] = _FakeResponse(404, b"no")
+    with pytest.raises(lib.NonRetryableError, match=re.escape(f"{root}/99-X.png, status code: 404")):
+        await asyncio.wait_for(lib._get_image(session, nowhere, ImageRegistry()), timeout=5)
 
 
 @pytest.mark.asyncio

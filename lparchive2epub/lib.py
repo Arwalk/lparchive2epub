@@ -14,7 +14,7 @@ import zipfile
 from dataclasses import dataclass, field
 from hashlib import blake2b
 from typing import List
-from urllib.parse import urlparse, urljoin, urldefrag, unquote, quote
+from urllib.parse import urlparse, urlsplit, urlunsplit, urljoin, urldefrag, unquote, quote
 
 import aiohttp
 from bs4 import BeautifulSoup, Comment
@@ -355,14 +355,23 @@ def is_lparchive_url(url: str) -> bool:
 
 
 def lparchive_fallback_urls(url: str) -> list[str]:
-    """Other spellings of an lparchive.org URL worth trying after it answered 404.
+    """Other spellings of an lparchive.org URL worth trying, in order, after it answered 404.
 
-    The archiver saved some files under the literal name "...Pole&amp;Paddle.jpg"; the page's
-    "&amp;" was decoded into "&" by the HTML parser, and the file exists only under the entity.
+    - The archiver saved some files under the literal name "...Pole&amp;Paddle.jpg"; the page's
+      "&amp;" was decoded into "&" by the HTML parser, and the file exists only under the entity.
+    - A landing page links its pictures as "62-B04.png", but they live in the LP's Images/ folder
+      (Ratchet-Clank-Into-the-Nexus: 50 pictures, 404 in a browser too).
     External URLs are never respelled: their '&' separate real query parameters."""
-    if is_lparchive_url(url) and "&" in url and "&amp;" not in url:
-        return [url.replace("&", "&amp;")]
-    return []
+    if not is_lparchive_url(url):
+        return []
+    parsed = urlsplit(url)   # not urlparse: it would take "Pole&amp;Paddle.jpg" apart at the ';'
+    paths = [parsed.path]
+    if "&" in parsed.path and "&amp;" not in parsed.path:
+        paths += [p.replace("&", "&amp;") for p in paths]
+    segments = parsed.path.split("/")
+    if len(segments) == 3 and all(segments[1:]):   # "/<LP>/<file>": a picture next to the landing page
+        paths += [p.replace(f"/{segments[1]}/", f"/{segments[1]}/Images/", 1) for p in paths]
+    return [urlunsplit(parsed._replace(path=p)) for p in paths[1:]]
 
 
 class Extractor:
