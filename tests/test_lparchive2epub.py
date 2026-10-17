@@ -963,6 +963,87 @@ async def test_smilies_come_from_the_lp_s_own_folder_or_else_the_site_wide_one()
     assert "Smilies" not in "\n".join(messages)
 
 
+def test_classify_failure():
+    archive, elsewhere = "https://lparchive.org/Some-LP/Update%2001/a.png", "http://img.example/a.png"
+    not_an_image = lib.NotAnImageError("Not an image: the server answered with image/png (0 bytes)")
+    assert lib.classify_failure(not_an_image, archive) == lib.ARCHIVE_COPY
+    assert lib.classify_failure(not_an_image, elsewhere) == lib.WEB_PAGE
+    for status in (403, 404, 410):
+        gone = lib.NonRetryableError(f"Failed to get resource {elsewhere}, status code: {status}", elsewhere, status)
+        assert lib.classify_failure(gone, elsewhere) == lib.GONE
+        assert lib.classify_failure(gone, archive) == lib.OTHER          # a 404 on the archive may be the tool's doing
+    assert lib.classify_failure(lib.NonRetryableError("Malformed URL that could not be repaired: hhttp://"), None) == lib.OTHER
+    assert lib.classify_failure(lib.NonRetryableError("teapot", elsewhere, 418), elsewhere) == lib.OTHER
+    unreachable = RetriesExhaustedError(f"Failed to get resource {elsewhere} after 5 retries: Cannot connect to host", elsewhere)
+    assert lib.classify_failure(unreachable, elsewhere) == lib.DEAD_HOST
+    assert lib.classify_failure(unreachable, archive) == lib.TEMPORARY
+    server_error = RetriesExhaustedError(f"Failed to get resource {elsewhere} after 5 retries: status code: 503", elsewhere, 503)
+    assert lib.classify_failure(server_error, elsewhere) == lib.TEMPORARY
+    assert lib.classify_failure(AttributeError("'NoneType' object has no attribute 'find_all'"), archive) == lib.OTHER
+
+
+def test_failures_report_groups_by_cause_and_asks_for_an_issue_only_when_it_can_help():
+    page = "https://lparchive.org/Some-LP/Update%2001/"
+    beyond_reach = [
+        lib.SkippedResource(page, "http://i.minus.com/a.png", "Failed ... getaddrinfo failed", lib.DEAD_HOST),
+        lib.SkippedResource(page, "http://i.minus.com/b.png", "Failed ... getaddrinfo failed", lib.DEAD_HOST),
+        lib.SkippedResource(page, "http://xs.to/c.png", "Failed ... getaddrinfo failed", lib.DEAD_HOST),
+        lib.SkippedResource(page, "http://tinypic.com/d.png", "Failed ... getaddrinfo failed", lib.DEAD_HOST),
+        lib.SkippedResource(page, "http://waffleimages.com/e.png", "Failed ... getaddrinfo failed", lib.DEAD_HOST),
+        lib.SkippedResource(page, "http://abload.de/f.png", "Failed ..., status code: 410", lib.GONE),
+        lib.SkippedResource(page, "12-shot.png", "Not an image: the server answered with image/png (0 bytes)", lib.ARCHIVE_COPY),
+        lib.SkippedResource(page, "http://photobucket.com/g.png", "Not an image: ... text/html (7584 bytes)", lib.WEB_PAGE),
+        lib.SkippedResource(page, "http://slow.example/h.png", "Failed ... after 5 retries: status code: 503", lib.TEMPORARY),
+        lib.SkippedResource(page, "http://abload.de/f.png", "Failed ..., status code: 410", lib.GONE),   # a duplicate
+    ]
+    report = format_failures_report("https://lparchive.org/Some-LP", beyond_reach, "outcome line")
+    assert "9 resource(s) could not be retrieved" in report
+    assert ISSUES_URL not in report and "open an issue" not in report
+    assert "5 image(s) on hosts that no longer exist or do not answer (i.minus.com 2, tinypic.com 1, waffleimages.com 1 and 1 more host):" in report
+    assert "1 image(s) their host no longer serves (HTTP 403, 404 or 410; abload.de 1):" in report
+    assert "1 image(s) whose copy on lparchive.org is empty, or is a web page saved under the image's name:" in report
+    assert "1 image(s) whose host answers an empty file or a web page instead of the picture (hotlink protection, parking page; photobucket.com 1):" in report
+    assert "1 resource(s) whose host had trouble (server error, disconnection); try again later:" in report
+    assert report.count("url:    http://abload.de/f.png") == 1
+    assert report.index("hosts that no longer exist") < report.index("no longer serves") < report.index("copy on lparchive.org") \
+        < report.index("web page instead") < report.index("had trouble") < report.index("outcome line")
+
+    needs_a_look = beyond_reach + [lib.SkippedResource(page, "hhttp://", "Malformed URL that could not be repaired: hhttp://")]
+    report = format_failures_report("https://lparchive.org/Some-LP", needs_a_look, "outcome line")
+    assert "1 resource(s) that failed for a reason this tool may be able to do something about:" in report
+    assert report.index("outcome line") < report.index(f"Please open an issue at {ISSUES_URL}")
+    # missing updates keep their wording
+    report = format_failures_report("https://lparchive.org/Some-LP", [lib.SkippedResource(page, page, "status code: 404")],
+                                    "outcome", what="update(s)")
+    assert "1 update(s) could not be retrieved" in report and "1 update(s) that failed" in report and ISSUES_URL in report
+
+
+@pytest.mark.asyncio
+async def test_report_asks_for_an_issue_only_for_failures_the_tool_may_handle():
+    url = "https://lparchive.org/X-COM-Terror-from-the-Deep"
+    page = f"{url}/Update%2001/"
+    gone, broken, archive_404 = "http://img.example/gone.png", f"{page}3-empty.png", f"{page}4-missing.png"
+    session = _FakeSession("never-matches", responses={
+        gone: _FakeResponse(404, b"gone"),
+        broken: _FakeResponse(200, b"", "image/png"),
+        archive_404: _FakeResponse(404, b"not here"),
+    })
+    for name, body in (("beyond-reach", f'<img src="{gone}"/><img src="3-empty.png"/>'),
+                       ("needs-a-look", f'<img src="{gone}"/><img src="4-missing.png"/>')):
+        session.responses[page] = _FakeResponse(200, f'<div id="content">{body}</div>'.encode())
+        messages = []
+        with tempfile.TemporaryDirectory() as d:
+            await asyncio.wait_for(do(url, f"{d}/book.epub", session, messages.append), timeout=30)
+        report = messages[-1]
+        assert "2 resource(s) could not be retrieved" in report and gone in report
+        if name == "beyond-reach":
+            assert "their host no longer serves" in report and "copy on lparchive.org is empty" in report
+            assert ISSUES_URL not in report
+        else:
+            assert "may be able to do something about" in report and "4-missing.png" in report
+            assert ISSUES_URL in report
+
+
 @pytest.mark.asyncio
 async def test_landing_page_404_is_a_not_found_error():
     url = "https://lparchive.org/This-LP-Does-Not-Exist"

@@ -711,6 +711,10 @@ class NonRetryableError(FetchError):
     """A failure that will not go away by trying again (malformed URL, 404...)."""
 
 
+class NotAnImageError(NonRetryableError):
+    """The server answered 200 with something that is not a picture (an empty body, an HTML page)."""
+
+
 class RetriesExhaustedError(FetchError):
     """The resource was still unavailable after all retries (network trouble, 5xx...)."""
 
@@ -720,6 +724,35 @@ class SkippedResource:
     page: str
     url: str
     reason: str
+    cause: str = "other"   # one of FAILURE_CLASSES, see classify_failure
+
+
+# Why a resource could not be retrieved, from the tool's point of view: everything but OTHER is beyond its
+# reach, so the report only asks for a bug report when an OTHER failure is present. In report order.
+DEAD_HOST = "dead-host"        # the external host does not resolve, refuses connections or never answers
+GONE = "gone"                  # the external host answers 403/404/410 for the picture
+ARCHIVE_COPY = "archive-copy"  # lparchive.org's own copy is empty or an HTML page saved under an image name
+WEB_PAGE = "web-page"          # the external host answers an HTML page (hotlink protection, parking page)
+TEMPORARY = "temporary"        # server errors, disconnections: not gone, just not now
+OTHER = "other"                # a 404 on lparchive.org, a malformed URL, a crash: maybe the tool's doing
+FAILURE_CLASSES = (DEAD_HOST, GONE, ARCHIVE_COPY, WEB_PAGE, TEMPORARY, OTHER)
+
+
+def classify_failure(e: Exception, url: str | None) -> str:
+    """Which of FAILURE_CLASSES the failure `e` of fetching `url` (the resolved URL, None when it could
+    not be built) falls into."""
+    on_archive = url is not None and is_lparchive_url(url)
+    if isinstance(e, NotAnImageError):
+        return ARCHIVE_COPY if on_archive else WEB_PAGE
+    if isinstance(e, NonRetryableError):
+        if e.status in (403, 404, 410) and not on_archive:
+            return GONE
+        return OTHER
+    if isinstance(e, RetriesExhaustedError):
+        if on_archive or e.status is not None:
+            return TEMPORARY
+        return DEAD_HOST
+    return OTHER
 
 
 # Exit codes of the command line tool. argparse uses 2 for usage errors.
@@ -1119,8 +1152,8 @@ def _detect_or_fail(fetched: Fetched, img_url: str) -> tuple[str, str]:
     detected = detect_image_type(fetched.body, img_url, fetched.content_type)
     if detected is None:
         declared = (fetched.content_type or "unknown type").split(";")[0].strip()
-        raise NonRetryableError(f"Not an image: the server answered with {declared} ({len(fetched.body)} bytes)",
-                                img_url)
+        raise NotAnImageError(f"Not an image: the server answered with {declared} ({len(fetched.body)} bytes)",
+                              img_url)
     return detected
 
 
@@ -1132,7 +1165,7 @@ def _describe(e: Exception) -> str:
 
 
 def _skipped(img: Image, e: Exception) -> SkippedResource:
-    return SkippedResource(page=img.root_url, url=img.src, reason=_describe(e))
+    return SkippedResource(page=img.root_url, url=img.src, reason=_describe(e), cause=classify_failure(e, img.url))
 
 
 async def build_intro(session: aiohttp.ClientSession, url_root: str, intro: Intro, registry: ImageRegistry | None = None,
@@ -1413,7 +1446,8 @@ async def discover_unlisted_chapters(session: aiohttp.ClientSession, url: str, c
             return None   # 404 and the like: the chain stops here
         except FetchError as e:
             if failures is not None:
-                failures.append(SkippedResource(page=url, url=href, reason=f"while looking for unlisted updates: {e}"))
+                failures.append(SkippedResource(page=url, url=href, reason=f"while looking for unlisted updates: {e}",
+                                                cause=classify_failure(e, href)))
             return None
         # A 200 that is not an update page (a redirect to the index, an error page) ends the chain too
         return html if 'id="content"' in html else None
@@ -1650,24 +1684,62 @@ def _hides_its_text(style: str | None) -> bool:
     return bool(color) and color == background
 
 
+def _hosts_summary(urls: list[str], top: int = 3) -> str:
+    """"i.minus.com 177, tinypic.com 25 and 4 more hosts": where the failures are, most frequent first."""
+    counts: dict[str, int] = {}
+    for u in urls:
+        host = urlsplit(u).hostname or u
+        counts[host] = counts.get(host, 0) + 1
+    ranked = sorted(counts.items(), key=lambda item: (-item[1], item[0]))
+    text = ", ".join(f"{host} {n}" for host, n in ranked[:top])
+    if len(ranked) > top:
+        text += f" and {len(ranked) - top} more host{'s' if len(ranked) - top > 1 else ''}"
+    return text
+
+
+def _class_heading(cause: str, failures: list[SkippedResource], what: str) -> str:
+    n = len(failures)
+    hosts = _hosts_summary([f.url for f in failures])
+    if cause == DEAD_HOST:
+        return f"{n} image(s) on hosts that no longer exist or do not answer ({hosts}):"
+    if cause == GONE:
+        return f"{n} image(s) their host no longer serves (HTTP 403, 404 or 410; {hosts}):"
+    if cause == ARCHIVE_COPY:
+        return f"{n} image(s) whose copy on lparchive.org is empty, or is a web page saved under the image's name:"
+    if cause == WEB_PAGE:
+        return f"{n} image(s) whose host answers an empty file or a web page instead of the picture (hotlink protection, parking page; {hosts}):"
+    if cause == TEMPORARY:
+        return f"{n} {what} whose host had trouble (server error, disconnection); try again later:"
+    return f"{n} {what} that failed for a reason this tool may be able to do something about:"
+
+
 def format_failures_report(url: str, failures: list[SkippedResource], outcome: str, what: str = "resource(s)") -> str:
-    unique = list(dict.fromkeys((f.page, f.url, f.reason) for f in failures))
+    """The list of what could not be retrieved, grouped by cause (FAILURE_CLASSES) with a plain heading
+    for each. Dead hosts, pictures gone from their host and broken copies on the archive are beyond the
+    tool, so the request for a bug report only appears when some failure may be its doing (OTHER)."""
+    unique = list({(f.page, f.url, f.reason, f.cause): f for f in failures}.values())
     separator = "-" * 72
     lines = [
         separator,
         f"lparchive2epub: {len(unique)} {what} could not be retrieved while extracting {url}",
     ]
-    for page, res_url, reason in unique:
-        if page != res_url:
-            lines.append(f"  - page:   {page}")
-            lines.append(f"    url:    {res_url}")
-        else:
-            lines.append(f"  - url:    {res_url}")
-        lines.append(f"    reason: {reason}")
+    for cause in FAILURE_CLASSES:
+        group = [f for f in unique if f.cause == cause]
+        if not group:
+            continue
+        lines.append(_class_heading(cause, group, what))
+        for f in group:
+            if f.page != f.url:
+                lines.append(f"  - page:   {f.page}")
+                lines.append(f"    url:    {f.url}")
+            else:
+                lines.append(f"  - url:    {f.url}")
+            lines.append(f"    reason: {f.reason}")
     lines.append(separator)
     lines.append(outcome)
-    lines.append(f"Please open an issue at {ISSUES_URL} and paste the output between the lines above,")
-    lines.append("so these cases can be handled in a future release.")
+    if any(f.cause == OTHER for f in unique):
+        lines.append(f"Please open an issue at {ISSUES_URL} and paste the output between the lines above,")
+        lines.append("so these cases can be handled in a future release.")
     return "\n".join(lines)
 
 
@@ -1797,7 +1869,8 @@ async def do(url: str, file: str | None, session: aiohttp.ClientSession, writer,
             fatal = [e for _, _, e in missing_updates if isinstance(e, ExtractionError)]
             if fatal:
                 raise fatal[0]  # e.g. a broken --cache database: not a per-update problem, say so directly
-            missing = [SkippedResource(page=c.original_href, url=c.original_href, reason=_describe(e))
+            missing = [SkippedResource(page=c.original_href, url=c.original_href, reason=_describe(e),
+                                       cause=classify_failure(e, c.original_href))
                        for _, c, e in missing_updates]
             if not allow_missing_updates:
                 raise MissingUpdatesError(format_failures_report(
