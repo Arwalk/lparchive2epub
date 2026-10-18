@@ -31,9 +31,11 @@ CHECKSUMS = Path(__file__).resolve().parent.parent / "tests" / "resources" / "li
 # Small and varied on purpose: a plain screenshot LP, a two-thread group LP with linked full-size
 # pictures, an LP with Intro/Epilogue pages, one whose image host answers empty bodies (skipped
 # images in the report), a video LP (no chapters at all), one whose landing page lists no update
-# although six exist (found by following next links), and a video LP whose landing page lays its
+# although six exist (found by following next links), a video LP whose landing page lays its
 # tables out with <table><col width="99%"> (the archive's own markup on 386 pages, invalid XHTML 5
-# that sanitize() drops: epubcheck RSC-005 in 388 books of the first archive-wide run).
+# that sanitize() drops: epubcheck RSC-005 in 388 books of the first archive-wide run), and a video
+# LP linking archived files whose names hold spaces and brackets ("music/area 1 and earth [giga].mp3":
+# percent-encoded by to_uri, epubcheck RSC-020 in 98 books of that run).
 LETS_PLAYS = [
     "X-COM-Terror-from-the-Deep",
     "Dwarf-Fortress-Boatmurdered",
@@ -42,6 +44,7 @@ LETS_PLAYS = [
     "007-Nightfire",
     "The-Blackwell-Legacy",
     "007-Everything-or-Nothing",
+    "Rez",
 ]
 
 

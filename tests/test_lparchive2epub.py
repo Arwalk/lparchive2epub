@@ -452,6 +452,48 @@ def test_get_full_url():
     assert Extractor.get_full_url("https://lparchive.org/Some-LP", "Update%2001/") == "https://lparchive.org/Some-LP/Update%2001/"
 
 
+@pytest.mark.parametrize(("href", "expected"), [
+    # spaces, brackets, quotes and the like: what browsers quietly repair and XHTML forbids (RSC-020)
+    ("https://lparchive.org/Blackthorne/avis/1 - Mine Level 1 - It's Show Time!.avi",
+     "https://lparchive.org/Blackthorne/avis/1%20-%20Mine%20Level%201%20-%20It's%20Show%20Time!.avi"),
+    ("mailto:missing-img@lparchive.org?subject=Advent Rising - (01.jpg)",
+     "mailto:missing-img@lparchive.org?subject=Advent%20Rising%20-%20(01.jpg)"),
+    ("http://www.youtube.com/watch?v=TxJ7ivNRTxo[/url", "http://www.youtube.com/watch?v=TxJ7ivNRTxo%5B/url"),
+    ('http://example.com/a"b<c>d|e^f{g}h`i\\j', "http://example.com/a%22b%3Cc%3Ed%7Ce%5Ef%7Bg%7Dh%60i%5Cj"),
+    ("http://azuredreamsshrine.netfirms.com/English/items2.html#General Store",
+     "http://azuredreamsshrine.netfirms.com/English/items2.html#General%20Store"),
+    ("https://example.com/a#b#c", "https://example.com/a#b%23c"),
+    ("https://example.com/café", "https://example.com/caf%C3%A9"),
+    # existing escapes are kept (not doubled), a bare % is encoded
+    ("https://example.com/Rock%20The%20Planet%20%234/100%.html", "https://example.com/Rock%20The%20Planet%20%234/100%25.html"),
+    ("https://lpix.org/3158584/May%92n - Obelisk.mp3", "https://lpix.org/3158584/May%92n%20-%20Obelisk.mp3"),
+    # RFC 3986 lets these be: untouched
+    ("https://example.com/a(b)*c,d;e=f+g$h&i@j~k!?x=1&y=2", "https://example.com/a(b)*c,d;e=f+g$h&i@j~k!?x=1&y=2"),
+    ("http://user:pw@my_host.example.com:8080/x", "http://user:pw@my_host.example.com:8080/x"),
+    ("http://[::1]/x", "http://[::1]/x"),
+    ("http://müller.de/x", "http://müller.de/x"),
+    ("irc://irc.synirc.net/lp", "irc://irc.synirc.net/lp"),
+    ("ftp://example.com/x", "ftp://example.com/x"),
+    # relative references and in-page anchors are encoded alike
+    ("Update 01/", "Update%2001/"),
+    ("#General Store", "#General%20Store"),
+    ("  //lpix.org/a b.png  ", "//lpix.org/a%20b.png"),
+    # no encoding can save these: a host with a space or an empty label, a port that is no number
+    ("http:// http://video.google.com/videoplay?docid=1", None),
+    ("http://www...", None),
+    ("http://http:ustwo.com", None),
+    ("http://exa mple.com/", None),
+    ("http:///x", None),
+    ("http://[abc/x", None),
+    # no reader can follow these: unregistered (HTM-025), data (RSC-029), scripts (dropped from the book)
+    ("steam://run/341190/", None),
+    ("data:text/plain,hello", None),
+    ("javascript:void(0)", None),
+])
+def test_to_uri(href, expected):
+    assert lib.to_uri(href) == expected
+
+
 @pytest.mark.asyncio
 async def test_build_update_skips_unreachable_images():
     root = "https://lparchive.org/Some-LP/Update%201/"
@@ -660,6 +702,44 @@ def test_fix_links_on_the_landing_page_resolves_against_the_lp_root():
     assert [a["href"] for a in content.find_all("a")] == [
         "update_0.xhtml", "https://lparchive.org/X-COM-Interceptor/", f"{root}/Images/map.png",
         f"{root}/Update%20(1)/"]
+
+
+def test_fix_links_writes_valid_uris_and_unwraps_links_nothing_can_follow():
+    """Hand-written hrefs carry spaces, brackets and quotes (epubcheck RSC-020 in 98 books of the
+    archive-wide run): resolved, then encoded. A link that no encoding can save, or that no reader could
+    follow, is unwrapped: the text stays, the dead link goes."""
+    root = "https://lparchive.org/Blackthorne"
+    chapters = [Chapters(num=0, original_href=f"{root}/Update%2001/", txt="Update 1", new_href="update_0.xhtml",
+                         original_href_slug="Update%2001/"),
+                Chapters(num=1, original_href=f"{root}/Update%2002/", txt="Update 2", new_href="update_1.xhtml",
+                         original_href_slug="Update%2002/")]
+    html = ('<div id="content">'
+            '<a href="avis/1 - Mine Level 1 - It\'s Show Time!.avi">archived video</a>'
+            '<a href="mailto:missing-img@lparchive.org?subject=Advent Rising - (01.jpg)">missing picture</a>'
+            '<a href="http://www.miketyndall.com/setz/Advent Rising/comics/Rock The Planet %234.zip">external</a>'
+            '<a href="http://www.youtube.com/watch?v=TxJ7ivNRTxo[/url">forum markup glued on</a>'
+            '<a href="http://azuredreamsshrine.netfirms.com/English/items2.html#General Store">fragment</a>'
+            '<a href="#General Store">in-page anchor</a>'
+            '<a href="Update 02/#part 2">chapter link with raw spaces</a>'
+            '<a href="http:// http://video.google.com/videoplay?docid=1">garbage</a>'
+            '<a href="http://http:ustwo.com">more <b>garbage</b></a>'
+            '<a href="steam://run/341190/">on Steam</a>'
+            '<a href="javascript:void(0)">spoiler toggle</a>'
+            '</div>')
+    content = BeautifulSoup(html, "html.parser").find("div", id="content")
+
+    Extractor.fix_links(content, chapters, root)
+
+    assert [a["href"] for a in content.find_all("a")] == [
+        f"{root}/avis/1%20-%20Mine%20Level%201%20-%20It's%20Show%20Time!.avi",
+        "mailto:missing-img@lparchive.org?subject=Advent%20Rising%20-%20(01.jpg)",
+        "http://www.miketyndall.com/setz/Advent%20Rising/comics/Rock%20The%20Planet%20%234.zip",
+        "http://www.youtube.com/watch?v=TxJ7ivNRTxo%5B/url",
+        "http://azuredreamsshrine.netfirms.com/English/items2.html#General%20Store",
+        "#General%20Store",
+        "update_1.xhtml#part%202",
+    ]
+    assert str(content).endswith('</a>garbagemore <b>garbage</b>on Steamspoiler toggle</div>')
 
 
 @pytest.mark.asyncio
@@ -1573,6 +1653,39 @@ def test_extractor_tolerates_missing_optional_facts():
     assert (intro.began, intro.ended, intro.parts, intro.tags, intro.thread_url) == (None, None, None, [], None)
     assert compose_description(intro, "https://lparchive.org/Old-LP") == (
         "Let's Play of Old LP by Someone. Archived by The Let's Play Archive at https://lparchive.org/Old-LP on Jan 02, 2008.")
+
+
+def test_missing_image_note_links_the_original_at_a_valid_uri():
+    """The note's link is the picture's URL, which can hold spaces too ("setz/Advent Rising/ethan6.jpg");
+    a URL that cannot be made valid gives a note without a link."""
+    soup = BeautifulSoup('<div id="content"><img alt="Ethan" src="ethan6.jpg"/><img src="x.jpg"/></div>', "html.parser")
+    spaced, garbage = soup.find_all("img")
+    lib.mark_unavailable(lib.Image(0, "ethan6.jpg", spaced, "http://www.miketyndall.com/setz/Advent Rising/ethan6.jpg", "http://x/"))
+    lib.mark_unavailable(lib.Image(1, "x.jpg", garbage, "http://http:ustwo.com/x.jpg", "http://x/"))
+    assert str(soup) == ('<div id="content"><span class="missing-image">[image not available: Ethan - '
+                         '<a href="http://www.miketyndall.com/setz/Advent%20Rising/ethan6.jpg">ethan6.jpg</a>]</span>'
+                         '<span class="missing-image">[image not available: x.jpg]</span></div>')
+
+
+def test_thread_link_is_written_as_a_valid_uri_or_dropped():
+    from lparchive2epub.cover import make_title_page
+
+    def intro_with(thread_href: str):
+        html = f"""<html><head><title>Old LP</title><meta name="author" content="Someone"/></head><body>
+        <ul id="statistics"><li id="archival">Added to the archive on <strong>Jan 02, 2008</strong></li></ul>
+        <p id="thread">Original Thread: <a id="threadlink" href="{thread_href}">The thread</a></p>
+        <div id="content">hello</div></body></html>"""
+        return Extractor.intro("https://lparchive.org/Old-LP", BeautifulSoup(html, "html.parser"))
+
+    intro = intro_with("http://forums.example.com/show thread.php?threadid=1 ")
+    assert intro.thread_url == "http://forums.example.com/show%20thread.php?threadid=1"
+    page = make_title_page(intro, "https://lparchive.org/Old-LP", "")
+    assert '<a href="http://forums.example.com/show%20thread.php?threadid=1">The thread</a>' in page
+
+    intro = intro_with("http://http:forums.example.com/")
+    assert (intro.thread_url, intro.thread_title) == (None, "The thread")
+    page = make_title_page(intro, "https://lparchive.org/Old-LP", "")
+    assert "<p>Original thread: The thread</p>" in page and "http:forums" not in page
 
 
 def test_compose_description_and_dates():
@@ -2579,8 +2692,15 @@ async def test_a_built_book_passes_the_real_epubcheck():
                                                        f"{url}/Update%2001/shot.png": _FakeResponse(200, picture)})
     session.responses[f"{url}/Update%2001/"] = _FakeResponse(
         200, b'<div id="content"><img src="shot.png"/> <a href="full.png">see the full map</a> '
-             b'<a href="https://en.wikipedia.org/wiki/File:X.jpg">wiki</a> <img src="http://img.example/dead.png"/></div>')
+             b'<a href="https://en.wikipedia.org/wiki/File:X.jpg">wiki</a> <img src="http://img.example/dead.png"/> '
+             # links as written on the archive's pages: spaces (RSC-020), a host no encoding can save, an
+             # unregistered scheme (HTM-025), and a dead picture whose URL holds spaces (the note links it)
+             b'<a href="avis/1 - Mine Level 1 - It\'s Show Time!.avi">video</a> '
+             b'<a href="mailto:missing-img@lparchive.org?subject=X - (01.jpg)">lost picture</a> '
+             b'<a href="http://http:ustwo.com">garbage</a> <a href="steam://run/341190/">on Steam</a> '
+             b'<img src="http://img.example/Advent Rising/ethan6.jpg"/></div>')
     session.responses["http://img.example/dead.png"] = _FakeResponse(404, b"gone")
+    session.responses["http://img.example/Advent Rising/ethan6.jpg"] = _FakeResponse(404, b"gone")
     default_get = session.get
 
     def real_pictures(url_, **kwargs):   # the landing page's own images too: the fake session's stand-in bytes are not a PNG
@@ -2592,8 +2712,14 @@ async def test_a_built_book_passes_the_real_epubcheck():
     with tempfile.TemporaryDirectory() as d:
         out = await asyncio.wait_for(do(url, f"{d}/book.epub", session, messages.append, check=True), timeout=120)
         result = await asyncio.to_thread(check.run_epubcheck, out)
+        with zipfile.ZipFile(out) as z:
+            chapter = z.read("EPUB/update_0.xhtml").decode()
     assert result.findings == [], check.format_check_report(out, result, "")
     assert any("no problems found" in m for m in messages)
+    assert f'href="{url}/Update%2001/avis/1%20-%20Mine%20Level%201%20-%20It\'s%20Show%20Time!.avi"' in chapter
+    assert 'href="mailto:missing-img@lparchive.org?subject=X%20-%20(01.jpg)"' in chapter
+    assert 'href="http://img.example/Advent%20Rising/ethan6.jpg">ethan6.jpg</a>' in chapter
+    assert "ustwo" not in chapter and "steam:" not in chapter and "garbage" in chapter and "on Steam" in chapter
 
 
 @pytest.mark.asyncio

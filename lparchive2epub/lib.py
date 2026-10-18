@@ -376,6 +376,45 @@ def is_lparchive_url(url: str) -> bool:
     return urlparse(url).hostname in ("lparchive.org", "www.lparchive.org")
 
 
+# Schemes a reader can follow. The rest is dead weight in a book: javascript (scripts are dropped),
+# data (epubcheck RSC-029), file, and unregistered ones such as steam (HTM-025).
+LINK_SCHEMES = frozenset({"http", "https", "ftp", "mailto", "irc", "news", "nntp", "tel", "telnet", "xmpp", "urn"})
+NEEDS_HOST = frozenset({"http", "https", "ftp"})
+# RFC 3986: unreserved characters, sub-delims, ":" and "@" stay as they are in a path; "?" too in a query
+# or a fragment. "%" stays so that an existing %20 is not doubled (a bare "%" is encoded beforehand).
+PATH_SAFE = "/:@!$&'()*+,;=%"
+QUERY_SAFE = PATH_SAFE + "?"
+BARE_PERCENT = re.compile(r"%(?![0-9A-Fa-f]{2})")
+# What no host name can hold: whitespace, delimiters, an empty label ("www..."); IDN and IPv6 are fine
+BAD_HOST = re.compile(r"[\s/?#@\[\]\\^|<>%\"{}`]|^\.|\.\.")
+
+
+def to_uri(href: str) -> str | None:
+    """`href` written as a valid URI reference (RFC 3986), or None when no encoding can make it one.
+
+    Pages are hand-written: links carry raw spaces ("avis/1 - Mine Level 1.avi"), brackets, quotes
+    and non-ASCII that browsers quietly repair but XHTML does not allow (epubcheck RSC-020 in 98 books
+    of the archive-wide run). The path, query and fragment are percent-encoded, existing escapes kept.
+    None for what encoding cannot save: a host with a space or an empty label, a port that is not a
+    number, a scheme no reader can follow (LINK_SCHEMES)."""
+    href = BARE_PERCENT.sub("%25", href.strip())
+    try:
+        parts = urlsplit(href)
+        host, _port = parts.hostname, parts.port   # ValueError: a port that is no number ("http://http:ustwo.com")
+    except ValueError:
+        return None
+    if parts.scheme and parts.scheme not in LINK_SCHEMES:
+        return None
+    if host:
+        if BAD_HOST.search(host):
+            return None
+    elif parts.scheme in NEEDS_HOST:
+        return None
+    return urlunsplit(parts._replace(path=quote(parts.path, safe=PATH_SAFE, errors="replace"),
+                                     query=quote(parts.query, safe=QUERY_SAFE, errors="replace"),
+                                     fragment=quote(parts.fragment, safe=QUERY_SAFE, errors="replace")))
+
+
 def lparchive_fallback_urls(url: str) -> list[str]:
     """Other spellings of an lparchive.org URL worth trying, in order, after it answered 404.
 
@@ -407,33 +446,43 @@ class Extractor:
 
     @staticmethod
     def fix_links(content, chapters, current_url: str):
-        """Point every link either inside the book (chapters, landing page) or at an absolute URL.
+        """Point every link either inside the book (chapters, landing page) or at an absolute URL,
+        written as a valid URI.
 
         Links are resolved against the page they appear on, exactly like a browser would, so
-        "../Update%2002/", "/Other-LP/" and "manual.pdf" all end up unambiguous. Links to images
-        that get embedded are rewritten in place once downloaded (see point_at_embedded)."""
+        "../Update%2002/", "/Other-LP/" and "manual.pdf" all end up unambiguous, then percent-encoded
+        (see to_uri): "avis/1 - Mine Level 1.avi" is a valid link in a browser, not in XHTML. A link
+        that no encoding can make valid, or that no reader could follow (steam:, javascript:), is
+        unwrapped: its text stays, a dead link is worse than none. Links to images that get embedded
+        are rewritten in place once downloaded (see point_at_embedded)."""
         if not current_url.endswith("/"):
             current_url += "/"
 
-        in_book = {c.original_href: c.new_href for c in chapters}
+        def key_of(url: str) -> str:
+            # "Update 1/" and "Update%201/" are the same page (canonical_slug): compare encoded alike
+            return canonical_slug(url if url.endswith("/") else url + "/")
+
+        in_book = {key_of(c.original_href): c.new_href for c in chapters}
         if chapters:
             # original_href is root + "/" + slug, both slash-terminated: a link back to the landing page
             root = chapters[0].original_href[:-len(chapters[0].original_href_slug)]
-            in_book[root] = INTRO_FILE_NAME
+            in_book[key_of(root)] = INTRO_FILE_NAME
 
         for link in content.find_all("a", href=True):
             href = link["href"].strip()
-            if not href or href.startswith("#"):
-                continue  # in-page anchor
+            if not href:
+                continue
+            if href.startswith("#"):
+                link["href"] = to_uri(href) or href   # in-page anchor: encoded, never None
+                continue
             full = Extractor.get_full_url(current_url, href)
-            if full is None:
-                continue  # mailto:, javascript:, unrepairable scheme typo... leave as is
-            target, fragment = urldefrag(full)
-            key = target if target.endswith("/") else target + "/"
-            if key in in_book:
-                link["href"] = in_book[key] + (f"#{fragment}" if fragment else "")
-            else:
-                link["href"] = full
+            uri = to_uri(href if full is None else full)   # mailto: and the like are encoded, not resolved
+            if uri is None:
+                link.unwrap()
+                continue
+            target, fragment = urldefrag(uri)
+            new_href = in_book.get(key_of(target))
+            link["href"] = uri if new_href is None else new_href + (f"#{fragment}" if fragment else "")
 
     @staticmethod
     def intro(url: str, p: BeautifulSoup) -> Intro:
@@ -477,7 +526,7 @@ class Extractor:
             parts=int(statistics["parts"]) if "parts" in statistics else None,
             tags=[t for t in tags if t],
             thread_title=thread_link.get_text(" ", strip=True) if thread_link else None,
-            thread_url=thread_link["href"].strip() if thread_link else None,
+            thread_url=to_uri(thread_link["href"]) if thread_link else None,
         )
 
     @staticmethod
@@ -1279,8 +1328,9 @@ def mark_unavailable(image: Image):
     alt = " ".join((tag.get("alt") or "").split())
     note = soup.new_tag("span", attrs={"class": "missing-image"})
     note.append(f"[image not available: {alt + ' - ' if alt else ''}")
-    if image.url:
-        link = soup.new_tag("a", href=image.url)
+    original = to_uri(image.url) if image.url else None   # the URL may hold spaces ("setz/Advent Rising/ethan6.jpg")
+    if original:
+        link = soup.new_tag("a", href=original)
         link.string = name
         note.append(link)
     else:
