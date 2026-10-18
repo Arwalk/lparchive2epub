@@ -6,7 +6,6 @@ wrapper so that a JVM that fails to start or runs out of memory is reported, not
 on empty output.
 """
 import json
-import re
 import shutil
 import subprocess
 from dataclasses import dataclass
@@ -95,8 +94,6 @@ def parse_epubcheck(data: dict) -> CheckResult:
 
 
 CHECK_HEADER = "lparchive2epub: epubcheck"
-# One finding per line in the report, parsed back by parse_check_report: "  - ERROR RSC-007 EPUB/a.xhtml:71: text"
-CHECK_LINE = re.compile(r"^  - (FATAL|ERROR|WARNING) (\S+)(?: (\S+?)(?::(\d+))?)?: (.*)$")
 
 
 def format_check_report(path: str, result: CheckResult, outcome: str) -> str:
@@ -118,15 +115,3 @@ def format_check_report(path: str, result: CheckResult, outcome: str) -> str:
     lines.append("the tool should produce valid books.")
     return "\n".join(lines)
 
-
-def parse_check_report(report: str) -> list[dict]:
-    """The findings listed in a report written by format_check_report, as plain dicts (for the archive run's
-    error file): severity, id, path, line, message."""
-    findings = []
-    for line in report.splitlines():
-        m = CHECK_LINE.match(line)
-        if m:
-            severity, id_, path, line_number, message = m.groups()
-            findings.append({"severity": severity, "id": id_, "path": path,
-                             "line": int(line_number) if line_number else None, "message": message})
-    return findings

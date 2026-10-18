@@ -2414,7 +2414,7 @@ EPUBCHECK_JSON = {   # the shape of epubcheck 5.3's --json output, trimmed
 }
 
 
-def test_epubcheck_findings_are_parsed_reported_and_parsed_back():
+def test_epubcheck_findings_are_parsed_and_reported():
     from lparchive2epub import check
     result = check.parse_epubcheck(EPUBCHECK_JSON)
     assert result.version == "5.3.0"
@@ -2428,13 +2428,6 @@ def test_epubcheck_findings_are_parsed_reported_and_parsed_back():
     assert "  - WARNING OPF-003 EPUB/stray.txt: Item" in report
     assert "  - FATAL PKG-012: File name contains characters disallowed." in report
     assert report.index("outcome line") < report.index(ISSUES_URL)
-    assert check.parse_check_report(report) == [
-        {"severity": "ERROR", "id": "RSC-007", "path": "EPUB/update_0.xhtml", "line": 71,
-         "message": 'Referenced resource "EPUB/images/missing.png" could not be found in the EPUB.'},
-        {"severity": "WARNING", "id": "OPF-003", "path": "EPUB/stray.txt", "line": None,
-         "message": 'Item "EPUB/stray.txt" exists in the EPUB, but is not declared in the OPF manifest.'},
-        {"severity": "FATAL", "id": "PKG-012", "path": None, "line": None, "message": "File name contains characters disallowed."},
-    ]
     assert check.parse_epubcheck({"messages": [], "checker": {"checkerVersion": "5.3.0"}}).findings == []
     warnings_only = check.CheckResult("5.3.0", result.warnings)
     assert "found 1 warning(s) in" in check.format_check_report("x.epub", warnings_only, "o")
@@ -2581,35 +2574,105 @@ async def test_a_built_book_passes_the_real_epubcheck():
 
 @pytest.mark.asyncio
 async def test_all_archives_records_epubcheck_findings(monkeypatch):
-    from util.all_archives import build_one, BuildOptions, ErrorLog
-    from lparchive2epub import check
+    """The archive run checks the written books through a queue (BookChecker), not inside the build:
+    findings go to the error file as before, a check that could not run is its own entry."""
+    import util.all_archives as all_archives
+    from util.all_archives import build_one, BookChecker, ErrorLog
     results = iter([
         _epubcheck_result(("ERROR", "RSC-007", "missing", "EPUB/update_0.xhtml", 71), ("WARNING", "OPF-003", "stray", "EPUB/s.txt", None)),
         _epubcheck_result(),
         _epubcheck_result(("ERROR", "RSC-007", "missing again", "EPUB/update_1.xhtml", 3)),
+        lib.CheckError("The book was written at x, but epubcheck did not finish within 1800 s"),
     ])
-    monkeypatch.setattr(check, "run_epubcheck", lambda path: next(results))
+
+    def fake_run(path):
+        assert os.path.exists(path)   # the check runs on the written book
+        result = next(results)
+        if isinstance(result, Exception):
+            raise result
+        return result
+
+    monkeypatch.setattr(all_archives, "run_epubcheck", fake_run)
     slug = "X-COM-Terror-from-the-Deep"
     with tempfile.TemporaryDirectory() as d:
         errors = ErrorLog(f"{d}/errors.jsonl")
-        for n in range(3):   # the same LP three times, in three output directories
+        bar = tqdm(total=0, file=io.StringIO())   # a real bar (a disabled one ignores update), kept off stderr
+        checker = BookChecker(errors, bar)
+        checker.start(1)
+        for n in range(4):   # the same LP four times, in four output directories
             os.mkdir(f"{d}/{n}")
             session = _FakeSession("never-matches")
-            assert await asyncio.wait_for(build_one(slug, f"{d}/{n}", f"{d}/{n}", errors, lambda *_: session, BuildOptions(check=True)), timeout=30)
+            assert await asyncio.wait_for(build_one(slug, f"{d}/{n}", f"{d}/{n}", errors, lambda *_: session), timeout=30)
+            checker.submit(slug, f"{d}/{n}/{slug}.epub")
+        await asyncio.wait_for(checker.drain(), timeout=30)
+        assert bar.total == 4 and bar.n == 4 and checker.workers == []
+        assert all(os.path.exists(f"{d}/{n}/{slug}.epub") for n in range(4))   # the books stay, checked or not
         with open(f"{d}/errors.jsonl", encoding="utf-8") as f:
             entries = [json.loads(line) for line in f]
-    assert [(e["slug"], e["kind"]) for e in entries] == [(slug, "epubcheck"), (slug, "epubcheck")]
+    assert [(e["slug"], e["kind"]) for e in entries] == [(slug, "epubcheck"), (slug, "epubcheck"), (slug, "check-failed")]
     assert "epubcheck 5.3.0 found 1 error(s) and 1 warning(s)" in entries[0]["report"]
+    assert "The book was written all the same." in entries[0]["report"] and ISSUES_URL in entries[0]["report"]
     assert "epubcheck 5.3.0 found 1 error(s) in" in entries[1]["report"]
     assert entries[0]["messages"] == [
-        {"severity": "ERROR", "id": "RSC-007", "path": "EPUB/update_0.xhtml", "line": 71, "message": "missing"},
-        {"severity": "WARNING", "id": "OPF-003", "path": "EPUB/s.txt", "line": None, "message": "stray"}]
-    assert errors.check_summary() == "epubcheck found fault with 2 book(s); most frequent: RSC-007 2, OPF-003 1"
+        {"severity": "ERROR", "id": "RSC-007", "message": "missing", "path": "EPUB/update_0.xhtml", "line": 71},
+        {"severity": "WARNING", "id": "OPF-003", "message": "stray", "path": "EPUB/s.txt", "line": None}]
+    assert entries[2]["error"] == "CheckError" and "did not finish" in entries[2]["message"] and "messages" not in entries[2]
+    assert errors.check_summary() == ("epubcheck found fault with 2 book(s); most frequent: RSC-007 2, OPF-003 1; "
+                                      "1 book(s) could not be checked")
     assert ErrorLog(None).check_summary() == "epubcheck found no fault with any book"
-    # without --check nothing is recorded and epubcheck is never run (the iterator is exhausted: a call would fail)
+    # the build itself never checks (the iterator is exhausted: a call would fail), and an idle checker drains at once
     with tempfile.TemporaryDirectory() as d:
         session = _FakeSession("never-matches")
         assert await asyncio.wait_for(build_one("X-COM-Terror-from-the-Deep", d, d, ErrorLog(None), lambda *_: session), timeout=30)
+        await asyncio.wait_for(BookChecker(ErrorLog(None), tqdm(disable=True)).drain(), timeout=5)
+
+
+@pytest.mark.asyncio
+async def test_all_archives_checks_in_the_background(monkeypatch):
+    """The checks do not hold the builds back, and workers added later share the queue."""
+    import threading
+    import util.all_archives as all_archives
+    from util.all_archives import build_one, BookChecker, ErrorLog
+    release = threading.Event()
+    lock = threading.Lock()
+    in_flight, peak = [0], [0]
+
+    def slow_run(path):
+        with lock:
+            in_flight[0] += 1
+            peak[0] = max(peak[0], in_flight[0])
+        assert release.wait(30)   # the event of the moment: the test swaps it for the second scenario
+        with lock:
+            in_flight[0] -= 1
+        return _epubcheck_result()
+
+    monkeypatch.setattr(all_archives, "run_epubcheck", slow_run)
+    bar = tqdm(total=0, file=io.StringIO())
+    checker = BookChecker(ErrorLog(None), bar)
+    checker.start(1)
+    for n in range(3):
+        checker.submit(f"LP-{n}", f"/books/LP-{n}.epub")
+    await asyncio.sleep(0.1)
+    assert in_flight[0] == 1 and bar.total == 3 and bar.n == 0   # one check blocked, the others queued
+    with tempfile.TemporaryDirectory() as d:   # ...and a build goes through meanwhile
+        session = _FakeSession("never-matches")
+        assert await asyncio.wait_for(build_one("X-COM-Terror-from-the-Deep", d, d, ErrorLog(None), lambda *_: session), timeout=30)
+    checker.start(2)
+    await asyncio.sleep(0.1)
+    assert in_flight[0] == 3   # the new workers picked up the queued books
+    release.set()
+    await asyncio.wait_for(checker.drain(), timeout=30)
+    assert peak[0] == 3 and bar.n == 3 and checker.workers == []
+    # interrupted (Ctrl-C): stop() does not wait for the queue and counts what was left unchecked
+    release.clear()
+    checker = BookChecker(ErrorLog(None), tqdm(total=0, file=io.StringIO()))
+    checker.start(1)
+    for n in range(3):
+        checker.submit(f"LP-{n}", f"/books/LP-{n}.epub")
+    await asyncio.sleep(0.1)
+    assert in_flight[0] == 1
+    assert await asyncio.wait_for(checker.stop(), timeout=5) == 3 and checker.workers == []   # one in flight, two queued
+    release.set()   # let the thread finish (the JVM would run on regardless)
 
 
 @pytest.mark.parametrize(("title", "expected"), [

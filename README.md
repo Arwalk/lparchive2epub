@@ -167,7 +167,9 @@ epubcheck package with the Java program inside it, and a Java runtime on the mac
 
 Every finding is the tool's doing, since the book is built from scratch, so the report asks you to
 paste it in an issue. `util/all_archives.py --check` runs the check on every book of an archive-wide
-run and records the findings in its `--errors` file.
+run and records the findings in its `--errors` file. There the check does not hold the builds back: one
+epubcheck run goes on alongside the builds, with its own progress bar, and once the last book is built
+`--check-workers` runs (default 4) finish the queue.
 
 ## Exit codes
 
