@@ -18,6 +18,7 @@ from urllib.parse import urlparse, urlsplit, urlunsplit, urljoin, urldefrag, unq
 
 import aiohttp
 from bs4 import BeautifulSoup, Comment
+from bs4.element import PreformattedString, Tag
 from ebooklib import epub
 from ebooklib.epub import EpubHtml, EpubImage, EpubBook
 from tqdm.asyncio import tqdm
@@ -1682,6 +1683,9 @@ LEGACY_INLINE_TAGS = {
     "blink": ("span", None),
     "marquee": ("span", None),
 }
+# What XHTML 5 allows directly inside a list: items, and the two tags TAGS_TO_DROP removes anyway.
+LIST_TAGS = ["ul", "ol"]
+LIST_CHILD_TAGS = ("li", "script", "template")
 # Block-level elements that EPUB does not allow inside a link (or any inline element)
 BLOCK_TAGS = ["p", "div", "blockquote", "ul", "ol", "table", "pre", "h1", "h2", "h3", "h4", "h5", "h6"]
 INLINE_WRAPPERS = ["a", "b", "i", "u", "s", "em", "strong", "span", "small", "sub", "sup", "code"]
@@ -1736,6 +1740,7 @@ def sanitize(soup: BeautifulSoup):
         if style:
             legacy["style"] = style
 
+    nest_stray_list_content(soup)
     unnest_blocks_from_inline(soup)
 
     for element in soup.find_all(True):
@@ -1753,6 +1758,42 @@ def sanitize(soup: BeautifulSoup):
             element.attrs.pop("style", None)
             if SPOILER_CLASS not in classes:
                 element["class"] = classes + [SPOILER_CLASS]
+
+
+def nest_stray_list_content(soup: BeautifulSoup):
+    """Forum authors close </li> early or never open one, so a <ul> ends up holding <br>s, text, <b>s, <img>s,
+    headings or a whole nested <ul> between its items or before the first one. XHTML 5 allows nothing but
+    <li> there (epubcheck RSC-005 in 123 books of the archive-wide run) and both parsers leave it where it
+    is. What follows an item becomes the item's continuation (a nested list inside the item before it is
+    how nested lists are written: nothing moves on the page); what comes before the first item gets an
+    unmarked item of its own, indented and without a bullet, which is how browsers show it. An inline
+    wrapper that swallowed the list's own items (<ul><b><li>x</li></b></ul>) is not stray content but
+    mis-nested items, left to the orphan-<li> pass."""
+    for lst in soup.find_all(LIST_TAGS):
+        item, moving = None, False
+        for child in list(lst.children):
+            if isinstance(child, Tag):
+                if child.name == "li":
+                    item, moving = child, False
+                    continue
+                if child.name in LIST_CHILD_TAGS or _holds_items_of(child, lst):
+                    moving = False
+                    continue
+            elif isinstance(child, PreformattedString) or not str(child).strip():
+                if moving:
+                    item.append(child.extract())   # the space or comment between two moved words goes with them...
+                continue                           # ...the whitespace and comments between items stay
+            if item is None:
+                item = soup.new_tag("li", style="list-style-type: none;")
+                child.insert_before(item)
+            item.append(child.extract())
+            moving = True
+
+
+def _holds_items_of(element: Tag, lst: Tag) -> bool:
+    """True when the element wraps <li>s that belong to lst itself, as in <ul><b><li>x</li></b></ul>,
+    rather than to a list of its own."""
+    return element.name not in LIST_TAGS and any(li.find_parent(LIST_TAGS) is lst for li in element.find_all("li"))
 
 
 def unnest_blocks_from_inline(soup: BeautifulSoup):

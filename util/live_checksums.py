@@ -35,7 +35,9 @@ CHECKSUMS = Path(__file__).resolve().parent.parent / "tests" / "resources" / "li
 # tables out with <table><col width="99%"> (the archive's own markup on 386 pages, invalid XHTML 5
 # that sanitize() drops: epubcheck RSC-005 in 388 books of the first archive-wide run), and a video
 # LP linking archived files whose names hold spaces and brackets ("music/area 1 and earth [giga].mp3":
-# percent-encoded by to_uri, epubcheck RSC-020 in 98 books of that run).
+# percent-encoded by to_uri, epubcheck RSC-020 in 98 books of that run), and a video LP whose landing
+# page fills its lists with headings, pictures, line breaks, bare text and 23 nested lists between the
+# items (moved into the items by sanitize(): epubcheck RSC-005 in 123 books of that run).
 LETS_PLAYS = [
     "X-COM-Terror-from-the-Deep",
     "Dwarf-Fortress-Boatmurdered",
@@ -45,6 +47,7 @@ LETS_PLAYS = [
     "The-Blackwell-Legacy",
     "007-Everything-or-Nothing",
     "Rez",
+    "Quake",
 ]
 
 
