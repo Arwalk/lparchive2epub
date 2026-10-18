@@ -1615,6 +1615,10 @@ def player_source(element) -> str | None:
 # HTML 4 presentational attributes that are invalid in XHTML 5 and that the stylesheet supersedes anyway.
 ATTRIBUTES_TO_DROP = {"border", "align", "valign", "bgcolor", "background", "cellpadding", "cellspacing",
                       "hspace", "vspace", "nowrap", "target", "rel"}
+# Column layout is presentational too: <table><col width="99%"><tr>..., the archive's own markup on
+# 386 landing pages, is invalid XHTML 5 twice over (<col> belongs inside <colgroup>, width on neither:
+# epubcheck RSC-005 in 388 books of the archive-wide run). The stylesheet lays the tables out.
+TABLE_LAYOUT_TAGS = ["colgroup", "col"]
 SPOILER_CLASS = "bbc-spoiler"
 # HTML 4 inline elements that XHTML 5 dropped (epubcheck RSC-005 "element not allowed here"), and what
 # shows the same thing today: <tt> is seen in 8 landing pages of the archive, the others are there for
@@ -1663,6 +1667,8 @@ def sanitize(soup: BeautifulSoup):
         element.decompose()   # the replaced player too, so its nested players are seen as handled
     for param in soup.find_all("param"):
         param.decompose()
+    for layout in soup.find_all(TABLE_LAYOUT_TAGS):
+        layout.decompose()   # a <col> inside a <colgroup> goes with it; decomposing it again is harmless
 
     # <font color="red"> -> <span style="color: red">, <center> -> <div style="text-align: center">
     for font in soup.find_all("font"):

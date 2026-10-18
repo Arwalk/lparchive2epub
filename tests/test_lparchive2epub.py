@@ -1430,6 +1430,7 @@ def test_sanitize_strips_active_content_and_legacy_markup():
       <center>centered</center>
       <tt>mono</tt> <big>large</big> <strike>struck</strike> <acronym title="Let's Play">LP</acronym> <nobr>no break</nobr> <blink>hi</blink>
       <table border="1" cellpadding="2" cellspacing="0" align="center"><tr><td valign="top" bgcolor="#fff" nowrap="nowrap">cell</td></tr></table>
+      <table><col width="99%"><tr><td>column layout</td></tr></table>
       <span style="color: #336699;">speaker colour kept</span>
       <span class="bbc-spoiler" onmouseout="x()" onmouseover="y()" style="color: rgb(0, 0, 0); background-color: rgb(0, 0, 0);">hidden</span>
       <span style="color:#000000; background:#000000">also hidden, no class</span>
@@ -1444,7 +1445,7 @@ def test_sanitize_strips_active_content_and_legacy_markup():
     assert not re.search(r"<(tt|big|strike|acronym|nobr|blink)\b", out)
 
     for gone in ("<script", "<noscript", "<style", "<form", "<input", "<button", "<select", "<textarea",
-                 "<iframe", "<embed", "<object", "<font", "<center", "<o:p", "onclick", "onmouseout", "onmouseover",
+                 "<iframe", "<embed", "<object", "<font", "<center", "<o:p", "<col", "onclick", "onmouseout", "onmouseover",
                  'border="', 'rel="', 'target="', 'align="', 'valign="', 'bgcolor="', 'nowrap="', 'cellpadding="',
                  'cellspacing="', 'name="', 'size="', 'face="'):
         assert gone not in out, gone
@@ -1460,6 +1461,7 @@ def test_sanitize_strips_active_content_and_legacy_markup():
     assert '<span style="color: red;">red text</span>' in out
     assert '<div style="text-align: center;">centered</div>' in out
     assert '<span style="color: #336699;">speaker colour kept</span>' in out
+    assert "<table><tr><td>column layout</td></tr></table>" in out   # the rows stay, the <col> goes
     # spoilers are readable and marked for the stylesheet
     assert '<span class="bbc-spoiler">hidden</span>' in out
     assert '<span class="bbc-spoiler">also hidden, no class</span>' in out
@@ -2131,6 +2133,28 @@ def test_every_landing_page_extracts_as_recorded(archive, slug):
     assert [[c.original_href_slug, c.txt] for c in intro.chapters] == want["chapters"], \
         f"chapters of {slug} changed; if intended, rerun util/generate_chapter_golden.py and review the diff"
     assert [c.num for c in intro.chapters] == list(range(len(intro.chapters)))
+
+
+def test_table_column_layout_is_dropped_so_the_page_validates():
+    """<table><col width="99%"><tr>... is the archive's own markup on 386 landing pages; XHTML 5 allows
+    <col> only inside <colgroup> and width on neither (epubcheck RSC-005 in 388 books of the archive-wide
+    run). ebooklib re-parses every page with lxml before writing it and keeps <col> where it stands, so the
+    check is made on that shape: what is written, not what bs4 saw."""
+    from ebooklib.utils import parse_html_string
+    html = ('<div id="content">'
+            '<table><col width="99%"/><col width="1%"/><tr><td>a</td><td>b</td></tr></table>'
+            '<table><colgroup><col span="2"/></colgroup><tr><td>c</td></tr></table>'
+            '</div>')
+    out = str(get_cleaned_html(html))
+    assert "<table><tr><td>a</td><td>b</td></tr></table>" in out
+    assert "<table><tr><td>c</td></tr></table>" in out
+    assert "<col" not in out   # neither <col> nor <colgroup>
+
+    with zipfile.ZipFile(SNAPSHOT) as z:   # 007-Everything-or-Nothing: three <table><col width="99%">
+        page = z.read("landing_pages/007-Everything-or-Nothing.html").decode("utf-8")
+    written = parse_html_string(str(get_cleaned_html(page)))
+    assert written.findall(".//col") == [] and written.findall(".//colgroup") == []
+    assert len(written.findall(".//table")) == 3
 
 
 def test_blocks_inside_links_are_restructured_so_the_page_validates():
