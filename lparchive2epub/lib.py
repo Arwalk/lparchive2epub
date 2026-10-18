@@ -88,21 +88,24 @@ class ImageProcessing:
 
 # Formats the optimiser may rewrite. GIF is left alone (animations), SVG is text.
 REDUCIBLE_TYPES = {"image/jpeg", "image/png", "image/webp", "image/bmp", "image/tiff"}
-# Formats no EPUB reader displays: converted whether or not --max-image-size was asked for
-UNREADABLE_TYPES = {"image/tiff"}
+# Formats readers do not display, converted whether or not --max-image-size was asked for: TIFF is shown by
+# none, BMP by few, and epubcheck wants a fallback for every <img> showing either (RSC-032: neither is an
+# EPUB core media type). WebP is one since EPUB 3.3 and stays as it is.
+UNREADABLE_TYPES = {"image/tiff", "image/bmp"}
 
 
 def convert_for_readers(content: bytes, media_type: str) -> tuple[bytes, str, str] | None:
-    """A TIFF (Myth-II-Soulblighter's maps) as PNG, at full size: readers do not show TIFF at all."""
+    """A TIFF (Myth-II-Soulblighter's maps) or a BMP (EVO's and Tie-Fighter's screenshots) as PNG, at full size."""
     return reduce_image(content, media_type, ImageProcessing(max_size=sys.maxsize))
 
 
 def reduce_image(content: bytes, media_type: str, settings: ImageProcessing) -> tuple[bytes, str, str] | None:
     """Shrink an image to at most `settings.max_size` pixels on its longest edge and re-encode it.
 
-    JPEG stays JPEG (at `jpeg_quality`), PNG stays PNG. WebP and BMP, which many readers can't show,
-    become PNG (with transparency) or JPEG (without); TIFF, which none shows, becomes PNG (lossless:
-    they are maps and scans). Returns (bytes, media type, extension), or
+    JPEG stays JPEG (at `jpeg_quality`), PNG stays PNG. WebP, which many readers can't show, becomes
+    PNG (with transparency) or JPEG (without); TIFF and BMP, which readers do not show, become PNG
+    (lossless: they are maps, scans and screenshots of old games, flat colours that JPEG smears and
+    PNG packs tighter). Returns (bytes, media type, extension), or
     None when the image is left untouched: not a reducible format, animated, undecodable, or the
     re-encoded version would not be smaller."""
     if media_type not in REDUCIBLE_TYPES:
@@ -129,9 +132,9 @@ def reduce_image(content: bytes, media_type: str, settings: ImageProcessing) -> 
         if not resized:
             return None  # re-encoding a JPEG that already fits only loses quality
         target = "JPEG"
-    elif media_type in ("image/png", "image/tiff"):
+    elif media_type in ("image/png", "image/tiff", "image/bmp"):
         target = "PNG"
-    else:  # webp, bmp: pick a format every reader understands
+    else:  # webp: pick a format every reader understands
         target = "PNG" if has_alpha else "JPEG"
 
     out = io.BytesIO()

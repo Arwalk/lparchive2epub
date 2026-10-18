@@ -1771,13 +1771,13 @@ def test_reduce_image_shrinks_and_reencodes_as_promised():
 
     bmp = _make_image("BMP", (400, 300))
     data, media_type, ext = reduce_image(bmp, "image/bmp", settings)
-    assert (media_type, ext) == ("image/jpeg", "jpg") and len(data) < len(bmp)
+    assert (media_type, ext) == ("image/png", "png") and len(data) < len(bmp)   # lossless, like TIFF: screenshots
 
     assert reduce_image(GIF_BYTES, "image/gif", settings) is None          # GIFs are never touched
     assert reduce_image(b"\x89PNG\r\n\x1a\ncorrupted", "image/png", settings) is None  # undecodable: kept
 
 
-def test_reduce_image_turns_tiff_into_png():
+def test_reduce_image_turns_tiff_and_bmp_into_png():
     tiff = _make_image("TIFF", (40, 30), mode="RGBA")
     assert tiff.startswith((b"II*\x00", b"MM\x00*"))
     data, media_type, extension = reduce_image(tiff, "image/tiff", ImageProcessing(max_size=1600))
@@ -1786,14 +1786,28 @@ def test_reduce_image_turns_tiff_into_png():
     from PIL import Image as PILImage
     assert media_type == "image/png" and PILImage.open(io.BytesIO(data)).size == (3000, 1000)   # full size: not a resize
 
+    # BMP (RSC-032 in 11 books of the archive run): PNG too, lossless, even without alpha (a screenshot)
+    bmp = _make_image("BMP", (40, 30))
+    assert bmp.startswith(b"BM") and lib.detect_image_type(bmp) == ("image/bmp", "bmp")
+    assert "image/bmp" in lib.UNREADABLE_TYPES
+    data, media_type, extension = lib.convert_for_readers(bmp, "image/bmp")
+    assert (media_type, extension) == ("image/png", "png") and data.startswith(b"\x89PNG")
+    converted = PILImage.open(io.BytesIO(data))
+    assert converted.size == (40, 30)
+    assert converted.convert("RGB").tobytes() == PILImage.open(io.BytesIO(bmp)).convert("RGB").tobytes()   # same pixels
+
 
 @pytest.mark.asyncio
-async def test_tiff_ends_up_in_the_book_as_png_even_without_image_processing():
+@pytest.mark.parametrize("fmt, mode, name, old_suffixes, old_type", [
+    ("TIFF", "RGBA", "1-map14.tiff.", (".tiff", ".tif"), "image/tiff"),   # X-COM-Terror-from-the-Deep's maps
+    ("BMP", "RGB", "Tie%201.bmp", (".bmp",), "image/bmp"),                # Tie-Fighter's screenshot, no alpha
+])
+async def test_tiff_and_bmp_end_up_in_the_book_as_png_even_without_image_processing(fmt, mode, name, old_suffixes, old_type):
     url = "https://lparchive.org/X-COM-Terror-from-the-Deep"
     page = f"{url}/Update%2001/"
     session = _FakeSession("never-matches", responses={
-        f"{page}1-map14.tiff.": _FakeResponse(200, _make_image("TIFF", (60, 40), mode="RGBA"), "application/octet-stream")})
-    session.responses[page] = _FakeResponse(200, b'<div id="content"><img src="1-map14.tiff."/></div>')
+        f"{page}{name}": _FakeResponse(200, _make_image(fmt, (60, 40), mode=mode), "application/octet-stream")})
+    session.responses[page] = _FakeResponse(200, f'<div id="content"><img src="{name}"/></div>'.encode())
     for processing in (None, ImageProcessing(max_size=1600)):
         messages = []
         with tempfile.TemporaryDirectory() as d:
@@ -1807,7 +1821,7 @@ async def test_tiff_ends_up_in_the_book_as_png_even_without_image_processing():
                 from PIL import Image as PILImage
                 converted = PILImage.open(io.BytesIO(z.read(f"EPUB/{shown}")))
                 assert converted.format == "PNG" and converted.size == (60, 40)
-        assert not any(n.endswith((".tiff", ".tif")) for n in names) and "image/tiff" not in opf
+        assert not any(n.endswith(old_suffixes) for n in names) and old_type not in opf
         assert not any("could not be retrieved" in m for m in messages)
 
 
