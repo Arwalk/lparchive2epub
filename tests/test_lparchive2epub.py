@@ -2318,9 +2318,6 @@ def test_stray_content_in_lists_moves_into_items_so_the_page_validates():
         '<div id="content"><ul><li>a<b>x</b> <!-- c --> <i>y</i>\n</li>\n<li>b</li></ul></div>'
     for fine in ('<ul>\n  <li>a</li>\n  <!-- c -->\n  <li>b</li>\n</ul>', '<ol><li>a</li><template>t</template></ol>'):
         assert clean(fine) == untouched(fine)
-    # an inline wrapper that swallowed the list's own items is mis-nested items, not stray content: the orphan-<li>
-    # fix's business, and wrapping it in an item would only nest the items deeper
-    assert clean('<ul><b><li>x</li></b><li>y</li></ul>') == untouched('<ul><b><li>x</li></b><li>y</li></ul>')
 
     # the shape ebooklib writes, after its lxml re-parse
     written = parse_html_string(clean('<ul><li>a</li><br/>text<b>bold</b><ul><li>nested</li></ul></ul>'
@@ -2342,19 +2339,84 @@ def test_stray_content_in_lists_moves_into_items_so_the_page_validates():
             assert lists(written) == lists(as_served), slug   # every list is still there, none unwrapped
 
 
-# Landing pages whose lists hold an inline wrapper that swallowed the items (<ul><b><li>..</li></b></ul>, <a><li>..</li></a>,
-# and Killzone-3's <li><s><li>..<li>..</s>, whose extra </li>s make lxml close the outer item early and drop the following
-# <br> into the list): mis-nested items, the business of the orphan-<li> fix, which this set tracks until it lands.
-LISTS_WITH_WRAPPED_ITEMS = {
-    "Ace-Combat-04-Shattered-Skies", "Ace-Combat-2-Assault-Horizon-Legacy", "Ace-Combat-Zero-The-Belkan-War",
-    "Advergames", "Final-Fantasy-VI", "Killzone-3", "Pokemon-Alpha-Sapphire", "Prince-of-Persia-2008-(by-nine-gear-crow)",
-    "Siren",
-}
+def _orphan_items(tree) -> list[str]:
+    """The <li>s of an lxml tree that do not sit directly in a list, as "li in <parent>"."""
+    return [f"li in {li.getparent().tag}" for li in tree.iter("li") if li.getparent().tag not in ("ul", "ol")]
 
 
-def test_every_landing_page_list_holds_only_items():
-    """The invariant behind RSC-005 "expected the element end-tag or element li": once sanitised and re-parsed the
-    way ebooklib writes it, no list of any landing page in the archive holds anything but items."""
+def test_orphan_items_get_a_list_so_the_page_validates():
+    """Forum authors write <li> with no list around it, inside bold text, links and strike-throughs, and one after
+    another without closing any; XHTML 5 wants every item directly in a <ul>/<ol> (epubcheck RSC-005 "element li not
+    allowed here" in 70 books of the archive-wide run). sanitize() does what browsers do while parsing: an item that
+    opens inside another closes it, a wrapper around items goes inside each of them, bare items get a <ul>."""
+    from ebooklib.utils import parse_html_string
+
+    def clean(html: str) -> str:
+        return str(get_cleaned_html(f'<div id="content">{html}</div>'))
+
+    # bare items get a list: the archive's own table of contents when the author wrote no <ul> (Second-Sight), items
+    # in a table cell (Dwarf-Fortress-Syrupleaf)
+    assert clean('<li>x</li> <li>y</li>') == '<div id="content"><ul><li>x</li> <li>y</li></ul></div>'
+    assert clean('<!-- BEGIN_TOC --> <li>a</li> <li>b</li> <!-- END_TOC --> text <li>c</li>') == \
+        '<div id="content"><!-- BEGIN_TOC --> <ul><li>a</li> <li>b</li></ul> <!-- END_TOC --> text <ul><li>c</li></ul></div>'
+    assert clean('<table><tr><td><li>x</li></td></tr></table>') == \
+        '<div id="content"><table><tr><td><ul><li>x</li></ul></td></tr></table></div>'
+    # a wrapper around items goes inside each of them; what else it held keeps a copy of it, which
+    # nest_stray_list_content then makes an unmarked item (Ace-Combat-04) or the continuation of the item before
+    assert clean('<ul><b><li>x</li></b><li>y</li></ul>') == '<div id="content"><ul><li><b>x</b></li><li>y</li></ul></div>'
+    assert clean('<ul><strong>intro<br/><li>a</li></strong></ul>') == \
+        '<div id="content"><ul><li style="list-style-type: none;"><strong>intro<br/></strong></li><li><strong>a</strong></li></ul></div>'
+    assert clean('<ul class="toc"><a href="U1"><li>Chapter 1</li></a> <a href="U2"><li>Chapter 2</li></a></ul>') == \
+        '<div id="content"><ul class="toc"><li><a href="U1">Chapter 1</a></li> <li><a href="U2">Chapter 2</a></li></ul></div>'
+    assert clean('<font color="red"><li>x</li></font>') == \
+        '<div id="content"><ul><li><span style="color: red;">x</span></li></ul></div>'
+    assert clean('<b id="k">t<li>x</li><li>y</li></b>') == \
+        '<div id="content"><b id="k">t</b><ul><li><b>x</b></li><li><b>y</b></li></ul></div>'   # one element per id
+    # a whole list inside a wrapper, alone or not (Doom-WADs, Pathologic), at any depth: the same, by
+    # unnest_blocks_from_inline, which used to unwrap the list, or turn the wrapper inside out around its items
+    assert clean('<b>intro<ul><li>a</li></ul>outro</b>') == \
+        '<div id="content"><b>intro</b><ul><li><b>a</b></li></ul><b>outro</b></div>'
+    assert clean('<a href="u"><ol class="x"><li>a</li><li>b</li></ol></a>') == \
+        '<div id="content"><ol class="x"><li><a href="u">a</a></li><li><a href="u">b</a></li></ol></div>'
+    assert clean('<b><ul><li>a<ul><li>n</li></ul></li></ul></b>') == \
+        '<div id="content"><ul><li><b>a</b><ul><li><b>n</b></li></ul></li></ul></div>'
+    assert clean('<a href="u"><div><ul><li><p>x</p></li></ul></div></a>') == \
+        '<div id="content"><ul><li><a href="u">x</a></li></ul></div>'   # the other blocks unwrapped, as ever
+    # unclosed items: html.parser nests each in the one before, and the item that opens inside another closes it,
+    # as in every browser, taking what follows it along (Killzone-3's strike-through in the middle of a list)
+    assert clean('<ul><li>a<li>b</li>c</li></ul>') == '<div id="content"><ul><li>a</li><li>bc</li></ul></div>'
+    assert clean('<ul><li>a<br/><s><li>b<br/><li>c</s><br/><li>d</ul>') == \
+        '<div id="content"><ul><li>a<br/></li><li><s>b<br/></s></li><li><s>c</s><br/></li><li>d</li></ul></div>'
+
+    # the shape ebooklib writes, after its lxml re-parse: it un-nests <li>a<li>b by itself, but the end tags bs4 writes
+    # for the nesting make it close the enclosing list early when a nested list is involved (Angband, update 38),
+    # dropping the items that follow into the page: the un-nesting has to happen before the page is serialised
+    nested = '<div id="content"><ul><li>a<li>b<ul><li>n1<li>n2</ul>text<li>c</ul>after</div>'
+    assert _orphan_items(parse_html_string(str(BeautifulSoup(nested, "html.parser")))) == ["li in div"]
+    written = parse_html_string(str(get_cleaned_html(nested)))
+    assert _orphan_items(written) == [] and _stray_list_content(written) == []
+    outer, inner = written.findall(".//ul")
+    assert ["".join(li.itertext()) for li in outer.findall("li")] == ["a", "bn1n2text", "c"] and outer.tail == "after"
+    assert ["".join(li.itertext()) for li in inner.findall("li")] == ["n1", "n2"]
+
+    # real landing pages, one per shape: bare items (Second-Sight), items in links (Final-Fantasy-VI), a list in a
+    # bold wrapper (Doom-WADs), strike-throughs in the middle of a list of unclosed items (Killzone-3). Every word
+    # of the content stays, in order: the fix moves markup, not text.
+    with zipfile.ZipFile(SNAPSHOT) as z:
+        for slug in ("Second-Sight", "Final-Fantasy-VI", "Doom-WADs", "Killzone-3"):
+            page = z.read(f"landing_pages/{slug}.html").decode("utf-8")
+            as_served = parse_html_string(page)
+            written = parse_html_string(str(get_cleaned_html(page)))
+            assert _orphan_items(as_served) or as_served.findall(".//b/ul"), slug   # the page needs the fix
+            assert _orphan_items(written) == [] and _stray_list_content(written) == [], slug
+            content = lambda tree: "".join(tree.find(".//div[@id='content']").itertext()).split()   # noqa: E731
+            assert content(written) == content(as_served), slug
+
+
+def test_every_landing_page_list_holds_only_items_and_every_item_sits_in_a_list():
+    """The invariants behind RSC-005 "expected the element end-tag or element li" and "element li not allowed
+    here": once sanitised and re-parsed the way ebooklib writes it, no list of any landing page in the archive
+    holds anything but items, and every item sits directly in a list."""
     from ebooklib.utils import parse_html_string
     offenders = {}
     with zipfile.ZipFile(SNAPSHOT) as z:
@@ -2362,9 +2424,9 @@ def test_every_landing_page_list_holds_only_items():
             if not name.startswith("landing_pages/"):
                 continue
             written = parse_html_string(str(get_cleaned_html(z.read(name).decode("utf-8", "replace"))))
-            if stray := _stray_list_content(written):
-                offenders[name[len("landing_pages/"):-len(".html")]] = sorted(set(stray))
-    assert set(offenders) <= LISTS_WITH_WRAPPED_ITEMS, offenders
+            if found := _stray_list_content(written) + _orphan_items(written):
+                offenders[name[len("landing_pages/"):-len(".html")]] = sorted(set(found))
+    assert offenders == {}
 
 
 def test_blocks_inside_links_are_restructured_so_the_page_validates():

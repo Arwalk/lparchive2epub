@@ -37,7 +37,10 @@ CHECKSUMS = Path(__file__).resolve().parent.parent / "tests" / "resources" / "li
 # LP linking archived files whose names hold spaces and brackets ("music/area 1 and earth [giga].mp3":
 # percent-encoded by to_uri, epubcheck RSC-020 in 98 books of that run), and a video LP whose landing
 # page fills its lists with headings, pictures, line breaks, bare text and 23 nested lists between the
-# items (moved into the items by sanitize(): epubcheck RSC-005 in 123 books of that run).
+# items (moved into the items by sanitize(): epubcheck RSC-005 in 123 books of that run), a video LP whose
+# landing page nests unclosed items through a strike-through and wraps items in <b> (un-nested and turned
+# inside out by sanitize(): RSC-005 "element li not allowed here" in 70 books of that run), and a video LP
+# whose landing page puts a whole list inside a <b> (the wrapper goes inside each item: same class).
 LETS_PLAYS = [
     "X-COM-Terror-from-the-Deep",
     "Dwarf-Fortress-Boatmurdered",
@@ -48,6 +51,8 @@ LETS_PLAYS = [
     "007-Everything-or-Nothing",
     "Rez",
     "Quake",
+    "Prince-of-Persia-2008-(by-nine-gear-crow)",
+    "Doom-WADs",
 ]
 
 

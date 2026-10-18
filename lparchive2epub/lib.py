@@ -18,7 +18,7 @@ from urllib.parse import urlparse, urlsplit, urlunsplit, urljoin, urldefrag, unq
 
 import aiohttp
 from bs4 import BeautifulSoup, Comment
-from bs4.element import PreformattedString, Tag
+from bs4.element import NavigableString, PreformattedString, Tag
 from ebooklib import epub
 from ebooklib.epub import EpubHtml, EpubImage, EpubBook
 from tqdm.asyncio import tqdm
@@ -1740,6 +1740,7 @@ def sanitize(soup: BeautifulSoup):
         if style:
             legacy["style"] = style
 
+    nest_orphan_items(soup)
     nest_stray_list_content(soup)
     unnest_blocks_from_inline(soup)
 
@@ -1760,15 +1761,89 @@ def sanitize(soup: BeautifulSoup):
                 element["class"] = classes + [SPOILER_CLASS]
 
 
+def nest_orphan_items(soup: BeautifulSoup):
+    """Forum authors write <li> with no list around it (the bullets show all the same), inside bold text, links
+    and strike-throughs, and one after another without closing any. XHTML 5 wants every <li> directly in a
+    <ul>/<ol> (epubcheck RSC-005 "element li not allowed here" in 70 books of the archive-wide run), and the
+    unclosed ones do worse: html.parser nests each item in the one before, and the end tags bs4 then writes
+    mislead ebooklib's lxml re-parse into closing the enclosing list early, dropping the items that follow
+    into the page. This does to the tree what every browser does while parsing: an item that opens inside
+    another closes it, so the inner one and whatever follows it move out; an inline wrapper around items goes
+    inside each of them (<b><li>x</li></b> -> <li><b>x</b></li>), whatever else it held keeping a copy of its
+    own in place, for nest_stray_list_content to sort out; and a run of items with no list at all gets a <ul>."""
+    for item in soup.find_all("li"):
+        while (parent := item.parent).name not in LIST_TAGS:
+            if parent.name in INLINE_WRAPPERS:
+                _turn_inside_out(soup, parent)
+            elif parent.name == "li":
+                parent.insert_after(item, *item.next_siblings)
+            else:
+                run, between, node = [item], [], item.next_sibling
+                while node is not None:
+                    if isinstance(node, Tag) and node.name == "li":
+                        run += between + [node]   # the whitespace and comments between two items go in the list...
+                        between = []
+                    elif _is_blank(node):
+                        between.append(node)      # ...those after the last one stay out
+                    else:
+                        break
+                    node = node.next_sibling
+                lst = soup.new_tag("ul")
+                item.insert_before(lst)
+                lst.extend(run)
+                break
+
+
+def _turn_inside_out(soup: BeautifulSoup, wrapper: Tag):
+    """<b>intro<li>x</li><li>y</li></b> -> <b>intro</b><li><b>x</b></li><li><b>y</b></li>: the wrapper is unwrapped
+    and copies of it go around every run of inline content it held, into its items and their nested lists at any
+    depth (<b><ul><li>x<ul><li>y</li></ul></li></ul></b> -> <ul><li><b>x</b><ul><li><b>y</b></li></ul></li></ul>).
+    A block of another kind is left as it is, without the wrapper. An id (or the HTML 4 name that becomes one)
+    goes on the first copy."""
+    attrs = dict(wrapper.attrs)
+
+    def copy() -> Tag:
+        nonlocal attrs
+        tag = soup.new_tag(wrapper.name, attrs={name: list(value) if isinstance(value, list) else value
+                                                for name, value in attrs.items()})
+        attrs = {name: value for name, value in attrs.items() if name not in ("id", "name")}
+        return tag
+
+    def push_into(container: Tag):
+        run = None
+        for child in list(container.children):
+            if isinstance(child, Tag) and (child.name == "li" or child.name in BLOCK_TAGS):
+                if child.name == "li":
+                    push_into(child)
+                elif child.name in LIST_TAGS:
+                    for item in child.find_all("li", recursive=False):
+                        push_into(item)
+                run = None
+            elif run is None and _is_blank(child):
+                continue   # whitespace and comments between items stay loose
+            else:
+                if run is None:
+                    run = copy()
+                    child.insert_before(run)
+                run.append(child)
+
+    push_into(wrapper)
+    wrapper.unwrap()
+
+
+def _is_blank(node) -> bool:
+    """Whitespace-only text, or a comment (or CDATA, doctype...): nothing a reader sees."""
+    return isinstance(node, NavigableString) and (isinstance(node, PreformattedString) or not node.strip())
+
+
 def nest_stray_list_content(soup: BeautifulSoup):
     """Forum authors close </li> early or never open one, so a <ul> ends up holding <br>s, text, <b>s, <img>s,
     headings or a whole nested <ul> between its items or before the first one. XHTML 5 allows nothing but
     <li> there (epubcheck RSC-005 in 123 books of the archive-wide run) and both parsers leave it where it
     is. What follows an item becomes the item's continuation (a nested list inside the item before it is
     how nested lists are written: nothing moves on the page); what comes before the first item gets an
-    unmarked item of its own, indented and without a bullet, which is how browsers show it. An inline
-    wrapper that swallowed the list's own items (<ul><b><li>x</li></b></ul>) is not stray content but
-    mis-nested items, left to the orphan-<li> pass."""
+    unmarked item of its own, indented and without a bullet, which is how browsers show it. Runs after
+    nest_orphan_items, so every item already sits directly in its list."""
     for lst in soup.find_all(LIST_TAGS):
         item, moving = None, False
         for child in list(lst.children):
@@ -1776,7 +1851,7 @@ def nest_stray_list_content(soup: BeautifulSoup):
                 if child.name == "li":
                     item, moving = child, False
                     continue
-                if child.name in LIST_CHILD_TAGS or _holds_items_of(child, lst):
+                if child.name in LIST_CHILD_TAGS:
                     moving = False
                     continue
             elif isinstance(child, PreformattedString) or not str(child).strip():
@@ -1790,33 +1865,35 @@ def nest_stray_list_content(soup: BeautifulSoup):
             moving = True
 
 
-def _holds_items_of(element: Tag, lst: Tag) -> bool:
-    """True when the element wraps <li>s that belong to lst itself, as in <ul><b><li>x</li></b></ul>,
-    rather than to a list of its own."""
-    return element.name not in LIST_TAGS and any(li.find_parent(LIST_TAGS) is lst for li in element.find_all("li"))
-
-
 def unnest_blocks_from_inline(soup: BeautifulSoup):
     """Forum posts contain things like <a href="full.png"><p><img src="thumb.png"/></p></a>: a paragraph
     inside a link. EPUB only allows inline content in a link, so epubcheck rejects the page.
     A link (or other inline wrapper) around exactly one block is turned inside out,
     <p><a href="full.png"><img/></a></p>, keeping both the paragraph and the link; around anything
-    more complicated, the blocks are unwrapped so their content stays, inline, inside the link."""
+    more complicated, the blocks are unwrapped so their content stays, inline, inside the link. Not a list,
+    though, at any depth: unwrapping one orphans its items, and turning the wrapper inside out around it puts
+    them under the wrapper (<ul><b><li>x</li></b></ul>: RSC-005 "element li not allowed here" in 4 landing
+    pages of the archive); the wrapper goes inside each item instead, the way nest_orphan_items treats a
+    wrapper that holds bare items."""
     for wrapper in soup.find_all(INLINE_WRAPPERS):
         blocks = [child for child in wrapper.children if getattr(child, "name", None) in BLOCK_TAGS]
         if not blocks:
             continue
         others = [child for child in wrapper.children
                   if child not in blocks and (getattr(child, "name", None) is not None or str(child).strip())]
-        if len(blocks) == 1 and not others and not blocks[0].find(BLOCK_TAGS):
+        if len(blocks) == 1 and not others and not blocks[0].find(BLOCK_TAGS) and blocks[0].name not in LIST_TAGS:
             block = blocks[0]
             wrapper.replace_with(block)      # the block takes the wrapper's place...
             block.insert(0, wrapper.extract() if wrapper.parent else wrapper)
             for child in list(block.children)[1:]:
                 wrapper.append(child.extract())   # ...and the wrapper moves inside it, around its content
         else:
+            lists = wrapper.find_all(LIST_TAGS)
             for block in wrapper.find_all(BLOCK_TAGS):
-                block.unwrap()
+                if block.name not in LIST_TAGS:
+                    block.unwrap()
+            if lists:
+                _turn_inside_out(soup, wrapper)
 
 
 def _hides_its_text(style: str | None) -> bool:
