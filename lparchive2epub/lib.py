@@ -1686,6 +1686,22 @@ LEGACY_INLINE_TAGS = {
 # What XHTML 5 allows directly inside a list: items, and the two tags TAGS_TO_DROP removes anyway.
 LIST_TAGS = ["ul", "ol"]
 LIST_CHILD_TAGS = ("li", "script", "template")
+# The parts of a table and where each belongs, and what XHTML 5 allows directly inside a table, a section
+# and a row (<colgroup> and <script> are gone by the time the tables are looked at).
+TABLE_SECTION_TAGS = ["thead", "tbody", "tfoot"]
+CELL_TAGS = ["td", "th"]
+TABLE_PART_TAGS = ["table"] + TABLE_SECTION_TAGS + ["tr"] + CELL_TAGS
+TABLE_PART_HOMES = {"tr": ["table"] + TABLE_SECTION_TAGS, "td": ["tr"], "th": ["tr"],
+                    "thead": ["table"], "tbody": ["table"], "tfoot": ["table"]}
+TABLE_CHILD_TAGS = ("caption", "colgroup", "thead", "tbody", "tfoot", "tr", "script", "template")
+SECTION_CHILD_TAGS = ("tr", "script", "template")
+ROW_CHILD_TAGS = ("td", "th", "script", "template")
+# Blocks made of items or of rows and cells rather than of content: an inline wrapper around one goes
+# inside each item or cell (_turn_inside_out), never around the block (XHTML 5 allows nothing else there)
+STRUCTURED_TAGS = LIST_TAGS + ["table"]
+# What _turn_inside_out steps into rather than wraps: the structure of lists and tables, down to the items,
+# the cells and the caption
+CONTAINER_TAGS = LIST_TAGS + ["li", "caption"] + TABLE_PART_TAGS
 # Block-level elements that EPUB does not allow inside a link (or any inline element)
 BLOCK_TAGS = ["p", "div", "blockquote", "ul", "ol", "table", "pre", "h1", "h2", "h3", "h4", "h5", "h6"]
 INLINE_WRAPPERS = ["a", "b", "i", "u", "s", "em", "strong", "span", "small", "sub", "sup", "code"]
@@ -1740,6 +1756,7 @@ def sanitize(soup: BeautifulSoup):
         if style:
             legacy["style"] = style
 
+    repair_tables(soup)
     nest_orphan_items(soup)
     nest_stray_list_content(soup)
     unnest_blocks_from_inline(soup)
@@ -1761,6 +1778,63 @@ def sanitize(soup: BeautifulSoup):
                 element["class"] = classes + [SPOILER_CLASS]
 
 
+def repair_tables(soup: BeautifulSoup):
+    """Forum authors leave <tr>s and <td>s unclosed (html.parser nests each in the one before, through an unclosed
+    link at times), write rows with no <table> around them inside bold or italic text, cells straight into a table,
+    pictures, text, lists and paragraphs between the rows, and open <table> twice. XHTML 5 wants a table made of
+    rows made of cells and nothing else (epubcheck RSC-005 in 17 books of the archive-wide run), and ebooklib's lxml
+    re-parse leaves all of it as it stands but the plainest nesting. This does to the tree what a browser does
+    while parsing: a part that opens inside another part closes it (a row inside a cell ends the cell and the row,
+    a table inside a table ends the table), so the inner one and whatever follows it move out; an inline wrapper
+    around rows or cells goes inside each cell; bare cells get a row and bare rows a table; and whatever else a
+    table, a section or a row holds goes just before the table, in order ("foster parenting"). A table left with
+    nothing in it goes."""
+    for part in soup.find_all(TABLE_PART_TAGS):
+        _place_table_part(soup, part)
+    for table in soup.find_all("table"):
+        for stray in list(_table_strays(table, TABLE_CHILD_TAGS)):
+            table.insert_before(stray.extract())   # one after the other, each right before the table: in order
+        if not table.find(True):
+            table.decompose()
+
+
+def _place_table_part(soup: BeautifulSoup, part: Tag):
+    """Moves `part` (a table, section, row or cell) until it sits where XHTML 5 allows it, see repair_tables."""
+    if part.name == "table":
+        while part.parent.name in TABLE_PART_TAGS and part.parent.name not in CELL_TAGS:
+            part.parent.insert_after(part, *part.next_siblings)   # in a cell, a table is nested; in a table, it ends it
+        return
+    while (parent := part.parent).name not in TABLE_PART_HOMES[part.name]:
+        closest = part.find_parent(TABLE_PART_TAGS)
+        if parent.name in INLINE_WRAPPERS:
+            _turn_inside_out(soup, parent)
+        elif closest is not None and (part.name not in CELL_TAGS or closest.name in CELL_TAGS + ["tr"]):
+            parent.insert_after(part, *part.next_siblings)   # the part closes what it opened in, up to its home
+        elif part.name in CELL_TAGS:
+            _place_table_part(soup, _wrap_run(soup, part, CELL_TAGS, "tr"))   # the row the cells needed, placed in turn
+            break
+        else:
+            _wrap_run(soup, part, TABLE_SECTION_TAGS if part.name in TABLE_SECTION_TAGS else ["tr"], "table")
+            break
+
+
+def _table_strays(holder: Tag, allowed: tuple):
+    """What a table, a section or a row holds that XHTML 5 does not allow there, in document order and down into
+    its sections and rows: anything but its parts, and the whitespace and comments right after a stray (those
+    between two parts stay)."""
+    moving = False
+    for child in list(holder.children):
+        if isinstance(child, Tag) and child.name in allowed:
+            moving = False
+            if child.name in TABLE_SECTION_TAGS:
+                yield from _table_strays(child, SECTION_CHILD_TAGS)
+            elif child.name == "tr":
+                yield from _table_strays(child, ROW_CHILD_TAGS)
+        elif moving or not _is_blank(child):
+            moving = True
+            yield child
+
+
 def nest_orphan_items(soup: BeautifulSoup):
     """Forum authors write <li> with no list around it (the bullets show all the same), inside bold text, links
     and strike-throughs, and one after another without closing any. XHTML 5 wants every <li> directly in a
@@ -1778,28 +1852,36 @@ def nest_orphan_items(soup: BeautifulSoup):
             elif parent.name == "li":
                 parent.insert_after(item, *item.next_siblings)
             else:
-                run, between, node = [item], [], item.next_sibling
-                while node is not None:
-                    if isinstance(node, Tag) and node.name == "li":
-                        run += between + [node]   # the whitespace and comments between two items go in the list...
-                        between = []
-                    elif _is_blank(node):
-                        between.append(node)      # ...those after the last one stay out
-                    else:
-                        break
-                    node = node.next_sibling
-                lst = soup.new_tag("ul")
-                item.insert_before(lst)
-                lst.extend(run)
+                _wrap_run(soup, item, ("li",), "ul")
                 break
+
+
+def _wrap_run(soup: BeautifulSoup, first: Tag, names, container: str) -> Tag:
+    """A new <container> around `first` and the run of `names` siblings after it, with the whitespace and comments
+    between two of them (those after the last one stay out)."""
+    run, between, node = [first], [], first.next_sibling
+    while node is not None:
+        if isinstance(node, Tag) and node.name in names:
+            run += between + [node]
+            between = []
+        elif _is_blank(node):
+            between.append(node)
+        else:
+            break
+        node = node.next_sibling
+    wrapper = soup.new_tag(container)
+    first.insert_before(wrapper)
+    wrapper.extend(run)
+    return wrapper
 
 
 def _turn_inside_out(soup: BeautifulSoup, wrapper: Tag):
     """<b>intro<li>x</li><li>y</li></b> -> <b>intro</b><li><b>x</b></li><li><b>y</b></li>: the wrapper is unwrapped
     and copies of it go around every run of inline content it held, into its items and their nested lists at any
-    depth (<b><ul><li>x<ul><li>y</li></ul></li></ul></b> -> <ul><li><b>x</b><ul><li><b>y</b></li></ul></li></ul>).
-    A block of another kind is left as it is, without the wrapper. An id (or the HTML 4 name that becomes one)
-    goes on the first copy."""
+    depth (<b><ul><li>x<ul><li>y</li></ul></li></ul></b> -> <ul><li><b>x</b><ul><li><b>y</b></li></ul></li></ul>),
+    and into the cells of its rows and tables the same way. A block of another kind is left as it is, without
+    the wrapper; so is a link inside a link's copy (the inner one stands, as in a browser). An id (or the HTML 4
+    name that becomes one) goes on the first copy."""
     attrs = dict(wrapper.attrs)
 
     def copy() -> Tag:
@@ -1812,12 +1894,11 @@ def _turn_inside_out(soup: BeautifulSoup, wrapper: Tag):
     def push_into(container: Tag):
         run = None
         for child in list(container.children):
-            if isinstance(child, Tag) and (child.name == "li" or child.name in BLOCK_TAGS):
-                if child.name == "li":
-                    push_into(child)
-                elif child.name in LIST_TAGS:
-                    for item in child.find_all("li", recursive=False):
-                        push_into(item)
+            if isinstance(child, Tag) and child.name in CONTAINER_TAGS:
+                push_into(child)   # into the items and cells, past the lists, rows and sections that hold them
+                run = None
+            elif isinstance(child, Tag) and (child.name in BLOCK_TAGS
+                                             or wrapper.name == "a" and (child.name == "a" or child.find("a"))):
                 run = None
             elif run is None and _is_blank(child):
                 continue   # whitespace and comments between items stay loose
@@ -1870,29 +1951,31 @@ def unnest_blocks_from_inline(soup: BeautifulSoup):
     inside a link. EPUB only allows inline content in a link, so epubcheck rejects the page.
     A link (or other inline wrapper) around exactly one block is turned inside out,
     <p><a href="full.png"><img/></a></p>, keeping both the paragraph and the link; around anything
-    more complicated, the blocks are unwrapped so their content stays, inline, inside the link. Not a list,
-    though, at any depth: unwrapping one orphans its items, and turning the wrapper inside out around it puts
-    them under the wrapper (<ul><b><li>x</li></b></ul>: RSC-005 "element li not allowed here" in 4 landing
-    pages of the archive); the wrapper goes inside each item instead, the way nest_orphan_items treats a
-    wrapper that holds bare items."""
-    for wrapper in soup.find_all(INLINE_WRAPPERS):
+    more complicated, the blocks are unwrapped so their content stays, inline, inside the link. Not a list or
+    a table, though, at any depth: unwrapping one orphans its items or rows, and turning the wrapper inside out
+    around it puts them under the wrapper (<ul><b><li>x</li></b></ul>: RSC-005 "element li not allowed here" in
+    4 landing pages of the archive; <table><b><tr>...: the same, for rows); the wrapper goes inside each item or
+    cell instead, the way nest_orphan_items and repair_tables treat a wrapper that holds bare items or rows. Inner
+    wrappers first: once <i><b><table>...</b></i> has its <b> inside the cells, the <i> holds the table directly
+    and gets the same treatment (Secret-of-Evermore), where in document order it had been looked at already."""
+    for wrapper in reversed(soup.find_all(INLINE_WRAPPERS)):
         blocks = [child for child in wrapper.children if getattr(child, "name", None) in BLOCK_TAGS]
         if not blocks:
             continue
         others = [child for child in wrapper.children
                   if child not in blocks and (getattr(child, "name", None) is not None or str(child).strip())]
-        if len(blocks) == 1 and not others and not blocks[0].find(BLOCK_TAGS) and blocks[0].name not in LIST_TAGS:
+        if len(blocks) == 1 and not others and not blocks[0].find(BLOCK_TAGS) and blocks[0].name not in STRUCTURED_TAGS:
             block = blocks[0]
             wrapper.replace_with(block)      # the block takes the wrapper's place...
             block.insert(0, wrapper.extract() if wrapper.parent else wrapper)
             for child in list(block.children)[1:]:
                 wrapper.append(child.extract())   # ...and the wrapper moves inside it, around its content
         else:
-            lists = wrapper.find_all(LIST_TAGS)
+            structured = wrapper.find_all(STRUCTURED_TAGS)
             for block in wrapper.find_all(BLOCK_TAGS):
-                if block.name not in LIST_TAGS:
+                if block.name not in STRUCTURED_TAGS:
                     block.unwrap()
-            if lists:
+            if structured:
                 _turn_inside_out(soup, wrapper)
 
 

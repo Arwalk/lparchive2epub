@@ -2413,10 +2413,129 @@ def test_orphan_items_get_a_list_so_the_page_validates():
             assert content(written) == content(as_served), slug
 
 
-def test_every_landing_page_list_holds_only_items_and_every_item_sits_in_a_list():
-    """The invariants behind RSC-005 "expected the element end-tag or element li" and "element li not allowed
-    here": once sanitised and re-parsed the way ebooklib writes it, no list of any landing page in the archive
-    holds anything but items, and every item sits directly in a list."""
+def _table_faults(tree) -> list[str]:
+    """What breaks the table content model in an lxml tree: a part outside its home ("tr in div"), a table in a
+    table, and what a table, a section or a row holds besides its parts (tag names, and "text")."""
+    homes = {"tr": ("table", "thead", "tbody", "tfoot"), "td": ("tr",), "th": ("tr",),
+             "thead": ("table",), "tbody": ("table",), "tfoot": ("table",)}
+    allowed = {"table": ("caption", "colgroup", "thead", "tbody", "tfoot", "tr", "script", "template"),
+               "thead": ("tr", "script", "template"), "tbody": ("tr", "script", "template"),
+               "tfoot": ("tr", "script", "template"), "tr": ("td", "th", "script", "template")}
+    found = []
+    for part in tree.iter(*homes):
+        if part.getparent().tag not in homes[part.tag]:
+            found.append(f"{part.tag} in {part.getparent().tag}")
+    for table in tree.iter("table"):
+        if table.getparent().tag in ("table", "thead", "tbody", "tfoot", "tr"):
+            found.append(f"table in {table.getparent().tag}")
+    for holder in tree.iter(*allowed):
+        if (holder.text or "").strip():
+            found.append(f"text in {holder.tag}")
+        for child in holder:
+            if isinstance(child.tag, str) and child.tag not in allowed[holder.tag]:   # comments have no tag name
+                found.append(f"{child.tag} in {holder.tag}")
+            if (child.tail or "").strip():
+                found.append(f"text in {holder.tag}")
+    return found
+
+
+def test_tables_are_repaired_so_the_page_validates():
+    """Forum authors leave <tr>s and <td>s unclosed, write rows with no <table> around them inside <b>/<i>, cells
+    straight into a table, pictures, text and paragraphs between the rows, and open <table> twice; XHTML 5 wants a
+    table made of rows made of cells and nothing else (epubcheck RSC-005 in 17 books of the archive-wide run), and
+    ebooklib's lxml re-parse leaves all of it as it stands but the plainest nesting. sanitize() does what browsers
+    do while parsing: a part that opens inside another part closes it, a wrapper around rows goes inside the cells,
+    bare cells get a row and bare rows a table, and whatever else a table holds goes just before it."""
+    from ebooklib.utils import parse_html_string
+
+    def clean(html: str) -> str:
+        return str(get_cleaned_html(f'<div id="content">{html}</div>'))[len('<div id="content">'):-len('</div>')]
+
+    # unclosed rows and cells, which html.parser nests ever deeper (Sonic-Advance, Yakuza: 9 of the 17 books), here
+    # through an unclosed link too (I-Wanna-Be-The-Guy): lxml un-nests the plain case by itself, not through the link,
+    # which stays with its own cell rather than going around the links of the cells that follow
+    assert clean('<table><tr><td>a<td>b <tr><td>c<td>d</table>after') == \
+        '<table><tr><td>a</td><td>b </td></tr><tr><td>c</td><td>d</td></tr></table>after'
+    assert clean('<table><tr><td><a href="X">one<tr><td><a href="Y">two</a></table>') == \
+        '<table><tr><td><a href="X">one</a></td></tr><tr><td><a href="Y">two</a></td></tr></table>'
+    # rows with no table at all, in bold italics (Metal-Gear-Solid-3, The-Void): the wrappers go inside the cells and
+    # the rows get a table; a wrapper around a whole table or a section, the same (Secret-of-Evermore, where
+    # unnest_blocks_from_inline used to unwrap the table, or to put the wrapper around the rows)
+    assert clean('<i><b><tr><td>x</td><td>y</td></tr> <tr><td>z</td></tr></b></i>after') == \
+        '<table><tr><td><i><b>x</b></i></td><td><i><b>y</b></i></td></tr> <tr><td><i><b>z</b></i></td></tr></table>after'
+    assert clean('<b><table><tr><td>x</td></tr></table></b>') == '<table><tr><td><b>x</b></td></tr></table>'
+    assert clean('<a href="u"><table><tr><td>x</td><td><a href="v">y</a></td></tr></table></a>') == \
+        '<table><tr><td><a href="u">x</a></td><td><a href="v">y</a></td></tr></table>'
+    assert clean('<table><b><tbody><tr><td>x</td></tr></tbody></b></table>') == \
+        '<table><tbody><tr><td><b>x</b></td></tr></tbody></table>'
+    assert clean('<div><tbody><tr><td>x</td></tr></tbody></div>') == '<div><table><tbody><tr><td>x</td></tr></tbody></table></div>'
+    # inner wrappers first: Secret-of-Evermore's <i><b>...<h1/><table>...</b></i>, where the <i> holds the table on
+    # its own once the <b> is inside the cells (the heading is unwrapped, as every block in mixed content is)
+    assert clean('<i><b>intro<br/><h1>h</h1><table><tr><td>a<td>b</table></b></i>after') == \
+        '<i><b>intro<br/>h</b></i><table><tr><td><i><b>a</b></i></td><td><i><b>b</b></i></td></tr></table>after'
+    assert clean('<a href="u"><b><p>x</p></b></a>') == '<p><a href="u"><b>x</b></a></p>'
+    # cells with no row (Fahrenheit, Jedi-Academy, Dark-Forces-2), and with no table at all
+    assert clean('<table><tr><td>a</td></tr><td>b</td> <td>c</td></table>') == \
+        '<table><tr><td>a</td></tr><tr><td>b</td> <td>c</td></tr></table>'
+    assert clean('<div><td>x</td></div>') == '<div><table><tr><td>x</td></tr></table></div>'
+    # whatever else a table or a row holds goes just before the table, in order, where a browser shows it too
+    # (Oracle-Series, Sonic-Adventure-2-Battle, Bioshock: pictures, headings, paragraphs, line breaks and text
+    # between the rows); a wrapper around rows and strays goes inside the cells and around the strays
+    assert clean('<table><img src="i.png"/><i>who</i> <tr><td>a</td></tr>text<br/><p>para</p><ul><li>l</li></ul></table>') == \
+        '<img src="i.png"/><i>who</i> text<br/><p>para</p><ul><li>l</li></ul><table><tr><td>a</td></tr></table>'
+    assert clean('<table><tr>intro<td>a</td><p>x</p></tr></table>') == 'intro<p>x</p><table><tr><td>a</td></tr></table>'
+    assert clean('<table><tr><td>a</td></tr><b><tr><td>x</td></tr>stray</b></table>') == \
+        '<b>stray</b><table><tr><td>a</td></tr><tr><td><b>x</b></td></tr></table>'
+    assert clean('<b><ul>stray<li>x</li></ul></b>') == \
+        '<ul><li style="list-style-type: none;"><b>stray</b></li><li><b>x</b></li></ul>'   # lists: the same, now
+    # a table that opens inside a table closes it, as in a browser: Oracle-Series opens <table> twice and the rest of
+    # the page sits in the outer one, which is left empty and goes; rows after an inner table get a table of their own
+    assert clean('<table><table><tr><td>a</td></tr></table><br/>rest<table><tr><td>b</td></tr></table>') == \
+        '<table><tr><td>a</td></tr></table><br/>rest<table><tr><td>b</td></tr></table>'
+    assert clean('<table><tr><td>a</td></tr><table><tr><td>i</td></tr></table><tr><td>b</td></tr></table>') == \
+        '<table><tr><td>a</td></tr></table><table><tr><td>i</td></tr></table><table><tr><td>b</td></tr></table>'
+    # lists and tables in each other: an item in a table goes before it and gets its list, a row in a list gets its
+    # table and goes into the item before it
+    assert clean('<table><li>x</li><tr><td>a</td></tr></table>') == '<ul><li>x</li></ul><table><tr><td>a</td></tr></table>'
+    assert clean('<ul><li>a</li><tr><td>x</td></tr></ul>') == '<ul><li>a<table><tr><td>x</td></tr></table></li></ul>'
+    # well-formed tables are left alone (compared with bs4's own round trip, which drops the indentation), one nested
+    # in a cell included
+    for fine in ('<table>\n <caption>c</caption>\n <thead><tr><th>h</th></tr></thead>\n <tbody>\n  <tr><td>a</td></tr>\n'
+                 '  <!-- x -->\n </tbody>\n</table>', '<table><tr><td><table><tr><td>i</td></tr></table></td></tr></table>'):
+        assert clean(fine) == str(BeautifulSoup(f'<div id="content">{fine}</div>', "html.parser"))[len('<div id="content">'):-6]
+
+    # the shape ebooklib writes, after its lxml re-parse, which leaves every one of these as it stands
+    for html in ('<table><tr><td><a href="X">one<tr><td><a href="Y">two</a></table>', '<b><tr><td>x</td></tr></b>',
+                 '<table><b><tr><td>x</td></tr></b>stray<td>a</td></table>', '<i><b><table><tr><td>a</td></tr></table></b></i>'):
+        assert _table_faults(parse_html_string(str(BeautifulSoup(html, "html.parser")))) or "<i>" in html, html
+        written = parse_html_string(str(get_cleaned_html(f'<div id="content">{html}</div>')))
+        assert _table_faults(written) == [] and written.findall(".//a//a") == [], html
+        assert [t.getparent().tag for t in written.iter("table")] == ["div"], html
+
+    # real landing pages, one or two per shape. Every word of the content stays, in order but for what is fostered
+    # out from between the rows of Bioshock and Sonic-Adventure-2-Battle (before the table, where a browser shows it)
+    inline = ("a", "b", "i", "u", "s", "em", "strong", "span", "small", "sub", "sup", "code")
+    with zipfile.ZipFile(SNAPSHOT) as z:
+        for slug in ("Legend-of-Zelda-Oracle-Series", "I-Wanna-Be-The-Guy", "Fahrenheit", "Sonic-Advance", "Bioshock",
+                     "Sonic-Adventure-2-Battle", "Secret-of-Evermore", "Metal-Gear-Solid-3-Snake-Eater", "The-Void"):
+            page = z.read(f"landing_pages/{slug}.html").decode("utf-8")
+            soup = BeautifulSoup(page, "html.parser")
+            as_written_before = parse_html_string(str(soup))
+            assert [f for f in _table_faults(as_written_before) if f != "col in table"] \
+                or soup.find("tr").find_parent(inline) is not None, slug   # the page needs the fix
+            written = parse_html_string(str(get_cleaned_html(page)))
+            assert _table_faults(written) == [] and written.findall(".//a//a") == [], slug
+            assert [t.getparent().tag for t in written.iter("table") if t.getparent().tag in inline] == [], slug
+            source = soup.find("div", id="content").get_text(" ").split()
+            words = " ".join(written.find(".//div[@id='content']").itertext()).split()
+            assert words == source or (slug in ("Bioshock", "Sonic-Adventure-2-Battle") and sorted(words) == sorted(source)), slug
+
+
+def test_every_landing_page_has_lists_and_tables_that_validate():
+    """The invariants behind RSC-005 "expected the element end-tag or element li", "element li not allowed here"
+    and the table content model: once sanitised and re-parsed the way ebooklib writes it, no list of any landing
+    page in the archive holds anything but items, every item sits directly in a list, every table is made of rows
+    made of cells and nothing else, and every row and cell sits in its table."""
     from ebooklib.utils import parse_html_string
     offenders = {}
     with zipfile.ZipFile(SNAPSHOT) as z:
@@ -2424,7 +2543,7 @@ def test_every_landing_page_list_holds_only_items_and_every_item_sits_in_a_list(
             if not name.startswith("landing_pages/"):
                 continue
             written = parse_html_string(str(get_cleaned_html(z.read(name).decode("utf-8", "replace"))))
-            if found := _stray_list_content(written) + _orphan_items(written):
+            if found := _stray_list_content(written) + _orphan_items(written) + _table_faults(written):
                 offenders[name[len("landing_pages/"):-len(".html")]] = sorted(set(found))
     assert offenders == {}
 

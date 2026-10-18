@@ -39,8 +39,12 @@ CHECKSUMS = Path(__file__).resolve().parent.parent / "tests" / "resources" / "li
 # page fills its lists with headings, pictures, line breaks, bare text and 23 nested lists between the
 # items (moved into the items by sanitize(): epubcheck RSC-005 in 123 books of that run), a video LP whose
 # landing page nests unclosed items through a strike-through and wraps items in <b> (un-nested and turned
-# inside out by sanitize(): RSC-005 "element li not allowed here" in 70 books of that run), and a video LP
-# whose landing page puts a whole list inside a <b> (the wrapper goes inside each item: same class).
+# inside out by sanitize(): RSC-005 "element li not allowed here" in 70 books of that run), a video LP
+# whose landing page puts a whole list inside a <b> (the wrapper goes inside each item: same class), a video
+# LP whose landing page opens <table> twice, so that the rest of the page, pictures, lists and three more
+# tables, sits inside the outer table (the inner table closes it and whatever else a table holds goes before
+# it: RSC-005 in 17 books of that run), and a video LP whose landing page never closes a <tr>, a <td> or the
+# <a> in it, so that its rows nest thirteen deep through a link (un-nested, the link kept to its cell: same class).
 LETS_PLAYS = [
     "X-COM-Terror-from-the-Deep",
     "Dwarf-Fortress-Boatmurdered",
@@ -53,6 +57,8 @@ LETS_PLAYS = [
     "Quake",
     "Prince-of-Persia-2008-(by-nine-gear-crow)",
     "Doom-WADs",
+    "Legend-of-Zelda-Oracle-Series",
+    "I-Wanna-Be-The-Guy",
 ]
 
 
