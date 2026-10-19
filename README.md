@@ -158,8 +158,8 @@ image in memory instead, as earlier versions did, which costs several times the 
 ## Checking the book
 
 `--check` validates the written book with [epubcheck](https://www.w3.org/publishing/epubcheck/), the
-W3C's EPUB checker, and prints what it finds, one line per message with its severity, ID and the file
-and line inside the book. The book is written whether or not epubcheck objects; with `--strict`, errors
+W3C's EPUB checker, and prints what it finds, one line per message with its severity, ID, the file
+and line inside the book where it first occurs and how many more places it occurs at. The book is written whether or not epubcheck objects; with `--strict`, errors
 (not warnings) make the run fail with exit code 7. It needs the `check` extra, which brings the
 epubcheck package with the Java program inside it, and a Java runtime on the machine:
 

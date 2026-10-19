@@ -3176,8 +3176,15 @@ EPUBCHECK_JSON = {   # the shape of epubcheck 5.3's --json output, trimmed
          "locations": [{"path": "EPUB/stray.txt", "line": -1, "column": -1}], "suggestion": None},
         {"ID": "PKG-012", "severity": "FATAL", "message": "File name contains characters disallowed.", "locations": []},
         {"ID": "ACC-013", "severity": "USAGE", "message": "Content Documents should include a title.", "locations": []},
+        # epubcheck groups identical messages and lists every place: 3 stray <br> in a list...
+        {"ID": "RSC-005", "severity": "ERROR", "message": 'Error while parsing file: element "br" not allowed here',
+         "locations": [{"path": "EPUB/update_0.xhtml", "line": 10, "column": 4}, {"path": "EPUB/update_0.xhtml", "line": 20, "column": 4},
+                       {"path": "EPUB/update_2.xhtml", "line": 30, "column": 4}], "suggestion": None},
+        # ...and 12 pictures of the wrong type, more places than a finding keeps
+        {"ID": "OPF-029", "severity": "ERROR", "message": 'The file does not appear to match the media type.',
+         "locations": [{"path": f"EPUB/images/{n}.png", "line": -1, "column": -1} for n in range(12)], "suggestion": None},
     ],
-    "checker": {"checkerVersion": "5.3.0", "nFatal": 1, "nError": 1, "nWarning": 1, "nUsage": 1},
+    "checker": {"checkerVersion": "5.3.0", "nFatal": 1, "nError": 16, "nWarning": 1, "nUsage": 1},
 }
 
 
@@ -3186,18 +3193,30 @@ def test_epubcheck_findings_are_parsed_and_reported():
     result = check.parse_epubcheck(EPUBCHECK_JSON)
     assert result.version == "5.3.0"
     assert [(f.severity, f.id, f.where()) for f in result.findings] == [
-        ("ERROR", "RSC-007", "EPUB/update_0.xhtml:71"), ("WARNING", "OPF-003", "EPUB/stray.txt"), ("FATAL", "PKG-012", "")]
-    assert len(result.errors) == 2 and len(result.warnings) == 1       # USAGE advice is not a finding
+        ("ERROR", "RSC-007", "EPUB/update_0.xhtml:71"), ("WARNING", "OPF-003", "EPUB/stray.txt"), ("FATAL", "PKG-012", ""),
+        ("ERROR", "RSC-005", "EPUB/update_0.xhtml:10 (+2 more)"), ("ERROR", "OPF-029", "EPUB/images/0.png (+11 more)")]
+    assert len(result.errors) == 4 and len(result.warnings) == 1       # USAGE advice is not a finding
+    # one finding per distinct message, counting every place it occurs at and keeping the first MAX_LOCATIONS
+    assert [f.count for f in result.findings] == [1, 1, 1, 3, 12]
+    assert result.findings[0].locations == (("EPUB/update_0.xhtml", 71),)
+    assert result.findings[2].locations == ()
+    assert result.findings[3].locations == (("EPUB/update_0.xhtml", 10), ("EPUB/update_0.xhtml", 20), ("EPUB/update_2.xhtml", 30))
+    assert len(result.findings[4].locations) == check.MAX_LOCATIONS == 10 and result.findings[4].locations[-1] == ("EPUB/images/9.png", -1)
+    assert (result.error_count, result.warning_count) == (17, 1)
 
     report = check.format_check_report("/books/x.epub", result, "outcome line")
-    assert "lparchive2epub: epubcheck 5.3.0 found 2 error(s) and 1 warning(s) in /books/x.epub" in report
+    assert "lparchive2epub: epubcheck 5.3.0 found 17 error(s) of 4 kind(s) and 1 warning(s) in /books/x.epub" in report
     assert '  - ERROR RSC-007 EPUB/update_0.xhtml:71: Referenced resource "EPUB/images/missing.png" could not be found in the EPUB.' in report
     assert "  - WARNING OPF-003 EPUB/stray.txt: Item" in report
     assert "  - FATAL PKG-012: File name contains characters disallowed." in report
+    assert '  - ERROR RSC-005 EPUB/update_0.xhtml:10 (+2 more): Error while parsing file: element "br" not allowed here' in report
     assert report.index("outcome line") < report.index(ISSUES_URL)
     assert check.parse_epubcheck({"messages": [], "checker": {"checkerVersion": "5.3.0"}}).findings == []
+    # when every message occurs once the header says just how many, as before
     warnings_only = check.CheckResult("5.3.0", result.warnings)
     assert "found 1 warning(s) in" in check.format_check_report("x.epub", warnings_only, "o")
+    once_each = check.CheckResult("5.3.0", result.findings[:3])
+    assert "found 2 error(s) and 1 warning(s) in" in check.format_check_report("x.epub", once_each, "o")
 
 
 def test_check_availability_is_explained(monkeypatch):
@@ -3304,7 +3323,7 @@ def test_run_epubcheck_failures_are_check_errors(monkeypatch):
     with pytest.raises(lib.CheckError, match="did not finish"):
         check.run_epubcheck("/books/x.epub")
     monkeypatch.setattr(subprocess, "run", lambda *a, **k: _Completed(json.dumps(EPUBCHECK_JSON).encode(), b"", 1))
-    assert len(check.run_epubcheck("/books/x.epub").findings) == 3
+    assert len(check.run_epubcheck("/books/x.epub").findings) == 5
 
 
 @pytest.mark.asyncio
@@ -3365,7 +3384,10 @@ async def test_all_archives_records_epubcheck_findings(monkeypatch):
     results = iter([
         _epubcheck_result(("ERROR", "RSC-007", "missing", "EPUB/update_0.xhtml", 71), ("WARNING", "OPF-003", "stray", "EPUB/s.txt", None)),
         _epubcheck_result(),
-        _epubcheck_result(("ERROR", "RSC-007", "missing again", "EPUB/update_1.xhtml", 3)),
+        _epubcheck_result(("ERROR", "RSC-007", "missing again", "EPUB/update_1.xhtml", 3, 3,
+                           (("EPUB/update_1.xhtml", 3), ("EPUB/update_1.xhtml", 8), ("EPUB/update_4.xhtml", 3))),
+                          ("ERROR", "RSC-007", "another one missing", "EPUB/update_2.xhtml", 5, 2,
+                           (("EPUB/update_2.xhtml", 5), ("EPUB/update_2.xhtml", 9)))),
         lib.CheckError("The book was written at x, but epubcheck did not finish within 1800 s"),
     ])
 
@@ -3396,12 +3418,16 @@ async def test_all_archives_records_epubcheck_findings(monkeypatch):
     assert [(e["slug"], e["kind"]) for e in entries] == [(slug, "epubcheck"), (slug, "epubcheck"), (slug, "check-failed")]
     assert "epubcheck 5.3.0 found 1 error(s) and 1 warning(s)" in entries[0]["report"]
     assert "The book was written all the same." in entries[0]["report"] and ISSUES_URL in entries[0]["report"]
-    assert "epubcheck 5.3.0 found 1 error(s) in" in entries[1]["report"]
+    assert "epubcheck 5.3.0 found 5 error(s) of 2 kind(s) in" in entries[1]["report"]
+    assert "  - ERROR RSC-007 EPUB/update_1.xhtml:3 (+2 more): missing again" in entries[1]["report"]
     assert entries[0]["messages"] == [
-        {"severity": "ERROR", "id": "RSC-007", "message": "missing", "path": "EPUB/update_0.xhtml", "line": 71},
-        {"severity": "WARNING", "id": "OPF-003", "message": "stray", "path": "EPUB/s.txt", "line": None}]
+        {"severity": "ERROR", "id": "RSC-007", "message": "missing", "path": "EPUB/update_0.xhtml", "line": 71, "count": 1, "locations": []},
+        {"severity": "WARNING", "id": "OPF-003", "message": "stray", "path": "EPUB/s.txt", "line": None, "count": 1, "locations": []}]
+    assert entries[1]["messages"][0]["count"] == 3
+    assert entries[1]["messages"][0]["locations"] == [["EPUB/update_1.xhtml", 3], ["EPUB/update_1.xhtml", 8], ["EPUB/update_4.xhtml", 3]]
     assert entries[2]["error"] == "CheckError" and "did not finish" in entries[2]["message"] and "messages" not in entries[2]
-    assert errors.check_summary() == ("epubcheck found fault with 2 book(s); most frequent: RSC-007 2, OPF-003 1; "
+    # the summary counts occurrences (1 + 3 + 2 RSC-007, two of them one book's two texts), not kinds
+    assert errors.check_summary() == ("epubcheck found fault with 2 book(s); most frequent (occurrences): RSC-007 6, OPF-003 1; "
                                       "1 book(s) could not be checked")
     assert ErrorLog(None).check_summary() == "epubcheck found no fault with any book"
     # the build itself never checks (the iterator is exhausted: a call would fail), and an idle checker drains at once

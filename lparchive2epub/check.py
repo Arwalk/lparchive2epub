@@ -16,6 +16,8 @@ from lparchive2epub.lib import CheckError, ISSUES_URL
 FINDING_SEVERITIES = ("FATAL", "ERROR", "WARNING")
 # A 900 MB book takes epubcheck a few minutes; past this it is stuck, not slow
 CHECK_TIMEOUT = 1800
+# epubcheck groups identical messages and lists every place; this many are kept per finding
+MAX_LOCATIONS = 10
 
 
 @dataclass(frozen=True)
@@ -23,17 +25,22 @@ class Finding:
     severity: str          # FATAL, ERROR or WARNING
     id: str                # epubcheck's message ID, e.g. RSC-007
     message: str
-    path: str | None = None     # the file inside the EPUB, when the message points at one
+    path: str | None = None     # the file inside the EPUB, when the message points at one (the first place)
     line: int | None = None
+    count: int = 1              # how many places epubcheck reported the message at (1 when it named none)
+    # the first MAX_LOCATIONS places as (path, line), the one above included
+    locations: tuple[tuple[str | None, int | None], ...] = ()
 
     @property
     def is_error(self) -> bool:
         return self.severity in ("FATAL", "ERROR")
 
     def where(self) -> str:
+        """The first place, and how many more there are: "EPUB/update_3.xhtml:71 (+39 more)"."""
         if not self.path:
             return ""
-        return f"{self.path}:{self.line}" if self.line and self.line > 0 else self.path
+        where = f"{self.path}:{self.line}" if self.line and self.line > 0 else self.path
+        return f"{where} (+{self.count - 1} more)" if self.count > 1 else where
 
 
 @dataclass
@@ -48,6 +55,15 @@ class CheckResult:
     @property
     def warnings(self) -> list[Finding]:
         return [f for f in self.findings if not f.is_error]
+
+    @property
+    def error_count(self) -> int:
+        """Occurrences, not kinds: every place epubcheck reported an error at."""
+        return sum(f.count for f in self.errors)
+
+    @property
+    def warning_count(self) -> int:
+        return sum(f.count for f in self.warnings)
 
 
 def unavailable_reason() -> str | None:
@@ -82,13 +98,16 @@ def run_epubcheck(path: str) -> CheckResult:
 
 
 def parse_epubcheck(data: dict) -> CheckResult:
-    """The findings in epubcheck's JSON output (its `messages`, the first location of each)."""
+    """The findings in epubcheck's JSON output: one per `messages` entry, which groups the places where one
+    message occurs. The finding counts them all and keeps the first MAX_LOCATIONS."""
     findings = []
     for m in data.get("messages") or []:
         if m.get("severity") not in FINDING_SEVERITIES:
             continue
-        location = (m.get("locations") or [{}])[0]
-        findings.append(Finding(m["severity"], m["ID"], m["message"], location.get("path"), location.get("line")))
+        locations = [(loc.get("path"), loc.get("line")) for loc in m.get("locations") or []]
+        path, line = locations[0] if locations else (None, None)
+        findings.append(Finding(m["severity"], m["ID"], m["message"], path, line,
+                                count=max(1, len(locations)), locations=tuple(locations[:MAX_LOCATIONS])))
     version = str((data.get("checker") or {}).get("checkerVersion") or "?")
     return CheckResult(version, findings)
 
@@ -100,10 +119,12 @@ def format_check_report(path: str, result: CheckResult, outcome: str) -> str:
     """epubcheck's findings in the style of the failure report, ending with `outcome`. Every finding is
     the tool's doing (the book is built from scratch), so a bug report is always asked for."""
     counts = []
-    if result.errors:
-        counts.append(f"{len(result.errors)} error(s)")
-    if result.warnings:
-        counts.append(f"{len(result.warnings)} warning(s)")
+    for kind, found, occurrences in (("error", result.errors, result.error_count),
+                                     ("warning", result.warnings, result.warning_count)):
+        if found:
+            # "41 error(s) of 2 kind(s)" when a message occurs in several places, plain "2 error(s)" otherwise
+            kinds = f" of {len(found)} kind(s)" if occurrences > len(found) else ""
+            counts.append(f"{occurrences} {kind}(s){kinds}")
     separator = "-" * 72
     lines = [separator, f"{CHECK_HEADER} {result.version} found {' and '.join(counts)} in {path}"]
     for f in result.findings:

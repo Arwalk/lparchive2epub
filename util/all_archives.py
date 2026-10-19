@@ -16,12 +16,14 @@ hold little more than links to the videos, so the books are near-empty).
 --errors FILE keeps everything that went wrong, one JSON object per line, for later analysis:
   {"slug", "url", "time", "kind": "build-failed", "error": "<type>", "message": "...", "report": "..."}
   {"slug", "url", "time", "kind": "skipped-resources", "report": "..."}
-  {"slug", "url", "time", "kind": "epubcheck", "report": "...", "messages": [{"severity", "id", "message", "path", "line"}]}
+  {"slug", "url", "time", "kind": "epubcheck", "report": "...",
+   "messages": [{"severity", "id", "message", "path", "line", "count", "locations": [[path, line], ...]}]}
   {"slug", "url", "time", "kind": "check-failed", "error": "<type>", "message": "...", "report": "..."}
 "build-failed" is an LP whose book was not written (missing updates, network, not an LP page...),
 with the full report the tool prints; "skipped-resources" is a book that was written but with images
 the site could not serve, with the tool's report listing them; "epubcheck" (with --check) is a book
-epubcheck found fault with, with the tool's report and its findings as epubcheck gave them;
+epubcheck found fault with, with the tool's report and its findings as epubcheck gave them (one per distinct
+message, "path"/"line" its first place, "count" how many places it occurs at, "locations" the first 10);
 "check-failed" is a book epubcheck could not check (the Java runtime failed, or the check timed out),
 which was written all the same.
 
@@ -78,7 +80,8 @@ class ErrorLog:
     def record(self, slug: str, kind: str, report: str, error: Exception | None = None, messages: list[dict] | None = None):
         if messages is not None:
             self.faulted_books += 1
-            self.finding_ids.update(m["id"] for m in messages)
+            for m in messages:   # occurrences, not kinds; one ID may come with several texts
+                self.finding_ids[m["id"]] += m.get("count", 1)
         if kind == "check-failed":
             self.unchecked_books += 1
         if not self.path:
@@ -99,7 +102,7 @@ class ErrorLog:
             summary = "epubcheck found no fault with any book"
         else:
             frequent = ", ".join(f"{id_} {n}" for id_, n in self.finding_ids.most_common(5))
-            summary = f"epubcheck found fault with {self.faulted_books} book(s); most frequent: {frequent}"
+            summary = f"epubcheck found fault with {self.faulted_books} book(s); most frequent (occurrences): {frequent}"
         if self.unchecked_books:
             summary += f"; {self.unchecked_books} book(s) could not be checked"
         return summary
