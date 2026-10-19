@@ -4045,3 +4045,12 @@ async def test_raw_update_page_ends_up_in_the_book():
             page = z.read("EPUB/update_4.xhtml").decode()
     assert "Challenges? I'll bite." in page
     assert "DO NOT REMOVE" not in page
+
+
+def test_readme_shows_the_current_help(monkeypatch):
+    """The README pastes the --help text: it must be the parser's, as argparse lays it out on an 80-column terminal."""
+    monkeypatch.setenv("COLUMNS", "80")
+    readme = (files(resources) / ".." / ".." / "README.md").read_text(encoding="utf-8")
+    start = readme.index("```\nusage: lparchive2epub") + len("```\n")
+    pasted = readme[start:readme.index("```", start)]
+    assert pasted == cli.arg_parser.format_help()

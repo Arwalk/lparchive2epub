@@ -7,54 +7,152 @@ usage: lparchive2epub [-h] [--cache FILE] [--strict] [--allow-missing-updates]
                       [--max-image-size PIXELS] [--jpeg-quality 1-100]
                       [--concurrency N] [--retries N] [--quiet]
                       [--images-in-memory] [--cover IMAGE | --no-cover]
+                      [--check]
                       URL [OUTPUT]
 
 A tool to transform a Let's Play from lparchive.org to epub format.
 
 positional arguments:
-  URL          Address of the Let's Play on lparchive.org (any page of it
-               will do)
-  OUTPUT       Where to write the book: a file name, or a directory to put
-               '<title>.epub' in (default: '<title>.epub' in the current
-               directory)
+  URL                   Address of the Let's Play on lparchive.org (any page
+                        of it will do)
+  OUTPUT                Where to write the book: a file name, or a directory
+                        to put '<title>.epub' in (default: '<title>.epub' in
+                        the current directory)
 
 options:
-  -h, --help   show this help message and exit
-  --cache FILE Keep every downloaded page and image in a SQLite database at
-               FILE (created if needed, '.sqlite' added when FILE has no
-               extension), so that running again, after a failure or for a
-               newer version of the tool, only downloads what is missing. Off
-               by default: within one run nothing is fetched twice anyway
-  --strict     Fail instead of skipping resources (images...) that can't be
-               retrieved
+  -h, --help            show this help message and exit
+  --cache FILE          Keep every downloaded page and image in a SQLite
+                        database at FILE (created if needed, '.sqlite' added
+                        when FILE has no extension), so that running again,
+                        after a failure or for a newer version of the tool,
+                        only downloads what is missing. Off by default: within
+                        one run nothing is fetched twice anyway
+  --strict              Fail instead of skipping resources (images...) that
+                        can't be retrieved
   --allow-missing-updates
-               Build the book even if some updates can't be retrieved,
-               replacing them with a placeholder page (by default this is an
-               error and no book is written)
+                        Build the book even if some updates can't be
+                        retrieved, replacing them with a placeholder page (by
+                        default this is an error and no book is written)
   --max-image-size PIXELS
-               Shrink images wider or taller than PIXELS to fit, and re-encode
-               them (JPEG at --jpeg-quality, PNG optimised, WebP/BMP
-               converted). Off by default: images are kept as served. 1600
-               suits e-readers, 2500 high-resolution tablets
-  --jpeg-quality 1-100
-               JPEG quality used when --max-image-size re-encodes an image
-               (default: 85)
-  --concurrency N
-               Downloads in flight at the same time (default: 32)
-  --retries N  Attempts per download before giving up, with increasing waits
-               in between (default: 5; 1 means no retry)
-  --quiet      No progress bars or progress messages; only the final report
-               and errors
-  --images-in-memory
-               Keep every image in memory until the book is written, instead
-               of in a temporary folder (under TMPDIR); for machines with a
-               small or slow temporary directory. Needs memory of several
-               times the book's size
-  --cover IMAGE
-               Use this image file as the cover instead of the generated one
-               (title and author on a plain background)
-  --no-cover   Build the book without a cover image
+                        Shrink images wider or taller than PIXELS to fit, and
+                        re-encode them (JPEG at --jpeg-quality, PNG optimised,
+                        WebP/BMP converted). Off by default: images are kept
+                        as served. 1600 suits e-readers, 2500 high-resolution
+                        tablets
+  --jpeg-quality 1-100  JPEG quality used when --max-image-size re-encodes an
+                        image (default: 85)
+  --concurrency N       Downloads in flight at the same time (default: 32)
+  --retries N           Attempts per download before giving up, with
+                        increasing waits in between (default: 5; 1 means no
+                        retry)
+  --quiet               No progress bars or progress messages; only the final
+                        report and errors
+  --images-in-memory    Keep every image in memory until the book is written,
+                        instead of in a temporary folder (under TMPDIR); for
+                        machines with a small or slow temporary directory.
+                        Needs memory of several times the book's size
+  --cover IMAGE         Use this image file as the cover instead of the
+                        generated one (title and author on a plain background)
+  --no-cover            Build the book without a cover image
+  --check               Validate the written book with epubcheck and report
+                        what it finds (needs the 'check' extra: pip install
+                        lparchive2epub[check], and a Java runtime). With
+                        --strict, errors make the run fail
 ```
+
+## Usage examples
+
+The simplest case: the Let's Play's address, and the book is written as `Dwarf Fortress - Boatmurdered.epub`
+in the current directory. Any page of the Let's Play will do as the address
+(`lparchive.org/Dwarf-Fortress-Boatmurdered/Update%201-12/` gives the same book):
+
+```
+lparchive2epub https://lparchive.org/Dwarf-Fortress-Boatmurdered
+```
+
+Choosing where the book goes: an existing directory gets `<title>.epub`, anything else is the file name:
+
+```
+lparchive2epub https://lparchive.org/Dwarf-Fortress-Boatmurdered books/
+lparchive2epub https://lparchive.org/Dwarf-Fortress-Boatmurdered boatmurdered.epub
+```
+
+A build for an e-ink reader: pictures larger than 1600 pixels on their longest edge are shrunk and JPEGs
+re-encoded at quality 80 (85 when `--jpeg-quality` is not given); the saving is printed before the book is
+written:
+
+```
+lparchive2epub --max-image-size 1600 --jpeg-quality 80 https://lparchive.org/Dwarf-Fortress-Boatmurdered
+```
+
+A big Let's Play on a flaky connection: everything downloaded is kept in `lparchive.sqlite` (created if
+needed), so that running the very same command again after a failure, or Ctrl-C, only fetches what is
+missing. The same file serves every Let's Play you build and every later version of the tool:
+
+```
+lparchive2epub --cache lparchive.sqlite https://lparchive.org/Dwarf-Fortress-Boatmurdered
+```
+
+Your own picture as the cover instead of the generated one, or no cover at all:
+
+```
+lparchive2epub --cover boatmurdered.jpg https://lparchive.org/Dwarf-Fortress-Boatmurdered
+lparchive2epub --no-cover https://lparchive.org/Dwarf-Fortress-Boatmurdered
+```
+
+Validating the written book with epubcheck (needs `pip install lparchive2epub[check]` and Java;
+see [Checking the book](#checking-the-book)):
+
+```
+lparchive2epub --check https://lparchive.org/Dwarf-Fortress-Boatmurdered
+```
+
+A scripted run: no progress output, the path of the written book on stdout, the final report and errors on
+stderr, and the [exit code](#exit-codes) tells how it went. `--allow-missing-updates` keeps an update the
+archive no longer serves from stopping the batch (a placeholder page takes its place); `--strict` does the
+opposite and fails on the first resource that can't be retrieved:
+
+```
+book=$(lparchive2epub --quiet --allow-missing-updates https://lparchive.org/Dwarf-Fortress-Boatmurdered books/) \
+  || echo "failed with exit code $?"
+```
+
+From Python, the same build is one `await`. The function takes the Let's Play's address and the output
+(a file, a directory, or nothing for the current directory), and returns the path of the written book;
+the keyword arguments mirror the options above. Progress and the final report go to `writer` (a function
+given each message; stderr by default), and failures raise `ExtractionError`, whose `exit_code` is the one
+of the table below:
+
+```python
+import asyncio
+from lparchive2epub.lib import lparchive2epub, ExtractionError, FetchSettings, ImageProcessing
+
+async def main():
+    try:
+        path = await lparchive2epub("https://lparchive.org/Dwarf-Fortress-Boatmurdered", "books/",
+                                    image_processing=ImageProcessing(max_size=1600, jpeg_quality=80),
+                                    fetch=FetchSettings(concurrency=8, quiet=True),
+                                    allow_missing_updates=True, check=False)
+    except ExtractionError as e:
+        print(f"failed ({e.exit_code}): {e}")
+    else:
+        print(f"written: {path}")
+
+asyncio.run(main())
+```
+
+To build with a cache, pass the session yourself, as the command line does with `--cache`:
+
+```python
+from aiohttp_client_cache import CachedSession, SQLiteBackend
+from lparchive2epub.lib import lparchive2epub, CLIENT_TIMEOUT
+
+session = CachedSession(cache=SQLiteBackend("lparchive.sqlite", expire_after=-1, fast_save=True, autoclose=True),
+                        timeout=CLIENT_TIMEOUT)
+path = await lparchive2epub("https://lparchive.org/Dwarf-Fortress-Boatmurdered", root_session=session)
+```
+
+## Development
 
 The repository also contains the script `util/all_archives.py` that tries to scrape all LPs from lparchive,
 and `util/snapshot_landing_pages.py`, which refreshes `tests/resources/landing_pages.zip`: a snapshot of
