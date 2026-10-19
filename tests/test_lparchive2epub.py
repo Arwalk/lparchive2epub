@@ -2382,6 +2382,17 @@ def _orphan_items(tree) -> list[str]:
     return [f"li in {li.getparent().tag}" for li in tree.iter("li") if li.getparent().tag not in ("ul", "ol")]
 
 
+def _blocks_in_phrasing(tree) -> list[str]:
+    """The blocks (and items, rows, cells) of an lxml tree with an inline wrapper or a <pre> for an ancestor, as "h2 under b"."""
+    from lparchive2epub.lib import BLOCK_TAGS, PHRASING_HOLDERS
+    found = []
+    for block in tree.iter(*BLOCK_TAGS, "li", "tr", "td", "th"):
+        wrappers = [ancestor.tag for ancestor in block.iterancestors() if ancestor.tag in PHRASING_HOLDERS]
+        if wrappers:
+            found.append(f"{block.tag} under {wrappers[0]}")
+    return found
+
+
 def test_orphan_items_get_a_list_so_the_page_validates():
     """Forum authors write <li> with no list around it, inside bold text, links and strike-throughs, and one after
     another without closing any; XHTML 5 wants every item directly in a <ul>/<ol> (epubcheck RSC-005 "element li not
@@ -2569,19 +2580,93 @@ def test_tables_are_repaired_so_the_page_validates():
             assert words == source or (slug in ("Bioshock", "Sonic-Adventure-2-Battle") and sorted(words) == sorted(source)), slug
 
 
-def test_every_landing_page_has_lists_and_tables_that_validate():
-    """The invariants behind RSC-005 "expected the element end-tag or element li", "element li not allowed here"
-    and the table content model: once sanitised and re-parsed the way ebooklib writes it, no list of any landing
-    page in the archive holds anything but items, every item sits directly in a list, every table is made of rows
-    made of cells and nothing else, and every row and cell sits in its table."""
+def test_rules_and_blocks_hidden_in_void_elements_are_unnested_so_the_page_validates():
+    """What unnest_blocks_from_inline missed (RSC-005 in 14 books of the archive-wide run). A <hr> inside bold text,
+    a link or a <pre> (the forum's old [code] block, <pre>code:<hr>..., in 11 of them; a <pre> takes phrasing content
+    only, like the wrappers, and so does a heading): not a block it knew, and one with no content to keep, so the
+    holder is split around it. A heading inside a heading. And a bs4 quirk: after a void tag written without a slash (<img src="a">), html.parser takes the end of the next
+    self-closed one of the same name (<img src="b" />) for a redundant </img> and ignores it, so that <img> stays
+    open and holds what follows; the page reads the same, but the passes miss the blocks hidden in it
+    (Ratchet-Clank-Future-A-Crack-In-Time: headings and lists in an <img> in an unclosed <b>), a link sees its
+    thumbnail holding other pictures, and an <input> or <embed> would take a whole post with it when dropped."""
     from ebooklib.utils import parse_html_string
+    from lparchive2epub.lib import VOID_TAGS
+
+    def clean(html: str) -> str:
+        return str(get_cleaned_html(f'<div id="content">{html}</div>'))[len('<div id="content">'):-len('</div>')]
+
+    # a rule in a wrapper: the wrapper is split around it, each part a copy (the id on the first), the rule stays
+    assert clean('<b>one<hr/>two</b>') == '<b>one</b><hr/><b>two</b>'
+    assert clean('<b><hr/></b>') == '<hr/>'
+    assert clean('<a href="u" id="k">one<hr/>two</a>') == '<a href="u" id="k">one</a><hr/><a href="u">two</a>'
+    assert clean('<span><p>x</p><hr/></span>') == '<span>x</span><hr/>'   # the other blocks unwrapped, as ever
+    assert clean('<b><ul><li>a<hr/>b</li></ul></b>') == '<ul><li><b>a</b><hr/><b>b</b></li></ul>'
+    assert clean('<cite><p>x</p></cite>') == '<p><cite>x</cite></p>'      # every phrasing-only wrapper is looked at
+    # a <pre> the same, its copies keeping the text as written; blocks in one are unwrapped, never moved into
+    assert clean('<blockquote><pre>code:<hr/>\n\n  LICENCE\n</pre></blockquote>') == \
+        '<blockquote><pre>code:</pre><hr/><pre>\n\n  LICENCE\n</pre></blockquote>'   # Bureaucracy
+    assert clean('<pre class="c"><b>a<hr/>b</b></pre>') == '<pre class="c"><b>a</b></pre><hr/><pre class="c"><b>b</b></pre>'
+    assert clean('<pre><h3>t</h3>\nx</pre>') == '<pre>t\nx</pre>'           # Duke-Nukem-3D
+    assert clean('<b><pre>x</pre></b>') == '<pre><b>x</b></pre>'
+    assert clean('<pre>a<ul><li>x</li></ul>b</pre>') == '<pre>a</pre><ul><li><pre>x</pre></li></ul><pre>b</pre>'
+    # a heading the same; one that opens inside another closes it first, as in a browser: the archive's own heading
+    # for an update whose author put markup in its title (Paladins-Quest, update 21)
+    assert clean('<h3><strong>Part 22:</strong> Awesome</h1>(fudge)<h1>Bonus: Epilogue.</h3>\n<img src="a.gif"/>') == \
+        '<h3><strong>Part 22:</strong> Awesome(fudge)</h3><h1>Bonus: Epilogue.</h1>\n<img src="a.gif"/>'
+    assert clean('<h3>a<h1>b</h1>c</h3>') == '<h3>a</h3><h1>b</h1>c'
+    assert clean('<h2><p>x</p></h2>') == '<h2>x</h2>' and clean('<h2>a<hr/>b</h2>') == '<h2>a</h2><hr/><h2>b</h2>'
+    assert clean('<b><h2>t</h2></b>') == '<h2><b>t</b></h2>'   # a wrapper still goes into its one block
+    # void elements html.parser left open: their children go right after them, before anything else is done
+    quirk = '<img src="a.png"><img src="b.png"/><b>x<h2>t</h2>y</b>'
+    assert BeautifulSoup(quirk, "html.parser").find_all("img")[1].find("h2") is not None   # the quirk, as of bs4 4.14
+    assert clean(quirk) == '<img src="a.png"/><img src="b.png"/><b>xty</b>'
+    assert clean('<br><br/><p>a</p>') == '<br/><br/><p>a</p>'
+    assert clean('<input><input/>text') == 'text'   # the inputs go, not the text they held
+    assert clean('<a href="full.png"><img src="t.png"><img src="u.png"/></a>') == \
+        '<a href="full.png"><img src="t.png"/><img src="u.png"/></a>'
+
+    # the shape ebooklib writes, after its lxml re-parse, which leaves a rule in a wrapper where it is
+    for html in ('<b>one<hr/>two</b>', '<a href="u">one<hr/>two</a>', '<pre>code:<hr/>x</pre>', '<pre><h3>t</h3></pre>',
+                 '<h3>a<h1>b</h1></h3>', quirk):
+        assert _blocks_in_phrasing(parse_html_string(str(BeautifulSoup(html, "html.parser")))), html
+        written = parse_html_string(str(get_cleaned_html(f'<div id="content">{html}</div>')))
+        assert _blocks_in_phrasing(written) == [], html
+
+    # the real landing pages, every word of them kept in order: Ratchet's headings and lists out of the bold text,
+    # unwrapped like every block in mixed content; Duke-Nukem-3D's heading inside a <pre>
+    content = lambda tree: "".join(tree.find(".//div[@id='content']").itertext()).split()   # noqa: E731
+    with zipfile.ZipFile(SNAPSHOT) as z:
+        for slug, open_voids in (("Ratchet-Clank-Future-A-Crack-In-Time", ["meta", "meta", "img", "img"]), ("Duke-Nukem-3D", ["meta", "meta"])):
+            page = z.read(f"landing_pages/{slug}.html").decode("utf-8")
+            as_served = BeautifulSoup(page, "html.parser")
+            assert [v.name for v in as_served.find_all(VOID_TAGS) if v.contents] == open_voids, slug   # the head too
+            assert _blocks_in_phrasing(parse_html_string(str(as_served))), slug   # the page needs the fix
+            cleaned = get_cleaned_html(page)
+            assert [v.name for v in cleaned.find_all(VOID_TAGS) if v.contents] == [], slug
+            written = parse_html_string(str(cleaned))
+            assert _blocks_in_phrasing(written) == [], slug
+            assert content(written) == content(parse_html_string(page)), slug
+
+
+def test_every_landing_page_has_lists_and_tables_that_validate():
+    """The invariants behind RSC-005 "expected the element end-tag or element li", "element li not allowed here",
+    the table content model and "element hr/h2/ul not allowed here" in phrasing content: once sanitised and
+    re-parsed the way ebooklib writes it, no list of any landing page in the archive holds anything but items,
+    every item sits directly in a list, every table is made of rows made of cells and nothing else, every row
+    and cell sits in its table, no block has an inline wrapper for an ancestor, and no void element holds
+    anything (39 landing pages have one that html.parser left open)."""
+    from ebooklib.utils import parse_html_string
+    from lparchive2epub.lib import VOID_TAGS
     offenders = {}
     with zipfile.ZipFile(SNAPSHOT) as z:
         for name in z.namelist():
             if not name.startswith("landing_pages/"):
                 continue
-            written = parse_html_string(str(get_cleaned_html(z.read(name).decode("utf-8", "replace"))))
-            if found := _stray_list_content(written) + _orphan_items(written) + _table_faults(written):
+            cleaned = get_cleaned_html(z.read(name).decode("utf-8", "replace"))
+            written = parse_html_string(str(cleaned))
+            found = _stray_list_content(written) + _orphan_items(written) + _table_faults(written) \
+                + _blocks_in_phrasing(written) + [f"content in {v.name}" for v in cleaned.find_all(VOID_TAGS) if v.contents]
+            if found:
                 offenders[name[len("landing_pages/"):-len(".html")]] = sorted(set(found))
     assert offenders == {}
 
@@ -2604,7 +2689,7 @@ def test_blocks_inside_links_are_restructured_so_the_page_validates():
     assert '<p>a normal <a href="w/">link</a> stays</p>' in out
     soup = BeautifulSoup(out, "html.parser")
     for wrapper in soup.find_all(["a", "b", "i", "span"]):
-        assert not wrapper.find(["p", "div", "blockquote", "ul", "table", "pre"]), str(wrapper)
+        assert not wrapper.find(["p", "div", "blockquote", "ul", "table", "pre", "hr"]), str(wrapper)
 
 
 def test_generated_cover_is_a_jpeg_of_the_expected_size_and_deterministic():

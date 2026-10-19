@@ -46,7 +46,11 @@ CHECKSUMS = Path(__file__).resolve().parent.parent / "tests" / "resources" / "li
 # it: RSC-005 in 17 books of that run), and a video LP whose landing page never closes a <tr>, a <td> or the
 # <a> in it, so that its rows nest thirteen deep through a link (un-nested, the link kept to its cell: same class),
 # and a video LP of the Devolution 2007 megathread, whose landing page links its thread page-relatively
-# ("/Devolution/": resolved against the LP's URL by Extractor.intro, epubcheck RSC-007 in 27 books of that run).
+# ("/Devolution/": resolved against the LP's URL by Extractor.intro, epubcheck RSC-007 in 27 books of that run),
+# a text LP whose updates quote the game in the forum's old [code] blocks, <pre>code:<hr>... (the <pre> is split
+# around the rule by sanitize(): RSC-005 in 11 books of that run), and a video LP whose landing page mixes
+# <img ...> and <img ... /> so that html.parser leaves an <img> open around headings and lists inside an unclosed
+# <b> (the void element is emptied first: RSC-005 in that book).
 LETS_PLAYS = [
     "X-COM-Terror-from-the-Deep",
     "Dwarf-Fortress-Boatmurdered",
@@ -63,6 +67,8 @@ LETS_PLAYS = [
     "I-Wanna-Be-The-Guy",
     "Axelay",
     "Laura-Bow-The-Colonels-Bequest",
+    "Bureaucracy",
+    "Ratchet-Clank-Future-A-Crack-In-Time",
 ]
 
 

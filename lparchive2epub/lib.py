@@ -1651,6 +1651,15 @@ tags_to_clean = [
 
 # Active content has no place in a book (and makes epubcheck demand the "scripted" property).
 TAGS_TO_DROP = ["script", "noscript", "style", "form", "input", "button", "select", "textarea"]
+# Elements that hold nothing, and that html.parser (bs4 4.14) nonetheless gives children to: after a void
+# tag written without a slash (<img src="a">), it takes the end of the next self-closed one of the same name
+# (<img src="b" />) for the redundant </img> and ignores it, so that element stays open and holds whatever
+# follows it up to its parent's end. 94 <img>s and 21 <br>s on 39 landing pages of the archive do. bs4
+# serialises the children right after the element, so the page reads the same; but the passes below walk the
+# tree, and miss the blocks hidden in the <img> inside an unclosed <b> (Ratchet-Clank-Future-A-Crack-In-Time,
+# RSC-005), see nested thumbnails in a link, or would drop a whole post with the <input> or <embed> it hides in.
+VOID_TAGS = ["area", "base", "br", "col", "embed", "hr", "img", "input", "link", "meta", "param", "source",
+             "track", "wbr"]
 # Embedded players: replaced by a plain link to what they were showing, when they point somewhere.
 EMBED_TAGS = ["iframe", "embed", "object", "video", "audio"]
 # Where a Flash-era <object> names its movie: <param name="movie" value="http://www.youtube.com/v/...">
@@ -1711,9 +1720,18 @@ STRUCTURED_TAGS = LIST_TAGS + ["table"]
 # What _turn_inside_out steps into rather than wraps: the structure of lists and tables, down to the items,
 # the cells and the caption
 CONTAINER_TAGS = LIST_TAGS + ["li", "caption"] + TABLE_PART_TAGS
+# Blocks a wrapper is split around rather than unwrapped: the structured ones, and the rule, which has no
+# content to keep (<b>one<hr/>two</b> -> <b>one</b><hr/><b>two</b>; RSC-005 in 11 books of the archive-wide run)
+SPLITTING_TAGS = STRUCTURED_TAGS + ["hr"]
 # Block-level elements that EPUB does not allow inside a link (or any inline element)
-BLOCK_TAGS = ["p", "div", "blockquote", "ul", "ol", "table", "pre", "h1", "h2", "h3", "h4", "h5", "h6"]
-INLINE_WRAPPERS = ["a", "b", "i", "u", "s", "em", "strong", "span", "small", "sub", "sup", "code"]
+BLOCK_TAGS = ["p", "div", "blockquote", "ul", "ol", "table", "pre", "h1", "h2", "h3", "h4", "h5", "h6", "hr"]
+# Elements whose content model is phrasing only (not del/ins, which take blocks wherever their parent does)
+INLINE_WRAPPERS = ["a", "b", "i", "u", "s", "em", "strong", "span", "small", "sub", "sup", "code",
+                   "abbr", "q", "cite", "mark", "kbd", "var", "samp", "dfn", "bdi", "bdo"]
+# ...and the blocks that are: the forum's old [code] block is <blockquote><pre>code:<hr>...</pre></blockquote>, and
+# an author's title can hold a heading of its own (Paladins-Quest, update 21: <h3>... Awesome</h1>(...)<h1>Bonus</h3>)
+HEADING_TAGS = ["h1", "h2", "h3", "h4", "h5", "h6"]
+PHRASING_HOLDERS = INLINE_WRAPPERS + ["pre"] + HEADING_TAGS
 
 
 def get_cleaned_html(page: str) -> BeautifulSoup:
@@ -1728,6 +1746,9 @@ def get_cleaned_html(page: str) -> BeautifulSoup:
 
 
 def sanitize(soup: BeautifulSoup):
+    for void in soup.find_all(VOID_TAGS):
+        if void.contents:
+            void.insert_after(*void.contents)   # out, in order, before anything is dropped or looked at
     for element in soup.find_all(TAGS_TO_DROP):
         element.decompose()
 
@@ -1974,25 +1995,34 @@ def unnest_blocks_from_inline(soup: BeautifulSoup):
     4 landing pages of the archive; <table><b><tr>...: the same, for rows); the wrapper goes inside each item or
     cell instead, the way nest_orphan_items and repair_tables treat a wrapper that holds bare items or rows. Inner
     wrappers first: once <i><b><table>...</b></i> has its <b> inside the cells, the <i> holds the table directly
-    and gets the same treatment (Secret-of-Evermore), where in document order it had been looked at already."""
-    for wrapper in reversed(soup.find_all(INLINE_WRAPPERS)):
+    and gets the same treatment (Secret-of-Evermore), where in document order it had been looked at already.
+    A rule is kept too, and the wrapper split around it (<b>one<hr/>two</b> -> <b>one</b><hr/><b>two</b>): unwrapped
+    it would be gone, and a wrapper cannot go inside it. A <pre> and a heading take phrasing content only, like the
+    wrappers, and get the same treatment, but are never moved into their one block: <pre>code:<hr/>text</pre>, the
+    forum's old [code] block, becomes <pre>code:</pre><hr/><pre>text</pre> (RSC-005 in 11 books of the archive-wide
+    run). A heading that opens inside a heading closes it first, as in a browser (Paladins-Quest's update 21)."""
+    for heading in soup.find_all(HEADING_TAGS):
+        while heading.parent.name in HEADING_TAGS:
+            heading.parent.insert_after(heading, *heading.next_siblings)
+    for wrapper in reversed(soup.find_all(PHRASING_HOLDERS)):
         blocks = [child for child in wrapper.children if getattr(child, "name", None) in BLOCK_TAGS]
         if not blocks:
             continue
         others = [child for child in wrapper.children
                   if child not in blocks and (getattr(child, "name", None) is not None or str(child).strip())]
-        if len(blocks) == 1 and not others and not blocks[0].find(BLOCK_TAGS) and blocks[0].name not in STRUCTURED_TAGS:
+        if len(blocks) == 1 and not others and not blocks[0].find(BLOCK_TAGS) and blocks[0].name not in SPLITTING_TAGS \
+                and wrapper.name in INLINE_WRAPPERS:
             block = blocks[0]
             wrapper.replace_with(block)      # the block takes the wrapper's place...
             block.insert(0, wrapper.extract() if wrapper.parent else wrapper)
             for child in list(block.children)[1:]:
                 wrapper.append(child.extract())   # ...and the wrapper moves inside it, around its content
         else:
-            structured = wrapper.find_all(STRUCTURED_TAGS)
+            splitting = wrapper.find(SPLITTING_TAGS) is not None
             for block in wrapper.find_all(BLOCK_TAGS):
-                if block.name not in STRUCTURED_TAGS:
+                if block.name not in SPLITTING_TAGS:
                     block.unwrap()
-            if structured:
+            if splitting:
                 _turn_inside_out(soup, wrapper)
 
 
