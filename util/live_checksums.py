@@ -44,7 +44,9 @@ CHECKSUMS = Path(__file__).resolve().parent.parent / "tests" / "resources" / "li
 # LP whose landing page opens <table> twice, so that the rest of the page, pictures, lists and three more
 # tables, sits inside the outer table (the inner table closes it and whatever else a table holds goes before
 # it: RSC-005 in 17 books of that run), and a video LP whose landing page never closes a <tr>, a <td> or the
-# <a> in it, so that its rows nest thirteen deep through a link (un-nested, the link kept to its cell: same class).
+# <a> in it, so that its rows nest thirteen deep through a link (un-nested, the link kept to its cell: same class),
+# and a video LP of the Devolution 2007 megathread, whose landing page links its thread page-relatively
+# ("/Devolution/": resolved against the LP's URL by Extractor.intro, epubcheck RSC-007 in 27 books of that run).
 LETS_PLAYS = [
     "X-COM-Terror-from-the-Deep",
     "Dwarf-Fortress-Boatmurdered",
@@ -59,6 +61,7 @@ LETS_PLAYS = [
     "Doom-WADs",
     "Legend-of-Zelda-Oracle-Series",
     "I-Wanna-Be-The-Guy",
+    "Axelay",
 ]
 
 

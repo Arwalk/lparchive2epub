@@ -522,6 +522,12 @@ class Extractor:
         tags = [a.get_text(strip=True) for a in tag_list.find_all("a")] if tag_list else []
         thread = p.find("p", id="thread")
         thread_link = thread.find("a", href=True) if thread else None
+        thread_href = thread_link["href"] if thread_link else None
+        if thread_href is not None:
+            # the 27 LPs of the Devolution 2007 megathread link their thread as "/Devolution/": page-relative
+            # in the book, a file that does not exist there (epubcheck RSC-007). Resolved against the LP's
+            # URL; a scheme get_full_url does not know (mailto:) is left for to_uri to judge.
+            thread_href = Extractor.get_full_url(url, thread_href) or thread_href
 
         return Intro(
             title=title, language=language, author=author, intro=content, images=images, chapters=chapters,
@@ -530,7 +536,7 @@ class Extractor:
             parts=int(statistics["parts"]) if "parts" in statistics else None,
             tags=[t for t in tags if t],
             thread_title=thread_link.get_text(" ", strip=True) if thread_link else None,
-            thread_url=to_uri(thread_link["href"]) if thread_link else None,
+            thread_url=to_uri(thread_href) if thread_href is not None else None,
         )
 
     @staticmethod

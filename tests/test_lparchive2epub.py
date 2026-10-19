@@ -1687,6 +1687,14 @@ def test_thread_link_is_written_as_a_valid_uri_or_dropped():
     page = make_title_page(intro, "https://lparchive.org/Old-LP", "")
     assert "<p>Original thread: The thread</p>" in page and "http:forums" not in page
 
+    # page-relative on the 27 LPs of the Devolution megathread: in the book it would name a file that
+    # does not exist (epubcheck RSC-007), so it is resolved against the LP's URL
+    intro = intro_with("/Devolution/")
+    assert intro.thread_url == "https://lparchive.org/Devolution/"
+    page = make_title_page(intro, "https://lparchive.org/Old-LP", "")
+    assert '<a href="https://lparchive.org/Devolution/">The thread</a>' in page
+    assert intro_with("mailto:someone@example.com").thread_url == "mailto:someone@example.com"
+
 
 def test_compose_description_and_dates():
     intro = Extractor.intro("https://lparchive.org/X-COM-Terror-from-the-Deep", BeautifulSoup(xcom, "html.parser"))
@@ -2604,6 +2612,12 @@ def test_title_page_lists_the_landing_page_facts():
     assert "Tags: hybrid, voice" in page and "Added to the archive: May 14, 2010" in page
     assert '<a href="http://forums.somethingawful.com/showthread.php?threadid=3220122">' in page
     assert "A description &lt;with&gt; markup" in page and "Converted by lparchive2epub" in page
+
+    # Axelay, as archived: <a id="threadlink" href="/Devolution/"> (RSC-007 in 27 books of the archive-wide run)
+    intro = Extractor.intro("https://lparchive.org/Axelay", snapshot_page("Axelay"))
+    page = make_title_page(intro, "https://lparchive.org/Axelay", "")
+    assert '<a href="https://lparchive.org/Devolution/">This LP was part of the Devolution 2007 megathread!</a>' in page
+    assert 'href="/Devolution/"' not in page
 
 
 async def _build_book(session, **kwargs):
