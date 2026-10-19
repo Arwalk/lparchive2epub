@@ -1327,7 +1327,9 @@ def mark_unavailable(image: Image):
     """An <img> that could not be downloaded must not keep its page-relative src: inside the book that
     is a path to nothing (readers show a broken icon, epubcheck a missing resource). Replace it by a
     visible note linking to the original, so the reader knows what was there and can still try it
-    online. Links (<a>) need nothing: fix_links already made them absolute."""
+    online. Links (<a>) need nothing: fix_links already made them absolute. An <img> inside a link (the
+    author's, to a video, or the full-size picture's) gets the name alone: a link may not hold a link
+    (epubcheck RSC-005 in 2 books of the archive-wide run), and the enclosing one still leads somewhere."""
     tag = image.tag
     if tag.name != "img":
         return
@@ -1339,7 +1341,7 @@ def mark_unavailable(image: Image):
     note = soup.new_tag("span", attrs={"class": "missing-image"})
     note.append(f"[image not available: {alt + ' - ' if alt else ''}")
     original = to_uri(image.url) if image.url else None   # the URL may hold spaces ("setz/Advent Rising/ethan6.jpg")
-    if original:
+    if original and tag.find_parent("a") is None:
         link = soup.new_tag("a", href=original)
         link.string = name
         note.append(link)
@@ -1819,6 +1821,7 @@ def sanitize(soup: BeautifulSoup):
     nest_orphan_items(soup)
     nest_stray_list_content(soup)
     unnest_blocks_from_inline(soup)
+    unnest_links(soup)
 
     for element in soup.find_all(True):
         # <a name="x"> is the HTML 4 anchor; XHTML 5 wants an id
@@ -2046,6 +2049,33 @@ def unnest_blocks_from_inline(soup: BeautifulSoup):
                     block.unwrap()
             if splitting:
                 _turn_inside_out(soup, wrapper)
+
+
+def unnest_links(soup: BeautifulSoup):
+    """Forum authors put a link around a link: [url=video] around the archive's [timg] thumbnail link in 22 landing
+    pages (<a href="video"><a href="full.jpg"><img .../></a></a>), a forgotten [/url], a link in bold text inside a
+    link. A link may not hold a link (epubcheck RSC-005 "The a element must not appear inside a elements" in 4 books
+    of the archive-wide run), and a browser does not let it: a link that opens inside a link closes the outer one,
+    so the inner one and whatever follows it move out, the inline wrappers between the two reopened around them
+    (<a href="x">1<b>2<a href="y">3</a>4</b>5</a> -> <a href="x">1<b>2</b></a><b><a href="y">3</a>4</b>5). ebooklib's
+    lxml re-parse does the same for a link directly in a link, and nothing for one nested through an inline element.
+    Runs after unnest_blocks_from_inline, so that nothing but inline wrappers can sit between the two."""
+    for link in soup.find_all("a"):   # document order: a > b > a > i > a closes one level at a time, as in a browser
+        outer = link.find_parent("a")
+        if outer is not None:
+            _close_before(soup, outer, link)
+
+
+def _close_before(soup: BeautifulSoup, holder: Tag, node: Tag):
+    """`holder` ends right before `node`, as in a browser when `node` may not open inside it: `node` and whatever
+    follows it move out of `holder`, each element between the two reopened around them (a copy, without the id)."""
+    while (parent := node.parent) is not holder:
+        reopened = soup.new_tag(parent.name, attrs={name: list(value) if isinstance(value, list) else value
+                                                    for name, value in parent.attrs.items() if name not in ("id", "name")})
+        parent.insert_after(reopened)
+        reopened.extend([node, *list(node.next_siblings)])
+        node = reopened
+    holder.insert_after(node, *list(node.next_siblings))
 
 
 def _hides_its_text(style: str | None) -> bool:

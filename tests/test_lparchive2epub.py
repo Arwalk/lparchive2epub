@@ -1633,6 +1633,23 @@ async def test_flash_embed_on_the_landing_page_does_not_stop_the_build():
 
 
 @pytest.mark.asyncio
+async def test_missing_picture_inside_a_link_leaves_no_link_in_a_link_in_the_book():
+    """La-Pucelle-Tactics update 32: <a href="video"><img src="12-LPT-00049.jpg"></a>, the archive's copy of the
+    picture empty. The note that replaces it must not link the original: that is a link in a link (RSC-005)."""
+    from ebooklib.utils import parse_html_string
+    url = "https://lparchive.org/X-COM-Terror-from-the-Deep"
+    opening = xcom.index(b">", xcom.index(b'id="content"')) + 1
+    markup = b'<a href="http://v/watch"><img src="http://x/a.gif"/></a>'
+    landing = xcom[:opening] + markup + xcom[opening:]
+    session = _FakeSession("never-matches", responses={url: _FakeResponse(200, landing),
+                                                       "http://x/a.gif": _FakeResponse(200, b"", "image/gif")})
+    files = await _build_book(session)
+    intro = files["EPUB/introduction.xhtml"].decode()
+    assert '<a href="http://v/watch"><span class="missing-image">[image not available: a.gif]</span></a>' in intro
+    assert _nested_links(parse_html_string(files["EPUB/introduction.xhtml"])) == []
+
+
+@pytest.mark.asyncio
 async def test_landing_page_parser_bug_is_reported_not_a_bare_traceback(monkeypatch):
     url = "https://lparchive.org/X-COM-Terror-from-the-Deep"
 
@@ -1702,14 +1719,21 @@ def test_extractor_tolerates_missing_optional_facts():
 
 def test_missing_image_note_links_the_original_at_a_valid_uri():
     """The note's link is the picture's URL, which can hold spaces too ("setz/Advent Rising/ethan6.jpg");
-    a URL that cannot be made valid gives a note without a link."""
-    soup = BeautifulSoup('<div id="content"><img alt="Ethan" src="ethan6.jpg"/><img src="x.jpg"/></div>', "html.parser")
-    spaced, garbage = soup.find_all("img")
+    a URL that cannot be made valid gives a note without a link, and so does a picture inside a link (the
+    author's, to a video, in La-Pucelle-Tactics and Long-Live-the-Queen): a link may not hold a link (epubcheck
+    RSC-005, 2 books of the archive-wide run), and ebooklib's lxml re-parse leaves one nested through the <span>."""
+    from ebooklib.utils import parse_html_string
+    soup = BeautifulSoup('<div id="content"><img alt="Ethan" src="ethan6.jpg"/><img src="x.jpg"/>'
+                         '<a href="http://v/"><img src="y.jpg"/></a></div>', "html.parser")
+    spaced, garbage, linked = soup.find_all("img")
     lib.mark_unavailable(lib.Image(0, "ethan6.jpg", spaced, "http://www.miketyndall.com/setz/Advent Rising/ethan6.jpg", "http://x/"))
     lib.mark_unavailable(lib.Image(1, "x.jpg", garbage, "http://http:ustwo.com/x.jpg", "http://x/"))
+    lib.mark_unavailable(lib.Image(2, "y.jpg", linked, "http://x/y.jpg", "http://x/"))
     assert str(soup) == ('<div id="content"><span class="missing-image">[image not available: Ethan - '
                          '<a href="http://www.miketyndall.com/setz/Advent%20Rising/ethan6.jpg">ethan6.jpg</a>]</span>'
-                         '<span class="missing-image">[image not available: x.jpg]</span></div>')
+                         '<span class="missing-image">[image not available: x.jpg]</span>'
+                         '<a href="http://v/"><span class="missing-image">[image not available: y.jpg]</span></a></div>')
+    assert _nested_links(parse_html_string(str(soup))) == []
 
 
 def test_thread_link_is_written_as_a_valid_uri_or_dropped():
@@ -2423,6 +2447,12 @@ def _blocks_in_phrasing(tree) -> list[str]:
     return found
 
 
+def _nested_links(tree) -> list[str]:
+    """The links of an lxml tree with a link for an ancestor, as "a under a"."""
+    return [f"a under {next(p.tag for p in a.iterancestors() if p.tag == 'a')}" for a in tree.iter("a")
+            if any(p.tag == "a" for p in a.iterancestors())]
+
+
 def _unknown_markup(tree) -> list[str]:
     """The elements of an lxml tree XHTML 5 does not know, and the attributes it does not allow where they are,
     as "pan" and "frameborder on a"."""
@@ -2694,12 +2724,66 @@ def test_rules_and_blocks_hidden_in_void_elements_are_unnested_so_the_page_valid
             assert content(written) == content(parse_html_string(page)), slug
 
 
+def test_a_link_opened_inside_a_link_closes_it_so_the_page_validates():
+    """A link may not hold a link (epubcheck RSC-005 "The a element must not appear inside a elements" in 4 books of
+    the archive-wide run). Forum authors put [url=video] around the archive's [timg] thumbnail link (22 landing pages),
+    forget a [/url], or open a link in bold text inside a link. A browser closes the outer link where the inner one
+    opens, and reopens the inline wrappers between the two around what moves out; ebooklib's lxml re-parse does the
+    same for a link directly in a link only. sanitize() does it for every nesting, in bs4, with the same result as
+    lxml for the direct one (Laura-Bow's live checksum holds)."""
+    from ebooklib.utils import parse_html_string
+    from lxml import etree
+
+    def clean(html: str) -> str:
+        return str(get_cleaned_html(f'<div id="content">{html}</div>'))[len('<div id="content">'):-len('</div>')]
+
+    assert clean('<a href="x"><b><a href="y">2</a></b></a>') == '<a href="x"><b></b></a><b><a href="y">2</a></b>'
+    assert clean('<a href="x">1<b>3<a href="y">2</a>5</b>4</a>6') == '<a href="x">1<b>3</b></a><b><a href="y">2</a>5</b>46'
+    assert clean('<a href="x">1<a href="y">2</a>3</a>') == '<a href="x">1</a><a href="y">2</a>3'
+    # the id stays on the first part, the wrapper's copy keeps its class
+    assert clean('<a href="x" id="k"><span class="c d"><a href="y">2</a></span></a>') == \
+        '<a href="x" id="k"><span class="c d"></span></a><span class="c d"><a href="y">2</a></span>'
+    # three deep (Tunnel-Rats: [url] around [url] around the thumbnail link), each closing the one before
+    assert clean('<a href="1"><a href="2"><a href="3"><img src="t"/></a></a></a>') == \
+        '<a href="1"></a><a href="2"></a><a href="3"><img src="t"/></a>'
+    assert clean('<a href="x"><b><a href="y">2</a><i><a href="z">3</a></i></b></a>') == \
+        '<a href="x"><b></b></a><b><a href="y">2</a><i><a href="z">3</a></i></b>'   # the third is in no link any more
+    # a block between the two is unwrapped first (unnest_blocks_from_inline), so only wrappers are split
+    assert clean('<a href="x"><p>1<b><a href="y">2</a></b></p></a>') == '<p><a href="x">1<b></b></a><b><a href="y">2</a></b></p>'
+
+    # the shape ebooklib writes, after its lxml re-parse: the direct nesting it un-nests the same way, the others not
+    direct = '<a href="x">1<a href="y">2</a>3</a>'
+    body = lambda html: etree.tostring(parse_html_string(html).find(".//body"), method="html", encoding="unicode")   # noqa: E731
+    assert _nested_links(parse_html_string(direct)) == [] and body(direct) == f"<body>{clean(direct)}</body>"
+    for html in ('<a href="x"><b><a href="y">2</a></b></a>', '<a href="x">1<b>3<a href="y">2</a>5</b>4</a>6',
+                 '<a href="x"><span><a href="y">2</a>3</span>4</a>'):
+        assert _nested_links(parse_html_string(str(BeautifulSoup(html, "html.parser")))) == ["a under a"], html
+        assert _nested_links(parse_html_string(str(get_cleaned_html(f'<div id="content">{html}</div>')))) == [], html
+
+    # real landing pages, every word of them kept in order: nested through table cells (Captain-Novolin,
+    # I-Wanna-Be-The-Guy) and list items (Ultima-VII-The-Black-Gate), which the table and list repairs un-nest
+    # already (the outer link copied into each cell or item); directly (Laura-Bow, Blue-Stinger), which lxml
+    # un-nested already, every link still there
+    content = lambda tree: "".join(tree.find(".//div[@id='content']").itertext()).split()   # noqa: E731
+    with zipfile.ZipFile(SNAPSHOT) as z:
+        for slug in ("Captain-Novolin", "I-Wanna-Be-The-Guy", "Ultima-VII-The-Black-Gate", "Laura-Bow-The-Colonels-Bequest", "Blue-Stinger"):
+            page = z.read(f"landing_pages/{slug}.html").decode("utf-8")
+            as_served = BeautifulSoup(page, "html.parser")
+            assert any(a.find_parent("a") for a in as_served.find_all("a")), slug   # the page has the nesting
+            written = parse_html_string(str(get_cleaned_html(page)))
+            assert _nested_links(written) == [], slug
+            assert content(written) == content(parse_html_string(page)), slug
+            if slug in ("Laura-Bow-The-Colonels-Bequest", "Blue-Stinger"):
+                assert len(list(written.iter("a"))) == len(as_served.find_all("a")), slug
+
+
 def test_every_landing_page_has_lists_and_tables_that_validate():
     """The invariants behind RSC-005 "expected the element end-tag or element li", "element li not allowed here",
     the table content model and "element hr/h2/ul not allowed here" in phrasing content: once sanitised and
     re-parsed the way ebooklib writes it, no list of any landing page in the archive holds anything but items,
     every item sits directly in a list, every table is made of rows made of cells and nothing else, every row
-    and cell sits in its table, no block has an inline wrapper for an ancestor, no void element holds anything
+    and cell sits in its table, no block has an inline wrapper for an ancestor, no link holds a link (22 landing
+    pages nest one directly, 3 through a cell or an item), no void element holds anything
     (39 landing pages have one that html.parser left open), and no element or attribute is one XHTML 5 does not
     know (The-Suffering's <a<, Warcraft-II's <h0>, Ever-17's border"0", Oblivion's -target, Zero-Time-Dilemma's
     <ul type>, a width on 4 tables and cells)."""
@@ -2713,7 +2797,7 @@ def test_every_landing_page_has_lists_and_tables_that_validate():
             cleaned = get_cleaned_html(z.read(name).decode("utf-8", "replace"))
             written = parse_html_string(str(cleaned))
             found = _stray_list_content(written) + _orphan_items(written) + _table_faults(written) \
-                + _blocks_in_phrasing(written) + _unknown_markup(written) \
+                + _blocks_in_phrasing(written) + _unknown_markup(written) + _nested_links(written) \
                 + [f"content in {v.name}" for v in cleaned.find_all(VOID_TAGS) if v.contents]
             if found:
                 offenders[name[len("landing_pages/"):-len(".html")]] = sorted(set(found))

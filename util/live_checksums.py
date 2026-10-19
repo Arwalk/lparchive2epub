@@ -52,7 +52,9 @@ CHECKSUMS = Path(__file__).resolve().parent.parent / "tests" / "resources" / "li
 # <img ...> and <img ... /> so that html.parser leaves an <img> open around headings and lists inside an unclosed
 # <b> (the void element is emptied first: RSC-005 in that book), and a four-part video LP whose landing page gives
 # an <img> an attribute named "p" (broken quoting; dropped with every attribute XHTML 5 does not allow: RSC-005
-# in 14 books of that run).
+# in 14 books of that run), and a 40-part video LP whose update 32 links a video around a picture the archive
+# keeps an empty copy of (the note that replaces the picture names it without a link of its own: a link may not
+# hold a link, RSC-005 in 2 books of that run).
 LETS_PLAYS = [
     "X-COM-Terror-from-the-Deep",
     "Dwarf-Fortress-Boatmurdered",
@@ -72,6 +74,7 @@ LETS_PLAYS = [
     "Bureaucracy",
     "Ratchet-Clank-Future-A-Crack-In-Time",
     "Bionic-Commando",
+    "La-Pucelle-Tactics",
 ]
 
 
