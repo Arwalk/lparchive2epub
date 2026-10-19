@@ -1718,7 +1718,7 @@ INLINE_WRAPPERS = ["a", "b", "i", "u", "s", "em", "strong", "span", "small", "su
 
 def get_cleaned_html(page: str) -> BeautifulSoup:
     """Parse a page and make its markup fit for a book: no scripts, handlers or players, no legacy
-    attributes, and spoilers that stay readable."""
+    attributes, no comments, and spoilers that stay readable."""
     soup = BeautifulSoup(page, "html.parser")
     for tag in tags_to_clean:
         while found := soup.find(tag):
@@ -1730,6 +1730,14 @@ def get_cleaned_html(page: str) -> BeautifulSoup:
 def sanitize(soup: BeautifulSoup):
     for element in soup.find_all(TAGS_TO_DROP):
         element.decompose()
+
+    # Comments carry nothing for a reader, and XML forbids "--" inside one: authors write <!-- ------ -->
+    # separators and comment out markup (epubcheck RSC-016, a FATAL that stops the parse of the page, in 12
+    # books of the archive-wide run). Both parsers keep them, so they go here, all but the two markers
+    # between which content_block() finds the post of a page served raw (it removes those itself).
+    for comment in soup.find_all(string=lambda s: isinstance(s, Comment)):
+        if RAW_CONTENT_BEGIN not in comment and RAW_CONTENT_END not in comment:
+            comment.extract()
 
     for element in soup.find_all(EMBED_TAGS):
         if element.decomposed:

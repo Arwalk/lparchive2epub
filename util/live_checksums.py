@@ -62,6 +62,7 @@ LETS_PLAYS = [
     "Legend-of-Zelda-Oracle-Series",
     "I-Wanna-Be-The-Guy",
     "Axelay",
+    "Laura-Bow-The-Colonels-Bequest",
 ]
 
 

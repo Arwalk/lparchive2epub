@@ -1548,6 +1548,21 @@ def test_sanitize_strips_active_content_and_legacy_markup():
     assert "office" in out
 
 
+def test_sanitize_drops_comments():
+    """XML forbids "--" inside a comment, and authors write <!-- ------ --> separators and comment markup out:
+    epubcheck RSC-016, a FATAL that stops the parse of the page, in 12 books of the archive-wide run. Neither
+    parser drops a comment, so sanitize() does: a reader never sees one."""
+    from ebooklib.utils import parse_html_string
+    from lxml import etree
+    html = ('<div id="content"><p>x <!-- a -- b --> y</p><!-- ---------- --><ul><li>a<!-- c --></li>'
+            '<!-- <li>commented out</li> --></ul><table><!-- -- --><tr><td>cell<!--x--></td></tr></table></div>')
+    out = str(get_cleaned_html(html))
+    assert "<!--" not in out and "--" not in out
+    assert "<p>x  y</p>" in out and "<li>a</li>" in out and "<td>cell</td>" in out and "commented out" not in out
+    written = etree.tostring(parse_html_string(out), method="xml").decode()   # what ebooklib writes to the XHTML
+    assert "<!--" not in written and "<p>x  y</p>" in written
+
+
 FLASH_YOUTUBE = """<div class="bbcode_video"><object width="425" height="344">
   <param name="movie" value="http://www.youtube-nocookie.com/v/xsMN4L8BH8k&amp;hl=en&amp;fs=1">
   <param name="allowFullScreen" value="true"></param><param name="allowscriptaccess" value="always"></param>
@@ -2335,10 +2350,11 @@ def test_stray_content_in_lists_moves_into_items_so_the_page_validates():
     # a list holding nothing but another list (Dead-Rising's table of contents): no phantom bullet
     assert clean('<ul class="bbc-list"> <ul class="toc"><li>x</li></ul> </ul>') == \
         '<div id="content"><ul class="bbc-list"> <li style="list-style-type: none;"><ul class="toc"><li>x</li></ul> </li></ul></div>'
-    # the space and comments between two moved words move with them; between items, whitespace, comments and <template> stay
+    # the space between two moved words moves with them (a comment there is gone before: sanitize() drops them all);
+    # between items, whitespace and <template> stay
     assert clean('<ul><li>a</li>\n<b>x</b> <!-- c --> <i>y</i>\n<li>b</li></ul>') == \
-        '<div id="content"><ul><li>a<b>x</b> <!-- c --> <i>y</i>\n</li>\n<li>b</li></ul></div>'
-    for fine in ('<ul>\n  <li>a</li>\n  <!-- c -->\n  <li>b</li>\n</ul>', '<ol><li>a</li><template>t</template></ol>'):
+        '<div id="content"><ul><li>a<b>x</b>  <i>y</i>\n</li>\n<li>b</li></ul></div>'
+    for fine in ('<ul>\n  <li>a</li>\n\n  <li>b</li>\n</ul>', '<ol><li>a</li><template>t</template></ol>'):
         assert clean(fine) == untouched(fine)
 
     # the shape ebooklib writes, after its lxml re-parse
@@ -2380,7 +2396,7 @@ def test_orphan_items_get_a_list_so_the_page_validates():
     # in a table cell (Dwarf-Fortress-Syrupleaf)
     assert clean('<li>x</li> <li>y</li>') == '<div id="content"><ul><li>x</li> <li>y</li></ul></div>'
     assert clean('<!-- BEGIN_TOC --> <li>a</li> <li>b</li> <!-- END_TOC --> text <li>c</li>') == \
-        '<div id="content"><!-- BEGIN_TOC --> <ul><li>a</li> <li>b</li></ul> <!-- END_TOC --> text <ul><li>c</li></ul></div>'
+        '<div id="content"> <ul><li>a</li> <li>b</li></ul>  text <ul><li>c</li></ul></div>'   # the marker comments go too
     assert clean('<table><tr><td><li>x</li></td></tr></table>') == \
         '<div id="content"><table><tr><td><ul><li>x</li></ul></td></tr></table></div>'
     # a wrapper around items goes inside each of them; what else it held keeps a copy of it, which
@@ -2523,7 +2539,7 @@ def test_tables_are_repaired_so_the_page_validates():
     # well-formed tables are left alone (compared with bs4's own round trip, which drops the indentation), one nested
     # in a cell included
     for fine in ('<table>\n <caption>c</caption>\n <thead><tr><th>h</th></tr></thead>\n <tbody>\n  <tr><td>a</td></tr>\n'
-                 '  <!-- x -->\n </tbody>\n</table>', '<table><tr><td><table><tr><td>i</td></tr></table></td></tr></table>'):
+                 ' </tbody>\n</table>', '<table><tr><td><table><tr><td>i</td></tr></table></td></tr></table>'):
         assert clean(fine) == str(BeautifulSoup(f'<div id="content">{fine}</div>', "html.parser"))[len('<div id="content">'):-6]
 
     # the shape ebooklib writes, after its lxml re-parse, which leaves every one of these as it stands
@@ -3649,6 +3665,7 @@ RAW_UPDATE_PAGE = """<html>
 
 <!-- !!DO NOT REMOVE!! BEGIN_CONTENT !!DO NOT REMOVE!! -->
 		Challenges? I'll bite.<br />
+<!-- an author's separator -- not valid XML -->
 <br />
 <img src="entry.png" /> See <a href="../Update%2001/">the first update</a>.
 <!-- !!DO NOT REMOVE!! END_CONTENT !!DO NOT REMOVE!! -->
