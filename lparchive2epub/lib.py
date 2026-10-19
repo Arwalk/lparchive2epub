@@ -1773,6 +1773,19 @@ def sanitize(soup: BeautifulSoup):
     for element in soup.find_all(TAGS_TO_DROP):
         element.decompose()
 
+    # An <img> with no address shows nothing: forum smilies that lost theirs (<img src="" alt="">, four on the landing
+    # page of Super-Ghouls-n-Ghosts), a </ul> typed inside the tag so that html.parser, like a browser, ends it before
+    # the src (Might-and-Magic). XHTML 5 wants a src at least one character long (epubcheck RSC-005 in 3 books of the
+    # archive-wide run), and all_images already skips them. HTML says what such an element represents: its alt
+    # text when it has one, nothing otherwise.
+    for img in soup.find_all("img"):
+        if not (img.get("src") or "").strip():
+            alt = (img.get("alt") or "").strip()
+            if alt:
+                img.replace_with(alt)
+            else:
+                img.decompose()
+
     # Comments carry nothing for a reader, and XML forbids "--" inside one: authors write <!-- ------ -->
     # separators and comment out markup (epubcheck RSC-016, a FATAL that stops the parse of the page, in 12
     # books of the archive-wide run). Both parsers keep them, so they go here, all but the two markers

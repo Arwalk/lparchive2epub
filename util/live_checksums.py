@@ -54,7 +54,9 @@ CHECKSUMS = Path(__file__).resolve().parent.parent / "tests" / "resources" / "li
 # an <img> an attribute named "p" (broken quoting; dropped with every attribute XHTML 5 does not allow: RSC-005
 # in 14 books of that run), and a 40-part video LP whose update 32 links a video around a picture the archive
 # keeps an empty copy of (the note that replaces the picture names it without a link of its own: a link may not
-# hold a link, RSC-005 in 2 books of that run).
+# hold a link, RSC-005 in 2 books of that run), and a video LP with no update pages whose landing page holds four
+# smilies with an empty src (dropped by sanitize(): XHTML 5 wants a src at least one character long, RSC-005 in
+# 3 books of that run).
 LETS_PLAYS = [
     "X-COM-Terror-from-the-Deep",
     "Dwarf-Fortress-Boatmurdered",
@@ -75,6 +77,7 @@ LETS_PLAYS = [
     "Ratchet-Clank-Future-A-Crack-In-Time",
     "Bionic-Commando",
     "La-Pucelle-Tactics",
+    "Super-Ghouls-n-Ghosts-(by-Captain_duck)",
 ]
 
 

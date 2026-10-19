@@ -2724,6 +2724,40 @@ def test_rules_and_blocks_hidden_in_void_elements_are_unnested_so_the_page_valid
             assert content(written) == content(parse_html_string(page)), slug
 
 
+def _images_without_source(tree) -> list[str]:
+    """The <img>s of an lxml tree with no src, or a blank one, as "img without src"."""
+    return ["img without src" for img in tree.iter("img") if not (img.get("src") or "").strip()]
+
+
+def test_images_without_a_source_are_dropped_so_the_page_validates():
+    """Forum smilies that lost their address (<img src="" alt="">, four on the landing page of Super-Ghouls-n-Ghosts,
+    one in update 15 of Anachronox) and a </ul> typed inside an <img> tag, which html.parser, like a browser, ends
+    before the src (Might-and-Magic). XHTML 5 wants a src at least one character long (epubcheck RSC-005 in 3 books of
+    the archive-wide run); all_images skipped them already, but the tag stayed in the page. HTML says what such an
+    element represents, its alt text when it has one and nothing otherwise, and that is what sanitize() leaves."""
+    from ebooklib.utils import parse_html_string
+
+    def clean(html: str) -> str:
+        return str(get_cleaned_html(f'<div id="content">{html}</div>'))[len('<div id="content">'):-len('</div>')]
+
+    assert clean('<p>a<img src=""/>b<img/>c<img src=" " alt=" "/>d</p>') == '<p>abcd</p>'
+    assert clean('<p><img alt=":doom:"/></p>') == '<p>:doom:</p>'
+    assert clean('<a href="U/"><img alt=":doom:"/></a>') == '<a href="U/">:doom:</a>'
+    assert clean('<i>fun of <img alt="" border="0" src=""/>.</i>') == '<i>fun of .</i>'
+    assert clean('<img alt="y" src="x.png"/>') == '<img alt="y" src="x.png"/>'   # a picture with an address stays
+    # inside a list, the alt text left behind is stray content: moved into an item like any other
+    assert clean('<ul><li>a</li><img alt="x"/></ul>') == '<ul><li>ax</li></ul>'
+
+    # the real landing pages, after the lxml re-parse ebooklib writes them through
+    with zipfile.ZipFile(SNAPSHOT) as z:
+        for slug in ("Super-Ghouls-n-Ghosts-(by-Captain_duck)", "Might-and-Magic"):
+            page = z.read(f"landing_pages/{slug}.html").decode("utf-8")
+            assert _images_without_source(parse_html_string(page)), slug   # the page needs the fix
+            written = parse_html_string(str(get_cleaned_html(page)))
+            assert _images_without_source(written) == [], slug
+    assert ":doom:" in clean(page)   # Might-and-Magic's smiley, as its alt text
+
+
 def test_a_link_opened_inside_a_link_closes_it_so_the_page_validates():
     """A link may not hold a link (epubcheck RSC-005 "The a element must not appear inside a elements" in 4 books of
     the archive-wide run). Forum authors put [url=video] around the archive's [timg] thumbnail link (22 landing pages),
@@ -2786,7 +2820,8 @@ def test_every_landing_page_has_lists_and_tables_that_validate():
     pages nest one directly, 3 through a cell or an item), no void element holds anything
     (39 landing pages have one that html.parser left open), and no element or attribute is one XHTML 5 does not
     know (The-Suffering's <a<, Warcraft-II's <h0>, Ever-17's border"0", Oblivion's -target, Zero-Time-Dilemma's
-    <ul type>, a width on 4 tables and cells)."""
+    <ul type>, a width on 4 tables and cells), and no <img> is without a src (Super-Ghouls-n-Ghosts's four
+    smilies with an empty one, Might-and-Magic's </ul> typed inside the tag)."""
     from ebooklib.utils import parse_html_string
     from lparchive2epub.lib import VOID_TAGS
     offenders = {}
@@ -2798,6 +2833,7 @@ def test_every_landing_page_has_lists_and_tables_that_validate():
             written = parse_html_string(str(cleaned))
             found = _stray_list_content(written) + _orphan_items(written) + _table_faults(written) \
                 + _blocks_in_phrasing(written) + _unknown_markup(written) + _nested_links(written) \
+                + _images_without_source(written) \
                 + [f"content in {v.name}" for v in cleaned.find_all(VOID_TAGS) if v.contents]
             if found:
                 offenders[name[len("landing_pages/"):-len(".html")]] = sorted(set(found))
