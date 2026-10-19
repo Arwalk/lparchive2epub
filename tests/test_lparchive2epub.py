@@ -1087,6 +1087,149 @@ async def test_picture_archived_without_its_query_string_is_fetched_from_the_cut
     assert stored.old_name == with_query
 
 
+# Pages lparchive keeps under a picture's name, as the hosts answered them when the archive was made (the
+# <head> of the real files, trimmed): see picture_named_by_page
+IMGUR_2011_PAGE = (b'<!doctype html><html lang="en"><head><title>imgur: the simple image sharer </title>'
+                   b'<meta name="robots" content="follow,index" /><link rel=image_src href=http://i.imgur.com/O7mJj.png />'
+                   b'</head><body><img src="/images/imgur-small.gif"><img src="http://i.imgur.com/O7mJj.png">'
+                   b'<img src="http://i.imgur.com/oh8Flb.jpg"></body></html>')
+IMGUR_2014_PAGE = (b'<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd">'
+                   b'<html lang="en"><head><title>imgur: the simple image sharer</title>'
+                   b'<link rel="canonical" href="http://imgur.com/NkxiGRN" /><meta property="og:url" content="http://imgur.com/NkxiGRN" />'
+                   b'<link rel="image_src"             href="http://i.imgur.com/NkxiGRN.png"/>'
+                   b'<meta property="og:image"         content="http://i.imgur.com/NkxiGRN.png?fb" />'
+                   b'<meta name="twitter:image"        content="https://i.imgur.com/NkxiGRN.png"/></head><body></body></html>')
+IMGUR_REACT_PAGE = (b'<!doctype html><html lang="en"><head><meta charset="utf-8"><title>Imgur: The magic of the Internet</title>'
+                    b'<meta property="og:url" data-react-helmet="true" content="https://imgur.com/DkvoW1T">'
+                    b'<meta name="twitter:image" data-react-helmet="true" content="https://i.imgur.com/DkvoW1Th.jpg">'
+                    b'<meta property="og:image" data-react-helmet="true" content="https://i.imgur.com/DkvoW1T.jpeg?fb">'
+                    b'</head><body></body></html>')
+IMGUR_ALBUM_PAGE = (b'<!doctype html><html lang="en"><head><meta property="og:url" data-react-helmet="true" content="https://imgur.com/a/hp2qNZq">'
+                    b'<link rel="canonical" href="https://imgur.com/a/hp2qNZq" data-react-helmet="true" >'
+                    b'<meta property="og:image" data-react-helmet="true" content="https://i.imgur.com/vFYR5mq.png?fb"></head></html>')
+IMGUR_404_PAGE = (b'<!doctype html><html lang="en"><head><title>imgur: the simple 404 page</title></head>'
+                  b'<body><img src="//s.imgur.com/images/404/cat1weyes.png"/>Zoinks! You\'ve taken a wrong turn.</body></html>')
+TENOR_PAGE = (b'<!DOCTYPE html><html lang="en" dir="ltr"><head><link class="dynamic" rel="canonical" href="https://tenor.com/view/fastforward-remote-speed-up-go-forward-skip-gif-5354926">'
+              b'<meta class="dynamic" name="twitter:image" content="https://media1.tenor.com/m/a13nIQdkKRYAAAAC/fastforward-remote.gif">'
+              b'<link rel="image_src" href="https://media1.tenor.com/m/a13nIQdkKRYAAAAC/fastforward-remote.gif">'
+              b'<meta class="dynamic" property="og:url" content="https://media1.tenor.com/m/a13nIQdkKRYAAAAC/fastforward-remote.gif">'
+              b'<meta class="dynamic" property="og:image" content="https://media1.tenor.com/m/a13nIQdkKRYAAAAC/fastforward-remote.gif">'
+              b'</head><body></body></html>')
+PARKING_PAGE = (b'<html><head><title>random-m.com</title><meta property="og:url" content="http://random-m.com/">'
+                b'<meta property="og:image" content="http://random-m.com/banner.jpg"><link rel="image_src" href="/logo.png">'
+                b'</head><body>This domain may be for sale</body></html>')
+
+
+@pytest.mark.parametrize(("page", "url", "expected"), [
+    # 2011 imgur: no Open Graph, an unquoted <link rel=image_src>; "55-O7mJj." is the archiver's counter + the id
+    (IMGUR_2011_PAGE, "https://lparchive.org/Mega-Man-Battle-Network-4-6/Update%2012/55-O7mJj.", "http://i.imgur.com/O7mJj.png"),
+    # 2014 imgur: og:image (with imgur's ?fb) and image_src; the first named wins
+    (IMGUR_2014_PAGE, "https://lparchive.org/Mega-Man-Zero-2/Update%2019/5-NkxiGRN.png", "http://i.imgur.com/NkxiGRN.png?fb"),
+    # today's imgur: the archived name says .jpg, the host .jpeg; the stem is what counts
+    (IMGUR_REACT_PAGE, "https://lparchive.org/MegaMan-Starforce/Update%2028/69-DkvoW1T.jpg", "https://i.imgur.com/DkvoW1T.jpeg?fb"),
+    # tenor: a short URL (wDdW.gif) answered by the gif's page, which says it IS the gif (og:url = og:image)
+    (TENOR_PAGE, "https://lparchive.org/Tactics-Ogre-Let-Us-Cling-Together/Update%2098/2-wDdW.gif",
+     "https://media1.tenor.com/m/a13nIQdkKRYAAAAC/fastforward-remote.gif"),
+    # off the archive the name is the file's own: an imgur page URL used as a picture's
+    (IMGUR_2014_PAGE, "http://imgur.com/NkxiGRN", "http://i.imgur.com/NkxiGRN.png?fb"),
+    (IMGUR_2014_PAGE, "https://lparchive.org/X/Update%201/3-NkxiGRN.gif", "http://i.imgur.com/NkxiGRN.png?fb"),
+    # an album names its first picture: a guess, refused although og:url carries the id
+    (IMGUR_ALBUM_PAGE, "https://imgur.com/a/hp2qNZq.png", None),
+    # imgur's 404 page and a parking page name nothing of the kind (the parking banner is not the picture)
+    (IMGUR_404_PAGE, "https://lparchive.org/Girl-Games/Fanart/31-ztXjbi.gif", None),
+    (PARKING_PAGE, "https://lparchive.org/Pokemon-LeafGreen/Update%2017/1-278586407_Pokemon_Sapphire.jpg", None),
+    (PARKING_PAGE, "http://random-m.com/banner.jpg", "http://random-m.com/banner.jpg"),   # the same name: the page's own
+    # a stem too short to mean anything, a name that is no URL, a page with no head at all
+    (b'<meta property="og:image" content="http://h.example/ab.png">', "https://lparchive.org/X/Update%201/7-ab.gif", None),
+    (b'<meta property="og:image" content="data:image/png;base64,AAAA">', "https://lparchive.org/X/Update%201/7-AAAA.gif", None),
+    (b'<link rel="image_src" href="pics/Z9Z9Z.png">', "http://h.example/view/Z9Z9Z", "http://h.example/view/pics/Z9Z9Z.png"),
+    (b"<html><body>403 Forbidden</body></html>", "https://lparchive.org/Persona-3/Update%2031/35-Persona3-27-101.jpg", None),
+    (b"", "https://lparchive.org/X/Update%201/1-a.png", None),
+])
+def test_picture_named_by_page(page, url, expected):
+    assert lib.picture_named_by_page(page, url) == expected
+
+
+@pytest.mark.asyncio
+async def test_archive_copy_that_is_a_page_naming_its_picture_is_fetched_from_the_host():
+    root = "https://lparchive.org/Mega-Man-Battle-Network-4-6/Update%2012/"
+    archived, picture = f"{root}55-O7mJj.", "http://i.imgur.com/O7mJj.png"
+    session = _FakeSession("never-matches", responses={
+        archived: _FakeResponse(200, IMGUR_2011_PAGE, "application/octet-stream"),
+        picture: _FakeResponse(200, PNG_BYTES, "image/png")})
+    tag = BeautifulSoup('<img src="55-O7mJj."/>', "html.parser").img
+    image = lib.Image(num=0, src="55-O7mJj.", tag=tag, url=Extractor.get_image_url(root, "55-O7mJj."), root_url=root)
+    assert image.url == archived
+    registry = ImageRegistry()
+
+    stored = await asyncio.wait_for(lib._get_image(session, image, registry), timeout=5)
+
+    assert session.requested == [archived, picture]
+    assert stored.old_name == archived and stored.new_name == f"images/{lib.get_blake2b_hash(PNG_BYTES)}.png"
+    download = registry.downloads[archived]
+    assert download.fetched_from == picture and download.served_type == "image/png" and download.detected_type == "image/png"
+
+    # the host no longer serves it, or serves a page in its turn: the failure is the archive copy's, as before
+    for answer in (_FakeResponse(404, b"gone"), _FakeResponse(200, IMGUR_404_PAGE, "text/html")):
+        session = _FakeSession("never-matches", responses={
+            archived: _FakeResponse(200, IMGUR_2011_PAGE, "application/octet-stream"), picture: answer})
+        with pytest.raises(lib.NotAnImageError) as e:
+            await asyncio.wait_for(lib._get_image(session, image, ImageRegistry()), timeout=5)
+        assert session.requested == [archived, picture]
+        assert str(e.value) == f"Not an image: the server answered application/octet-stream, but the body is a web page ({len(IMGUR_2011_PAGE)} bytes)"
+        assert e.value.url == archived and lib.classify_failure(e.value, archived) == lib.ARCHIVE_COPY
+
+    # an album page names a guess: nothing else is asked for
+    album = "https://imgur.com/a/hp2qNZq.png"
+    session = _FakeSession("never-matches", responses={album: _FakeResponse(200, IMGUR_ALBUM_PAGE, "text/html")})
+    guess = lib.Image(num=1, src=album, tag=tag, url=album, root_url=root)
+    with pytest.raises(lib.NotAnImageError) as e:
+        await asyncio.wait_for(lib._get_image(session, guess, ImageRegistry()), timeout=5)
+    assert session.requested == [album] and lib.classify_failure(e.value, album) == lib.WEB_PAGE
+
+
+@pytest.mark.asyncio
+async def test_recovered_pictures_are_in_the_book_and_sources_json_names_where_they_came_from(monkeypatch):
+    monkeypatch.setattr(lib, "RETRY_BACKOFF_BASE", 0)
+    url = "https://lparchive.org/X-COM-Terror-from-the-Deep"
+    page = f"{url}/Update%2001/"
+    archived, imgur_2011 = f"{page}55-O7mJj.", "http://i.imgur.com/O7mJj.png"            # the archive's copy: imgur's page
+    linked, imgur_2014 = f"{page}5-NkxiGRN.png", "http://i.imgur.com/NkxiGRN.png?fb"     # the same, behind a link
+    page_url, tenor = "http://imgur.com/DkvoW1T", "https://i.imgur.com/DkvoW1T.jpeg?fb"   # off the archive: a page URL
+    parked = "http://random-m.com/278586407_Pokemon_Sapphire.jpg"                      # a parking page: its banner is not the picture
+    session = _FakeSession("never-matches", responses={
+        archived: _FakeResponse(200, IMGUR_2011_PAGE, "application/octet-stream"),
+        imgur_2011: _FakeResponse(200, PNG_BYTES, "image/png"),
+        linked: _FakeResponse(200, IMGUR_2014_PAGE, "image/png"),
+        imgur_2014: _FakeResponse(200, PNG_BYTES + b"linked", "image/png"),
+        page_url: _FakeResponse(200, IMGUR_REACT_PAGE, "text/html"),
+        tenor: _FakeResponse(200, JPEG_BYTES, "image/jpeg"),
+        parked: _FakeResponse(200, PARKING_PAGE, "text/html"),
+        page: _FakeResponse(200, (f'<div id="content"><img src="55-O7mJj."/> <a href="5-NkxiGRN.png">full</a> '
+                                  f'<img src="{page_url}"/> <img src="{parked}"/></div>').encode()),
+    })
+    messages = []
+    with tempfile.TemporaryDirectory() as d:
+        out = f"{d}/book.epub"
+        await asyncio.wait_for(do(url, out, session, messages.append), timeout=30)
+        with zipfile.ZipFile(out) as z:
+            sources = json.loads(z.read("EPUB/sources.json"))
+            chapter = z.read("EPUB/update_0.xhtml").decode()
+            stored = sorted(n for n in z.namelist() if n.startswith("EPUB/images/") and "cover" not in n)
+    assert "http://random-m.com/banner.jpg" not in session.requested and "http://random-m.com/logo.png" not in session.requested
+    assert stored == sorted(f"EPUB/images/{lib.get_blake2b_hash(b)}.{ext}" for b, ext in
+                            ((PNG_BYTES, "png"), (PNG_BYTES + b"linked", "png"), (JPEG_BYTES, "jpg")))
+    assert chapter.count("missing-image") == 1 and parked in chapter
+    by_url = {source["url"]: source for image in sources["images"] for source in image["sources"]}
+    assert by_url[archived]["fetched_from"] == imgur_2011 and by_url[archived]["served_type"] == "image/png"
+    assert by_url[linked]["fetched_from"] == imgur_2014
+    assert by_url[page_url]["fetched_from"] == tenor and by_url[page_url]["served_type"] == "image/jpeg"
+    assert sources["skipped"] == [{"url": parked, "cause": lib.WEB_PAGE, "references": [{"page": page, "src": parked}]}]
+    report = messages[-1]
+    assert "1 resource(s) could not be retrieved" in report and parked in report
+    assert "O7mJj" not in report and "NkxiGRN" not in report and "DkvoW1T" not in report
+
+
 @pytest.mark.asyncio
 async def test_archived_names_with_url_syntax_are_fetched_and_the_entity_spelling_is_tried_after_a_404():
     url = "https://lparchive.org/X-COM-Terror-from-the-Deep"
@@ -1187,6 +1330,27 @@ def test_classify_failure():
     assert lib.classify_failure(unreachable, archive) == lib.TEMPORARY
     server_error = RetriesExhaustedError(f"Failed to get resource {elsewhere} after 5 retries: status code: 503", elsewhere, 503)
     assert lib.classify_failure(server_error, elsewhere) == lib.TEMPORARY
+    # a parked domain hands every request to its hosting company's page, which rate-limits: the host is gone, not busy
+    parked = RetriesExhaustedError(f"Failed to get resource {elsewhere} after 5 retries: status code: 429", elsewhere, 429,
+                                   answered_by="https://hostineer.com/billing")
+    assert lib.classify_failure(parked, elsewhere) == lib.DEAD_HOST
+    for same_site in ("http://cdn.img.example/a.png", "http://www.img.example/a.png", elsewhere):   # a CDN, www.: still the host
+        busy = RetriesExhaustedError(f"Failed to get resource {elsewhere} after 5 retries: status code: 503", elsewhere, 503,
+                                     answered_by=same_site)
+        assert lib.classify_failure(busy, elsewhere) == lib.TEMPORARY
+    parked_archive = RetriesExhaustedError(f"Failed to get resource {archive} after 5 retries: status code: 429", archive, 429,
+                                           answered_by="https://hostineer.com/billing")
+    assert lib.classify_failure(parked_archive, archive) == lib.TEMPORARY   # the archive is not parked: not now
+    # a service that closed down answers whatever its leftovers answer (puu.sh: 502): the picture is gone
+    for status in (502, None):
+        closed = RetriesExhaustedError(f"Failed to get resource http://puu.sh/a.gif after 5 retries: status code: {status}",
+                                       "http://puu.sh/a.gif", status)
+        assert lib.classify_failure(closed, "http://puu.sh/a.gif") == lib.GONE
+    # Cloudflare in front of an origin it cannot reach: the same thing as a host that does not answer
+    for status in (521, 522, 523, 530):
+        origin_down = RetriesExhaustedError(f"Failed to get resource {elsewhere} after 5 retries: status code: {status}",
+                                            elsewhere, status)
+        assert lib.classify_failure(origin_down, elsewhere) == lib.DEAD_HOST
     assert lib.classify_failure(AttributeError("'NoneType' object has no attribute 'find_all'"), archive) == lib.OTHER
 
 
@@ -1209,7 +1373,7 @@ def test_failures_report_groups_by_cause_and_asks_for_an_issue_only_when_it_can_
     assert "10 resource(s) could not be retrieved" in report
     assert ISSUES_URL not in report and "open an issue" not in report
     assert "5 image(s) on hosts that no longer exist or do not answer (i.minus.com 2, tinypic.com 1, waffleimages.com 1 and 1 more host):" in report
-    assert "1 image(s) their host no longer serves (HTTP 403, 404, 410 or another 4xx; abload.de 1):" in report
+    assert "1 image(s) their host no longer serves (HTTP 403, 404, 410 or another 4xx, or a service that closed down; abload.de 1):" in report
     assert "1 image(s) whose copy on lparchive.org is empty, or is a web page saved under the image's name:" in report
     assert "1 image(s) that are not on lparchive.org (HTTP 404 under every spelling this tool knows):" in report
     assert "1 image(s) whose host answers an empty file or a web page instead of the picture (hotlink protection, parking page; photobucket.com 1):" in report
@@ -1542,6 +1706,65 @@ async def test_redirect_loops_fail_at_once_and_end_the_search_for_unlisted_updat
     assert session.requested.count(probe) == 1
     assert len(chapters) == 18
     assert "unlisted" not in "\n".join(messages) and "could not be retrieved" not in "\n".join(messages)
+
+
+class _ParkedResponse(_FakeResponse):
+    """What a parked domain's picture URL gets: the hosting company's billing page, rate-limiting (aiohttp's
+    response.url is where the redirects ended)."""
+
+    def __init__(self):
+        super().__init__(429, b"Too Many Requests", "text/html")
+        self.url = "https://hostineer.com/billing"
+
+
+@pytest.mark.asyncio
+async def test_a_host_that_hands_its_pictures_to_another_site_is_dead_not_busy(monkeypatch):
+    monkeypatch.setattr(lib, "RETRY_BACKOFF_BASE", 0)
+    url = "http://boxsocialbellyache.com/p/zone2_1/livre3.png"
+    session = _FakeSession("never-matches", responses={url: _ParkedResponse()})
+    with pytest.raises(RetriesExhaustedError) as e:
+        await fetch_with_retries(session, url, max_retries=3)
+    assert session.requested.count(url) == 3                    # a 429 is retried: the host might just be busy
+    assert e.value.status == 429 and e.value.answered_by == "https://hostineer.com/billing"
+    assert lib.classify_failure(e.value, url) == lib.DEAD_HOST
+    # a plain 5xx from the host itself stays a temporary failure (no url on the fake: nothing known about redirects)
+    session = _FakeSession("never-matches", responses={url: _FakeResponse(503, b"down")})
+    with pytest.raises(RetriesExhaustedError) as e:
+        await fetch_with_retries(session, url, max_retries=2)
+    assert e.value.answered_by is None and lib.classify_failure(e.value, url) == lib.TEMPORARY
+
+
+@pytest.mark.asyncio
+async def test_a_host_serving_web_pages_and_nothing_else_is_dead_for_its_other_failures_too(monkeypatch):
+    """boxsocialbellyache.com (OFF): the hosting company's page for some pictures, a 429 "shield" for the rest,
+    not one picture served. The 429s are not "try again later"; a busy host that did serve pictures keeps them."""
+    monkeypatch.setattr(lib, "RETRY_BACKOFF_BASE", 0)
+    url = "https://lparchive.org/X-COM-Terror-from-the-Deep"
+    page = f"{url}/Update%2001/"
+    parked_page, parked_limit = "http://parked.example/a.png", "http://parked.example/b.png"
+    busy_ok, busy_down = "http://busy.example/c.png", "http://busy.example/d.png"
+    session = _FakeSession("never-matches", responses={
+        parked_page: _FakeResponse(200, b"<html>buy this domain</html>", "text/html"),
+        parked_limit: _FakeResponse(429, b"Too Many Requests", "text/html"),
+        busy_ok: _FakeResponse(200, PNG_BYTES, "image/png"),
+        busy_down: _FakeResponse(503, b"down"),
+        page: _FakeResponse(200, f'<div id="content">{"".join(f"<img src={u!r}/>" for u in (parked_page, parked_limit, busy_ok, busy_down))}</div>'.encode()),
+    })
+    messages = []
+    with tempfile.TemporaryDirectory() as d:
+        out = f"{d}/book.epub"
+        await asyncio.wait_for(do(url, out, session, messages.append), timeout=30)
+        with zipfile.ZipFile(out) as z:
+            sources = json.loads(z.read("EPUB/sources.json"))
+    report = messages[-1]
+    assert "3 resource(s) could not be retrieved" in report
+    assert "1 image(s) on hosts that no longer exist or do not answer (parked.example 1):" in report
+    assert "1 image(s) whose host answers an empty file or a web page instead of the picture (hotlink protection, parking page; parked.example 1):" in report
+    assert "1 resource(s) whose host had trouble (server error, disconnection); try again later:" in report
+    assert report.index("do not answer") < report.index(parked_limit) < report.index("web page instead") < report.index(parked_page) \
+        < report.index("had trouble") < report.index(busy_down)
+    assert {s["url"]: s["cause"] for s in sources["skipped"]} == {parked_page: lib.WEB_PAGE, parked_limit: lib.DEAD_HOST, busy_down: lib.TEMPORARY}
+    assert lib.parked_hosts(lib.ImageRegistry()) == set()
 
 
 @pytest.mark.asyncio

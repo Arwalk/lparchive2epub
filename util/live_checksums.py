@@ -69,7 +69,10 @@ CHECKSUMS = Path(__file__).resolve().parent.parent / "tests" / "resources" / "li
 # 17-part screenshot LP whose update 9 references "1-questtales.png?t=1203476272", a name the archiver saved
 # without the forum's query (fetched from the name cut at the "%3F": the one such case of the archive-wide run),
 # and an 18-part screenshot LP with a picture lparchive.org answers 404 for under every spelling (reported as not
-# on the archive, "archive-missing" in sources.json, no bug report asked: 38 pictures in 15 books of that run).
+# on the archive, "archive-missing" in sources.json, no bug report asked: 38 pictures in 15 books of that run),
+# and a 26-part video LP whose update 19 links a picture the archive keeps imgur's page of, under the picture's name
+# (the page names the picture and i.imgur.com still serves it: fetched from there, "fetched_from" in sources.json;
+# 7 pictures in 5 books of that run; the other 378 archive copies that are not pictures name nothing to recover).
 LETS_PLAYS = [
     "X-COM-Terror-from-the-Deep",
     "Dwarf-Fortress-Boatmurdered",
@@ -94,6 +97,7 @@ LETS_PLAYS = [
     "SpaceChem-2012-Tournament",
     "Quest-64",
     "Digital-A-Love-Story",
+    "Mega-Man-Zero-2",
 ]
 
 

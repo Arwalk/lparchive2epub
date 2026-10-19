@@ -255,11 +255,12 @@ carries `EPUB/sources.json` (open the `.epub` as a zip): for each page, the addr
 title, whether the landing page listed it or it was found by following next links, and whether it was
 retrieved or stands in as a placeholder; for each image page, the picture it shows; for each stored
 picture, its sources with the referencing pages, the Content-Type served, the address that answered when
-the archive had the file under another spelling, and the hash, size and type of the downloaded bytes
-when they were resized or converted; for each skipped picture, its address, the pages that showed it and
-why it was skipped (the same classes as the report); the Let's Play's address, the tool's version and the
-options that change bytes. The file is listed in the package but in no table of contents: readers never
-show it. It carries no build time and is sorted throughout, so two builds of one Let's Play give one file.
+the archive had the file under another spelling or kept, under the picture's name, the page of a host that
+still serves it, and the hash, size and type of the downloaded bytes when they were resized or converted;
+for each skipped picture, its address, the pages that showed it and why it was skipped (the same classes
+as the report); the Let's Play's address, the tool's version and the options that change bytes. The file
+is listed in the package but in no table of contents: readers never show it. It carries no build time and
+is sorted throughout, so two builds of one Let's Play give one file.
 
 ## Memory and disk
 
@@ -309,4 +310,4 @@ epubcheck run goes on alongside the builds, with its own progress bar, and once 
 - Some landing pages do not list every update (or list none): the tool follows the pages' own next
   links from the last listed update to find the rest.
 - Some LPs completely fail to be downloaded.
-- Some LPs contain broken links (typos like `hhttp://`, dead image hosts...). Common typos are repaired automatically; resources that still can't be retrieved are left as external links and a report is printed at the end. If a whole update can't be retrieved, no book is written and the failing update(s) are listed; pass `--allow-missing-updates` to build the book anyway with a placeholder page in their place. The report groups the failures by cause in plain words (dead hosts, pictures their host no longer serves, broken or missing copies on the archive...) and, when some failure may be the tool's doing, asks you to paste it in a [GitHub issue](https://github.com/Arwalk/lparchive2epub/issues/new) so the case can be handled in a future release. Use `--strict` to fail instead.
+- Some LPs contain broken links (typos like `hhttp://`, dead image hosts...). Common typos are repaired automatically, and a picture the archive keeps a host's page of (imgur, tenor) is fetched from that host when it still serves it; resources that still can't be retrieved are left as external links and a report is printed at the end. If a whole update can't be retrieved, no book is written and the failing update(s) are listed; pass `--allow-missing-updates` to build the book anyway with a placeholder page in their place. The report groups the failures by cause in plain words (dead hosts, pictures their host no longer serves, broken or missing copies on the archive...) and, when some failure may be the tool's doing, asks you to paste it in a [GitHub issue](https://github.com/Arwalk/lparchive2epub/issues/new) so the case can be handled in a future release. Use `--strict` to fail instead.

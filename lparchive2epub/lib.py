@@ -15,7 +15,7 @@ import zipfile
 import zlib
 from dataclasses import dataclass, field
 from hashlib import blake2b
-from typing import List
+from typing import Collection, List
 from urllib.parse import urlparse, urlsplit, urlunsplit, urljoin, urldefrag, unquote, quote
 
 import aiohttp
@@ -200,8 +200,9 @@ class IndexedEpubImage:
 @dataclass
 class Download:
     """What fetching one image URL gave, kept for the book's sources.json (see book_sources): the URL that
-    answered (the URL itself, or a fallback spelling from lparchive_fallback_urls), the Content-Type as
-    served, and the hash, size and detected type of the bytes before any resize or conversion."""
+    answered (the URL itself, a fallback spelling from lparchive_fallback_urls, or the picture a web page
+    served in its place named, see picture_named_by_page), the Content-Type as served, and the hash, size
+    and detected type of the bytes before any resize or conversion."""
     fetched_from: str
     served_type: str | None
     raw_hash: str
@@ -376,6 +377,56 @@ def unwrap_gzip(body: bytes) -> bytes:
         return gzip.decompress(body)
     except (OSError, EOFError, zlib.error):
         return body
+
+
+# The archiver's counter in front of every archived file name: "13-zB1Mf." was "zB1Mf" on imgur
+ARCHIVED_COUNTER = re.compile(r"^\d+-")
+# A page's <head> is where it names its picture; parsing more buys nothing (Minus pages: 208 KB, name nothing)
+PAGE_HEAD_BYTES = 65536
+MIN_STEM_LENGTH = 4
+
+
+def _file_stem(url: str, archived: bool = False) -> str:
+    """The file name of `url` without its extension, query or fragment: "zB1Mf" for ".../13-zB1Mf." on the
+    archive (`archived`: the archiver's counter goes too) and for "http://i.imgur.com/zB1Mf.png?fb"."""
+    name = unquote(urlsplit(url).path.rstrip("/").rsplit("/", 1)[-1])
+    if archived:
+        name = ARCHIVED_COUNTER.sub("", name, count=1)
+    return name.rsplit(".", 1)[0] if "." in name else name
+
+
+def picture_named_by_page(body: bytes, url: str) -> str | None:
+    """The picture a web page served in place of the picture at `url` names as its own, or None.
+
+    lparchive keeps, under a picture's name, the page its host answered when the archive was made (imgur
+    answered its page for a picture URL without extension in 2011; tenor and today's imgur for a short
+    URL): the page names the picture (Open Graph og:image, or the older <link rel="image_src">) and the
+    host may still serve it, 7 pictures in 5 books of the archive-wide run of 2026-10-17. A book must
+    never get a wrong picture, so a name is trusted only when the page and the request agree: the named
+    file's stem is the requested file's stem (zB1Mf. and i.imgur.com/zB1Mf.png; SgeJ1.jpg and SgeJ1.png),
+    or the page says it IS the picture (og:url equal to og:image, tenor). What that refuses: an imgur
+    album (og:image is its first picture, a guess), imgur's 404 page (names nothing), a parking page or a
+    hotlink notice (a banner, never under the picture's name)."""
+    soup = BeautifulSoup(body[:PAGE_HEAD_BYTES], "html.parser")
+    stem = _file_stem(url, archived=is_lparchive_url(url))
+    og_url = None
+    candidates = []
+    for meta in soup.find_all("meta", attrs={"property": True, "content": True}):
+        if meta["property"] == "og:image":
+            candidates.append(meta["content"])
+        elif meta["property"] == "og:url" and og_url is None:
+            og_url = meta["content"].strip()
+    for link in soup.find_all("link", href=True):
+        rel = link.get("rel") or []
+        if "image_src" in (rel if isinstance(rel, list) else rel.split()):
+            candidates.append(link["href"])
+    for candidate in candidates:
+        named = normalize_url(urljoin(url, candidate.strip()))
+        if named is None:
+            continue
+        if named == og_url or (len(stem) >= MIN_STEM_LENGTH and _file_stem(named) == stem):
+            return named
+    return None
 INTRO_FILE_NAME = "introduction.xhtml"
 # Where every page and picture of the book came from, for whoever holds only the book (see book_sources)
 SOURCES_FILE_NAME = "sources.json"
@@ -812,12 +863,15 @@ def request_headers() -> dict[str, str]:
 REPOSITORY_URL = "https://github.com/Arwalk/lparchive2epub"
 
 class FetchError(RuntimeError):
-    """A resource could not be retrieved. `url` and, when known, the HTTP `status` are kept for reporting."""
+    """A resource could not be retrieved. `url` and, when known, the HTTP `status` are kept for reporting,
+    and `answered_by` is the URL that answered when the server did (after redirects): a host that hands
+    its requests to another site is how a parked domain looks (classify_failure)."""
 
-    def __init__(self, message: str, url: str = "", status: int | None = None):
+    def __init__(self, message: str, url: str = "", status: int | None = None, answered_by: str | None = None):
         super().__init__(message)
         self.url = url
         self.status = status
+        self.answered_by = answered_by
 
 
 class NonRetryableError(FetchError):
@@ -838,12 +892,13 @@ class SkippedResource:
     url: str
     reason: str
     cause: str = "other"   # one of FAILURE_CLASSES, see classify_failure
+    resolved: str | None = None   # the URL that was fetched (url as the page wrote it, made absolute), for settle_causes
 
 
 # Why a resource could not be retrieved, from the tool's point of view: everything but OTHER is beyond its
 # reach, so the report only asks for a bug report when an OTHER failure is present. In report order.
-DEAD_HOST = "dead-host"              # the external host does not resolve, refuses connections or never answers
-GONE = "gone"                        # the external host answers 4xx (403, 404, 410, a 400 or 418...) for the picture
+DEAD_HOST = "dead-host"              # the external host does not resolve, never answers, or is parked (hands its requests to another site)
+GONE = "gone"                        # the external host answers 4xx (403, 404, 410, a 400 or 418...) for the picture, or has closed down
 ARCHIVE_COPY = "archive-copy"        # lparchive.org's own copy is empty or an HTML page saved under an image name
 ARCHIVE_MISSING = "archive-missing"  # lparchive.org answers 404 under every spelling the tool knows: never archived
 WEB_PAGE = "web-page"                # the external host answers an HTML page (hotlink protection, parking page)
@@ -855,10 +910,28 @@ FAILURE_CLASSES = (DEAD_HOST, GONE, ARCHIVE_COPY, ARCHIVE_MISSING, WEB_PAGE, TEM
 # "9-Hunt_snakebladder.jpg</missing><missing>10-hunt_beargall.jpg"), a quote or a space got in.
 MALFORMED_PATH = re.compile(r'[<>"\s]')
 
+# Image hosts that closed down for good: whatever they answer, the picture is not coming back. puu.sh (puush)
+# answers 502 for every file and 404 for its own pages (2026-10-19; 7 pictures in 3 books of the archive-wide run).
+SHUT_DOWN_HOSTS = frozenset({"puu.sh"})
 
-def classify_failure(e: Exception, url: str | None, *, page: bool = False) -> str:
+# Cloudflare's statuses for an origin it cannot reach: 521 web server down, 522 connection timed out, 523 origin
+# unreachable, 530 origin DNS error (1016). The CDN in front reports what a direct connection would have failed
+# with, so after the retries it is the same thing as a host that does not answer (i.cubeupload.com, 530 for its root too).
+ORIGIN_DOWN_STATUSES = frozenset({521, 522, 523, 530})
+
+
+def _site(url: str) -> str:
+    """The last two labels of the host (hostineer.com for billing.hostineer.com): close enough to tell a redirect to
+    another site from one to a CDN or the www. form of the same site. Public suffixes such as co.uk make two sites
+    look like one, which only errs toward the status quo (TEMPORARY)."""
+    host = (urlparse(url).hostname or "").lower()
+    return ".".join(host.split(".")[-2:])
+
+
+def classify_failure(e: Exception, url: str | None, *, page: bool = False, parked: Collection[str] = ()) -> str:
     """Which of FAILURE_CLASSES the failure `e` of fetching `url` (the resolved URL, None when it could
-    not be built) falls into.
+    not be built) falls into. `parked` is the hosts this build found serving web pages and nothing else
+    (parked_hosts): their rate limits and server errors are not going to pass.
 
     A 404 on lparchive.org for a file a page references (after the lparchive_fallback_urls spellings)
     means the archiver never saved it: 38 of the 42 "maybe the tool" items of the archive-wide run, not
@@ -877,7 +950,21 @@ def classify_failure(e: Exception, url: str | None, *, page: bool = False) -> st
             return ARCHIVE_MISSING
         return OTHER
     if isinstance(e, RetriesExhaustedError):
-        if on_archive or e.status is not None:
+        if on_archive:
+            return TEMPORARY
+        if urlparse(url).hostname in SHUT_DOWN_HOSTS:
+            return GONE
+        if e.status in ORIGIN_DOWN_STATUSES:
+            return DEAD_HOST
+        answered_by = getattr(e, "answered_by", None)
+        if answered_by and _site(answered_by) != _site(url):
+            # A parked domain: the host sends every request to its hosting company's page (boxsocialbellyache.com
+            # to hostineer.com/billing), which rate-limits (429) or times out. The picture's host is as good as
+            # gone; a redirect to a CDN or the www. form of the same site is not that.
+            return DEAD_HOST
+        if urlparse(url).hostname in parked:
+            return DEAD_HOST
+        if e.status is not None:
             return TEMPORARY
         return DEAD_HOST
     return OTHER
@@ -1128,10 +1215,12 @@ async def fetch_with_retries(session: aiohttp.ClientSession, url: str, max_retri
         try:
             async with (fetch.limit() if fetch is not None else contextlib.nullcontext()), \
                     session.get(url, headers=request_headers()) as r:
+                answered_by = str(getattr(r, "url", "") or "") or None   # after redirects; fakes have no url
                 if 400 <= r.status < 500 and r.status not in RETRYABLE_CLIENT_STATUSES:
-                    raise NonRetryableError(f"Failed to get resource {url}, status code: {r.status}", url, r.status)
+                    raise NonRetryableError(f"Failed to get resource {url}, status code: {r.status}", url, r.status,
+                                            answered_by)
                 if r.status != 200:
-                    raise FetchError(f"Failed to get resource {url}, status code: {r.status}", url, r.status)
+                    raise FetchError(f"Failed to get resource {url}, status code: {r.status}", url, r.status, answered_by)
                 body = await r.read()
                 headers = getattr(r, "headers", None) or {}
                 get_encoding = getattr(r, "get_encoding", None)
@@ -1154,7 +1243,8 @@ async def fetch_with_retries(session: aiohttp.ClientSession, url: str, max_retri
             if retry_count < max_retries:
                 await asyncio.sleep(RETRY_BACKOFF_BASE * (2 ** retry_count))
     raise RetriesExhaustedError(f"Failed to get resource {url} after {max_retries} retries: {last_exception}",
-                                url, getattr(last_exception, "status", None)) from last_exception
+                                url, getattr(last_exception, "status", None),
+                                getattr(last_exception, "answered_by", None)) from last_exception
 
 
 
@@ -1184,6 +1274,35 @@ class ImageRegistry:
         self.references: dict[str, set[tuple[str, str]]] = {}
         self.unresolvable: set[tuple[str, str]] = set()
         self.downloads: dict[str, Download] = {}
+
+
+def parked_hosts(registry: ImageRegistry) -> set[str]:
+    """The hosts off the archive that answered a web page (or an empty file) in place of a picture in this
+    build and never delivered one: parked domains and hotlink-protected hosts. Their other failures are the
+    same thing seen from another angle. boxsocialbellyache.com (OFF, 33 pictures) answers its hosting
+    company's page for some pictures and a 429 "shield" or a dropped connection for the rest, for the
+    picture URLs and its root alike: a rate limit that never lifts, which is not "try again later"."""
+    served, pages = set(), set()
+    for img_url, future in registry.by_url.items():
+        if not future.done() or future.cancelled() or is_lparchive_url(img_url):
+            continue
+        host = urlparse(img_url).hostname
+        if host is None:
+            continue
+        error = future.exception()
+        if error is None:
+            served.add(host)
+        elif isinstance(error, NotAnImageError):
+            pages.add(host)
+    return pages - served
+
+
+def settle_causes(failures: list[SkippedResource], parked: Collection[str]) -> None:
+    """Once every picture of the build has been asked for: the temporary failures on a host that
+    parked_hosts found serving web pages and nothing else become dead-host, what they are."""
+    for failure in failures:
+        if failure.cause == TEMPORARY and failure.resolved and urlparse(failure.resolved).hostname in parked:
+            failure.cause = DEAD_HOST
 
 
 def spool_write(spool_dir: str, name: str, content: bytes) -> str:
@@ -1292,8 +1411,11 @@ async def _get_image(session: aiohttp.ClientSession, img: Image, registry: Image
         raise
 
 async def _fetch_image(session: aiohttp.ClientSession, img_url: str, fetch: FetchSettings | None) -> Fetched:
-    """Download the image, trying the other spellings lparchive may have saved it under after a 404.
-    The error raised is the one for the URL the page gave, the fallbacks being an implementation detail."""
+    """Download the image, trying the other spellings lparchive may have saved it under after a 404, and
+    the picture a web page served in its place names (picture_named_by_page) when the host still has it.
+    The error raised is the one for the URL the page gave, the fallbacks being an implementation detail;
+    a page naming nothing, or a picture the host no longer serves, is returned as it came, so that the
+    failure says what the archive holds."""
     try:
         fetched = await fetch_with_retries(session, img_url, fetch=fetch)
     except NonRetryableError as first:
@@ -1307,6 +1429,21 @@ async def _fetch_image(session: aiohttp.ClientSession, img_url: str, fetch: Fetc
                 continue
         else:
             raise first
+    fetched = _unwrapped(fetched)
+    if detect_image_type(fetched.body) is None and is_markup(fetched.body):
+        # a web page where the picture should be: when it names its picture, the host may still serve it
+        named = picture_named_by_page(fetched.body, img_url)
+        if named is not None:
+            try:
+                picture = _unwrapped(await fetch_with_retries(session, named, fetch=fetch))
+            except FetchError:
+                picture = None
+            if picture is not None and detect_image_type(picture.body) is not None:
+                return picture   # its url is the picture's: sources.json records it as fetched_from
+    return fetched
+
+
+def _unwrapped(fetched: Fetched) -> Fetched:
     body = unwrap_gzip(fetched.body)
     if body is not fetched.body:
         fetched = Fetched(fetched.url, body, fetched.content_type, fetched.encoding)
@@ -1334,7 +1471,8 @@ def _describe(e: Exception) -> str:
 
 
 def _skipped(img: Image, e: Exception) -> SkippedResource:
-    return SkippedResource(page=img.root_url, url=img.src, reason=_describe(e), cause=classify_failure(e, img.url))
+    return SkippedResource(page=img.root_url, url=img.src, reason=_describe(e), cause=classify_failure(e, img.url),
+                           resolved=img.url)
 
 
 async def build_intro(session: aiohttp.ClientSession, url_root: str, intro: Intro, registry: ImageRegistry | None = None,
@@ -2208,7 +2346,7 @@ def _class_heading(cause: str, failures: list[SkippedResource], what: str) -> st
     if cause == DEAD_HOST:
         return f"{n} image(s) on hosts that no longer exist or do not answer ({hosts}):"
     if cause == GONE:
-        return f"{n} image(s) their host no longer serves (HTTP 403, 404, 410 or another 4xx; {hosts}):"
+        return f"{n} image(s) their host no longer serves (HTTP 403, 404, 410 or another 4xx, or a service that closed down; {hosts}):"
     if cause == ARCHIVE_COPY:
         return f"{n} image(s) whose copy on lparchive.org is empty, or is a web page saved under the image's name:"
     if cause == ARCHIVE_MISSING:
@@ -2263,8 +2401,9 @@ def book_sources(url: str, pages: list[Page], chapters: list[Chapters], unlisted
     Listed: the intro (the landing page), every update page (its URL and title, whether the landing page
     listed it or it was found through next links, whether it was retrieved or stands as a placeholder),
     every image page (the stored file it shows), every stored image (its sources, each with the URL that
-    answered when a fallback spelling did, the Content-Type as served and the (page, src) references; the
-    hash, size and type of the downloaded bytes when the stored ones differ from them), every skipped
+    answered when a fallback spelling did, or when the page served in the picture's place named it, the
+    Content-Type as served and the (page, src) references; the hash, size and type of the downloaded
+    bytes when the stored ones differ from them), every skipped
     image (resolved URL, or null for one whose URL could not be built, the cause class of
     classify_failure, the references), the LP's URL, the tool's version and the options that change bytes.
     No reason text for skipped images (a network error's message changes from run to run) and no build
@@ -2290,13 +2429,14 @@ def book_sources(url: str, pages: list[Page], chapters: list[Chapters], unlisted
 
     images: dict[str, dict] = {}
     skipped = []
+    parked = parked_hosts(registry)
     for img_url, future in registry.by_url.items():
         if not future.done() or future.cancelled():
             continue   # cannot happen once the pages are built; a cancelled build writes no book
         refs = references(registry.references.get(img_url, ()))
         error = future.exception()
         if error is not None:
-            skipped.append({"url": img_url, "cause": classify_failure(error, img_url), "references": refs})
+            skipped.append({"url": img_url, "cause": classify_failure(error, img_url, parked=parked), "references": refs})
             continue
         stored = future.result()
         download = registry.downloads[img_url]
@@ -2487,6 +2627,7 @@ async def do(url: str, file: str | None, session: aiohttp.ClientSession, writer,
                 placeholders.add(chapter.original_href)
 
         pages = [p for _, p in sorted(pages_indexed, key=lambda x: x[0])]
+        settle_causes(failures, parked_hosts(image_registry))
 
         if failures and strict:
             raise StrictModeError(format_failures_report(
