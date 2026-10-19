@@ -1344,7 +1344,7 @@ async def build_intro(session: aiohttp.ClientSession, url_root: str, intro: Intr
         if not isinstance(result, Exception):
             point_at_embedded(image, result)
 
-    intro_chapter.content = str(intro.intro)
+    intro_chapter.content = page_content(intro.intro)
 
     return Page(0, intro_chapter, in_document_order(intro.images, images), linked_images(intro.images, images))
 
@@ -1455,7 +1455,7 @@ async def build_update(session: aiohttp.ClientSession, chapter: Chapters, data: 
     if fatal:
         raise fatal[0]
 
-    update_chapter.content = str(data.content)
+    update_chapter.content = page_content(data.content)
 
     return Page(chapter.num, update_chapter, in_document_order(data.images, images), linked_images(data.images, images))
 
@@ -1525,7 +1525,7 @@ def build_placeholder_page(chapter: Chapters, intro: Intro, error: Exception) ->
     reason = content.new_tag("p")
     reason.string = f"Reason: {str(error) or type(error).__name__}"
     div.append(reason)
-    placeholder.content = str(content)
+    placeholder.content = page_content(content)
     return Page(chapter.num, placeholder, [])
 
 
@@ -1819,6 +1819,15 @@ def get_cleaned_html(page: str) -> BeautifulSoup:
     soup = BeautifulSoup(page, "html.parser")
     sanitize(soup)
     return soup
+
+
+def page_content(tag) -> str:
+    """A page's markup as ebooklib gets it: serialised, with newlines normalised the way HTML5 reads them
+    (CR LF and a lone CR become LF). libxml2 2.14 (lxml's Linux wheels) does that itself in ebooklib's
+    re-parse, 2.11 (lxml's Windows wheels, 6.1.3 included) keeps the CR and writes it as &#13;. lparchive's
+    template has CRLF lines (the <h3> heading every update, three lines of some landing pages), so the same
+    Let's Play gave a different book on Windows (6 of the 21 live checksums, 2026-10-19)."""
+    return str(tag).replace("\r\n", "\n").replace("\r", "\n")
 
 
 def sanitize(soup: BeautifulSoup):

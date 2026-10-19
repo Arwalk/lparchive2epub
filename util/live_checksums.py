@@ -7,6 +7,11 @@ book, the tool's version left out).
 `pytest --live` rebuilds the same Let's Plays and compares. A mismatch means the output changed:
 either the tool did (intended -> rerun this script and commit the new file) or the site did (an image
 host died, a page was edited). The script prints what changed so you can tell which.
+
+ebooklib re-parses and re-serialises every page with lxml's bundled libxml2, so the file also records the
+libxml2 version the checksums were made with: lxml's Linux wheels bundle 2.14, its Windows wheels 2.11
+(6.1.3 included), and the test names both versions when they differ and the books do too. The one known
+difference between them, CR LF kept as &#13; by 2.11, is normalised away by page_content() in lib.py.
 """
 import argparse
 import asyncio
@@ -21,6 +26,7 @@ from pathlib import Path
 
 import aiohttp
 from aiohttp_client_cache import CachedSession, SQLiteBackend
+from lxml import etree
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from lparchive2epub.cover import TITLE_PAGE_FILE_NAME  # noqa: E402
@@ -91,6 +97,11 @@ COLOPHON_VERSION = re.compile(rb"Converted by lparchive2epub [^<]*\.</p>")
 SOURCES_VERSION = re.compile(rb'"version": "[^"]*"')
 
 
+def libxml2_version() -> str:
+    """The libxml2 lxml was built with (the one it bundles in a wheel), as "2.14.6"."""
+    return ".".join(str(part) for part in etree.LIBXML_COMPILED_VERSION)
+
+
 def book_checksum(path: str) -> str:
     """sha256 of the book's content: the name and bytes of every file in the EPUB, in order, with the
     tool's version taken out of the title page. A release must not flip every recorded checksum."""
@@ -127,8 +138,8 @@ async def main_async(cache_file: str | None):
         current[slug] = await build_checksum(slug, cache_file)
         state = "unchanged" if previous.get(slug) == current[slug] else "CHANGED" if slug in previous else "new"
         print(f"{slug}: {current[slug][:16]} ({state})", file=sys.stderr)
-    CHECKSUMS.write_text(json.dumps({"generated": datetime.date.today().isoformat(), "lets_plays": current},
-                                    indent=1) + "\n")
+    CHECKSUMS.write_text(json.dumps({"generated": datetime.date.today().isoformat(), "libxml2": libxml2_version(),
+                                     "lets_plays": current}, indent=1) + "\n")
     print(f"written {CHECKSUMS}", file=sys.stderr)
 
 

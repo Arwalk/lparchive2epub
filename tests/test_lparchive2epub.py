@@ -383,6 +383,11 @@ def _live_checksums() -> dict:
         return json.load(f)["lets_plays"]
 
 
+def _live_checksums_libxml2() -> str:
+    with open(LIVE_CHECKSUMS, encoding="utf-8") as f:
+        return json.load(f)["libxml2"]
+
+
 def test_live_checksum_ignores_the_tool_version_but_nothing_else():
     from util.live_checksums import book_checksum
 
@@ -415,11 +420,18 @@ async def test_live_build_matches_recorded_checksum(slug):
     """Builds the Let's Play from lparchive.org and compares the book byte for byte with the last
     recorded build. A mismatch means the output changed: the tool (then regenerate with
     util/live_checksums.py) or the site (a dead image host, an edited page)."""
-    from util.live_checksums import build_checksum
+    from util.live_checksums import build_checksum, libxml2_version
     expected = _live_checksums()[slug]
     actual = await asyncio.wait_for(build_checksum(slug, None), timeout=600)
+    # ebooklib re-serialises every page with lxml's bundled libxml2 (2.14 in the Linux wheels, 2.11 in the Windows
+    # ones): page_content() irons out the known difference, so the books must match either way, but a new one
+    # should be told apart from a change of the tool or the site at first sight
+    recorded, running = _live_checksums_libxml2(), libxml2_version()
+    parser = (f" The checksums were recorded with libxml2 {recorded} and this lxml bundles {running}: a difference "
+              f"in how the pages are re-serialised is the first suspect." if running != recorded else "")
     assert actual == expected, (f"{slug}: the book built today differs from the recorded one. If the tool changed on "
-                                f"purpose, run `uv run python util/live_checksums.py` and commit the new checksums.")
+                                f"purpose, run `uv run python util/live_checksums.py` and commit the new checksums."
+                                + parser)
 
 
 @pytest.mark.parametrize(("url", "expected"), [
@@ -2136,10 +2148,11 @@ async def test_identical_bytes_under_different_urls_are_processed_and_stored_onc
 
 def test_cache_path_resolution_and_checks():
     with tempfile.TemporaryDirectory() as d:
-        assert resolve_cache_path(f"{d}/lp") == f"{d}/lp.sqlite"
-        assert resolve_cache_path(f"{d}/lp.db") == f"{d}/lp.db"
+        # resolve_cache_path returns os.path.abspath: on Windows the separator becomes a backslash
+        assert resolve_cache_path(f"{d}/lp") == os.path.join(d, "lp.sqlite")
+        assert resolve_cache_path(f"{d}/lp.db") == os.path.join(d, "lp.db")
         created = check_cache_path(f"{d}/lp")
-        assert created == f"{d}/lp.sqlite" and os.path.exists(created)
+        assert created == os.path.join(d, "lp.sqlite") and os.path.exists(created)
         with pytest.raises(CacheError, match="is a directory"):
             check_cache_path(d)
         with pytest.raises(CacheError, match="does not exist"):
@@ -2176,7 +2189,7 @@ def test_cli_cache_flag(monkeypatch, capsys):
         cli.main(["--cache", f"{d}/lp", "https://lparchive.org/Some-LP", "out.epub"])
         assert isinstance(seen["session"], CachedSession) and isinstance(seen["session"].cache, SQLiteBackend)
         assert os.path.exists(f"{d}/lp.sqlite")
-        assert f"using cache {d}/lp.sqlite" in capsys.readouterr().err
+        assert f"using cache {os.path.join(d, 'lp.sqlite')}" in capsys.readouterr().err
         with pytest.raises(SystemExit) as exit_info:
             cli.main(["--cache", d, "https://lparchive.org/Some-LP", "out.epub"])
         assert exit_info.value.code == EXIT_CACHE
@@ -3518,20 +3531,68 @@ def test_resolve_output_path():
 
 
 @pytest.mark.asyncio
-async def test_output_defaults_to_the_title_in_the_current_directory(monkeypatch):
+async def test_output_defaults_to_the_title_in_the_current_directory(monkeypatch, tmp_path):
     url = "https://lparchive.org/X-COM-Terror-from-the-Deep"
     messages = []
+    # pytest's tmp_path, not TemporaryDirectory: monkeypatch restores the cwd only at teardown, and Windows
+    # refuses to delete the current directory (WinError 32) when a with-block would remove it before that
+    d = str(tmp_path)
+    monkeypatch.chdir(d)
+    written = await asyncio.wait_for(do(url, None, _FakeSession("never-matches"), messages.append), timeout=30)
+    assert written == "X-COM Terror from the Deep.epub"
+    assert os.listdir(d) == ["X-COM Terror from the Deep.epub"]
+    assert any(m == "Writing book file X-COM Terror from the Deep.epub" for m in messages)
+    os.mkdir(f"{d}/books")
+    written = await asyncio.wait_for(do(url, f"{d}/books", _FakeSession("never-matches"), lambda *_: None), timeout=30)
+    assert written == os.path.join(f"{d}/books", "X-COM Terror from the Deep.epub") and os.path.exists(written)
+    written = await asyncio.wait_for(do(url, f"{d}/named.epub", _FakeSession("never-matches"), lambda *_: None), timeout=30)
+    assert written == f"{d}/named.epub" and os.path.exists(written)
+
+
+def test_page_content_normalises_newlines_like_html5():
+    """CR LF and a lone CR become LF, in text and in attributes alike, nothing else moves."""
+    soup = BeautifulSoup('<div title="x\r\ny">a\r\nb\rc\n<pre>d\r\n\r\ne</pre></div>', "html.parser")
+    assert lib.page_content(soup) == '<div title="x\ny">a\nb\nc\n<pre>d\n\ne</pre></div>'
+
+
+@pytest.mark.asyncio
+async def test_page_newlines_are_normalised_before_ebooklib_sees_them(monkeypatch):
+    """lparchive's template has CRLF lines. libxml2 2.14 (lxml's Linux wheels) normalises them while ebooklib
+    re-parses the page, 2.11 (lxml's Windows wheels) keeps the CR and writes it as &#13;, which made 6 of the 21
+    live books differ on Windows. So the CR must already be gone from the content handed to ebooklib, for the
+    intro, the updates and the placeholders: the book is then the same whichever libxml2 lxml bundles."""
+    import ebooklib
+    url = "https://lparchive.org/X-COM-Terror-from-the-Deep"
+
+    class CRLFSession(_FakeSession):
+        def get(self, url, **kwargs):
+            response = super().get(url, **kwargs)
+            if response.status == 200 and response._body is not PNG_BYTES:   # the landing page and the updates
+                response._body = response._body.replace(b"\n", b"\r\n").replace(b"<h3>", b"<h3>\r", 1)
+            return response
+
+    books = []
+    write_book = lib.write_book
+
+    def recording_write_book(file, book, mtime):
+        books.append(book)
+        write_book(file, book, mtime)
+
+    monkeypatch.setattr(lib, "write_book", recording_write_book)
     with tempfile.TemporaryDirectory() as d:
-        monkeypatch.chdir(d)
-        written = await asyncio.wait_for(do(url, None, _FakeSession("never-matches"), messages.append), timeout=30)
-        assert written == "X-COM Terror from the Deep.epub"
-        assert os.listdir(d) == ["X-COM Terror from the Deep.epub"]
-        assert any(m == "Writing book file X-COM Terror from the Deep.epub" for m in messages)
-        os.mkdir(f"{d}/books")
-        written = await asyncio.wait_for(do(url, f"{d}/books", _FakeSession("never-matches"), lambda *_: None), timeout=30)
-        assert written == os.path.join(f"{d}/books", "X-COM Terror from the Deep.epub") and os.path.exists(written)
-        written = await asyncio.wait_for(do(url, f"{d}/named.epub", _FakeSession("never-matches"), lambda *_: None), timeout=30)
-        assert written == f"{d}/named.epub" and os.path.exists(written)
+        written = await asyncio.wait_for(do(url, f"{d}/x.epub", CRLFSession("Update%2003"), lambda *_: None,
+                                            allow_missing_updates=True), timeout=30)
+        pages = {item.file_name: item.content for item in books[0].get_items_of_type(ebooklib.ITEM_DOCUMENT)
+                 if item.file_name.startswith(("introduction", "update_"))}
+        assert len(pages) == 19 and "introduction.xhtml" in pages and "update_2.xhtml" in pages   # 18 updates, one a placeholder
+        for name, content in pages.items():
+            assert "\r" not in content, name
+        assert "some text" in pages["update_0.xhtml"] and "\n" in pages["update_0.xhtml"]   # the newlines stayed newlines
+        with zipfile.ZipFile(written) as z:
+            for name in z.namelist():
+                if name.endswith(".xhtml"):
+                    data = z.read(name)
+                    assert b"\r" not in data and b"&#13;" not in data, name
 
 
 @pytest.mark.asyncio

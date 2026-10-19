@@ -166,7 +166,9 @@ the EPUB, the tool's version on the title page left out) with `tests/resources/l
 (about a minute; `pytest --offline` skips them, but they are the only check against the real site, so
 run them before committing). After an intended change to the output, regenerate that file with
 `uv run python util/live_checksums.py`. The books are deterministic, so a mismatch is either the tool
-or the site having changed.
+or the site having changed. They are also the same on every platform: the pages' newlines are normalised
+before ebooklib's lxml re-parse, so the book does not depend on which libxml2 lxml's wheel bundles (2.14 on
+Linux, 2.11 on Windows), and the test names both versions when they differ.
 
 ## Example
 
