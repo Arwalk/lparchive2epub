@@ -1514,7 +1514,14 @@ def test_sanitize_strips_active_content_and_legacy_markup():
       <span style="color: #336699;">speaker colour kept</span>
       <span class="bbc-spoiler" onmouseout="x()" onmouseover="y()" style="color: rgb(0, 0, 0); background-color: rgb(0, 0, 0);">hidden</span>
       <span style="color:#000000; background:#000000">also hidden, no class</span>
-      <o:p>office</o:p>
+      <o:p>office</o:p><st1:place>Tokyo</st1:place>
+      <pan style="color: red;">missing an s</pan> <misisng>typo</misisng> <h0>no such heading</h0> <didn't>text in brackets</didn't> <a< href="u">broken link</a<>
+      <xmp>verbatim</xmp>
+      <img src="x.png" border"0" alt=""/> <img src="y.png" width="50%" height="100"/>
+      <ul type="disc"><li>a</li></ul> <ol type="A" start="3"><li>b</li></ol>
+      <a href="u" _blank="">target</a> <a href="v" src="s" alt="t" data-x="1" frameborder="0">not an image</a>
+      <table width="80%"><tr><td width="70" colspan="2" rowspan="1">cell</td></tr></table>
+      <span hecatoncheires="" it="">broken quoting</span>
     </div>"""
     soup = get_cleaned_html(html)
     out = str(soup)
@@ -1545,7 +1552,25 @@ def test_sanitize_strips_active_content_and_legacy_markup():
     # spoilers are readable and marked for the stylesheet
     assert '<span class="bbc-spoiler">hidden</span>' in out
     assert '<span class="bbc-spoiler">also hidden, no class</span>' in out
-    assert "office" in out
+    assert "officeTokyo" in out
+
+    # elements XHTML 5 does not know are unwrapped, their text kept, like a browser shows them: typos (Daikatana's
+    # <pan>, <misisng>, <h0>, The-Suffering's <a<), text in angle brackets (Star-Control-2's <didn't>), Office
+    # namespaces; <xmp> is the old verbatim-text element, shown preformatted (Policenauts). RSC-005 in 5 books.
+    assert "missing an s typo no such heading text in brackets broken link" in out
+    assert not re.search(r"<(pan|misisng|h0|didn|a<|xmp|o:p|st1:place)\b", out)
+    assert "<pre>verbatim</pre>" in out
+    # attributes XHTML 5 does not allow are dropped, whatever the element, and so are the attribute names broken
+    # quoting leaves the parser with (Ever-17's <img border"0">, <a target= _blank>, "hecatoncheires"); what it
+    # allows on the element stays, an integer-only attribute only with an integer. RSC-005 in 14 books.
+    assert '<img alt="" src="x.png"/>' in out and '<img height="100" src="y.png"/>' in out
+    assert "<ul><li>a</li></ul>" in out and '<ol start="3" type="A"><li>b</li></ol>' in out
+    assert '<a href="u">target</a>' in out and '<a href="v">not an image</a>' in out
+    assert '<table><tr><td colspan="2" rowspan="1">cell</td></tr></table>' in out
+    assert "<span>broken quoting</span>" in out
+    for gone in ('border"0"', "_blank", "data-x", "frameborder", 'width="50%"', 'width="80%"', 'width="70"',
+                 'type="disc"', "hecatoncheires", 'it=""', 'src="s"', 'alt="t"'):
+        assert gone not in out, gone
 
 
 def test_sanitize_drops_comments():
@@ -1650,6 +1675,11 @@ def test_extractor_reads_the_landing_page_facts():
     assert intro.tags == ["hybrid", "voice"]
     assert intro.thread_url == "http://forums.somethingawful.com/showthread.php?threadid=3220122"
     assert intro.thread_title.startswith("The X-COM: Terror From The Deep")
+    # the build reads the facts from the sanitised page: its head and the archive's own markup must survive sanitize()
+    cleaned = Extractor.intro("https://lparchive.org/X-COM-Terror-from-the-Deep", get_cleaned_html(xcom))
+    for fact in ("title", "author", "began", "ended", "parts", "published_on", "tags", "thread_url", "thread_title"):
+        assert getattr(cleaned, fact) == getattr(intro, fact), fact
+    assert [c.original_href for c in cleaned.chapters] == [c.original_href for c in intro.chapters]
 
     intro = Extractor.intro("https://lparchive.org/Resident-Evil-1", BeautifulSoup(re1, "html.parser"))
     assert (intro.began, intro.ended, intro.parts) == ("Sep 10, 2007", "Nov 16, 2007", 59)
@@ -2393,6 +2423,22 @@ def _blocks_in_phrasing(tree) -> list[str]:
     return found
 
 
+def _unknown_markup(tree) -> list[str]:
+    """The elements of an lxml tree XHTML 5 does not know, and the attributes it does not allow where they are,
+    as "pan" and "frameborder on a"."""
+    from lparchive2epub.lib import ELEMENT_ATTRIBUTES, GLOBAL_ATTRIBUTES, XHTML_TAGS
+    found = []
+    for element in tree.iter():
+        if not isinstance(element.tag, str):
+            continue   # a comment or a processing instruction
+        if element.tag not in XHTML_TAGS:
+            found.append(element.tag)
+        for attribute in element.attrib:
+            if attribute not in GLOBAL_ATTRIBUTES | ELEMENT_ATTRIBUTES.get(element.tag, set()):
+                found.append(f"{attribute} on {element.tag}")
+    return found
+
+
 def test_orphan_items_get_a_list_so_the_page_validates():
     """Forum authors write <li> with no list around it, inside bold text, links and strike-throughs, and one after
     another without closing any; XHTML 5 wants every item directly in a <ul>/<ol> (epubcheck RSC-005 "element li not
@@ -2653,8 +2699,10 @@ def test_every_landing_page_has_lists_and_tables_that_validate():
     the table content model and "element hr/h2/ul not allowed here" in phrasing content: once sanitised and
     re-parsed the way ebooklib writes it, no list of any landing page in the archive holds anything but items,
     every item sits directly in a list, every table is made of rows made of cells and nothing else, every row
-    and cell sits in its table, no block has an inline wrapper for an ancestor, and no void element holds
-    anything (39 landing pages have one that html.parser left open)."""
+    and cell sits in its table, no block has an inline wrapper for an ancestor, no void element holds anything
+    (39 landing pages have one that html.parser left open), and no element or attribute is one XHTML 5 does not
+    know (The-Suffering's <a<, Warcraft-II's <h0>, Ever-17's border"0", Oblivion's -target, Zero-Time-Dilemma's
+    <ul type>, a width on 4 tables and cells)."""
     from ebooklib.utils import parse_html_string
     from lparchive2epub.lib import VOID_TAGS
     offenders = {}
@@ -2665,7 +2713,8 @@ def test_every_landing_page_has_lists_and_tables_that_validate():
             cleaned = get_cleaned_html(z.read(name).decode("utf-8", "replace"))
             written = parse_html_string(str(cleaned))
             found = _stray_list_content(written) + _orphan_items(written) + _table_faults(written) \
-                + _blocks_in_phrasing(written) + [f"content in {v.name}" for v in cleaned.find_all(VOID_TAGS) if v.contents]
+                + _blocks_in_phrasing(written) + _unknown_markup(written) \
+                + [f"content in {v.name}" for v in cleaned.find_all(VOID_TAGS) if v.contents]
             if found:
                 offenders[name[len("landing_pages/"):-len(".html")]] = sorted(set(found))
     assert offenders == {}

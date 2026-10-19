@@ -1638,17 +1638,6 @@ async def lparchive2epub(url: str, file: str | None = None, root_session: aiohtt
                         spool_images, check)
 
 
-tags_to_clean = [
-    "st1:place",
-    "st1:city",
-    "st1:country-region",
-    "st1:placename",
-    "st1:placetype",
-    "st1:state",
-    "o:p"
-]
-
-
 # Active content has no place in a book (and makes epubcheck demand the "scripted" property).
 TAGS_TO_DROP = ["script", "noscript", "style", "form", "input", "button", "select", "textarea"]
 # Elements that hold nothing, and that html.parser (bs4 4.14) nonetheless gives children to: after a void
@@ -1681,18 +1670,50 @@ def player_source(element) -> str | None:
         if source:
             return source
     return None
-# HTML 4 presentational attributes that are invalid in XHTML 5 and that the stylesheet supersedes anyway.
-ATTRIBUTES_TO_DROP = {"border", "align", "valign", "bgcolor", "background", "cellpadding", "cellspacing",
-                      "hspace", "vspace", "nowrap", "target", "rel"}
+# What may stay on an element: XHTML 5 knows these, and the book or the stylesheet uses them. Anything else
+# goes: HTML 4 presentation (border, align, bgcolor, cellpadding, width on a table or a cell: the stylesheet
+# lays pages out), forum habits (target, rel, data-*, frameborder), handlers (on*), and the attribute *names*
+# that broken quoting leaves html.parser with: <img border"0" ...> gives an attribute named border"0", which
+# epubcheck reads as border="" (Ever-17, NIER); <a href=x target= _blank> one named _blank; <a href="x"" one
+# named " (RSC-005 in 14 books of the archive-wide run). A deny-list cannot win against typos: this is an
+# allow-list. The head of the page is cleaned too, and Extractor.intro reads <title> and <meta name= content=>.
+GLOBAL_ATTRIBUTES = frozenset({"id", "class", "style", "title", "lang", "xml:lang", "dir"})
+ELEMENT_ATTRIBUTES = {
+    "a": {"href"},
+    "img": {"src", "alt", "width", "height"},
+    "td": {"colspan", "rowspan"}, "th": {"colspan", "rowspan"},
+    "ol": {"start", "type", "reversed"}, "li": {"value"},
+    "blockquote": {"cite"}, "q": {"cite"},
+    "del": {"cite", "datetime"}, "ins": {"cite", "datetime"}, "time": {"datetime"},
+    "meta": {"name", "content", "charset", "http-equiv"}, "link": {"href", "rel", "type"},
+    "base": {"href"}, "html": {"xmlns"},
+}
+# Attributes XHTML 5 wants a non-negative integer in: <img width="50%"> would be invalid again
+INTEGER_ATTRIBUTES = {"img": {"width", "height"}}
+# The elements XHTML 5 (EPUB 3 content) accepts, that the book can hold or Extractor reads. Anything else is
+# unwrapped, its text and children kept in order, the way a browser shows an element it does not know: typos
+# (<pan> for <span> in Daikatana, <misisng>, <h0>, <a<), text in angle brackets (<didn't>, <seek> in
+# Star-Control-2), made-up markup (<conversation>), Office namespaces (<o:p>, <st1:place>): RSC-005 "element
+# not allowed here" in 5 books of the archive-wide run. Players, form controls, <param> and <source> are not
+# listed: the passes above remove them; <svg> and <math> neither (none in the archive).
+XHTML_TAGS = frozenset("""
+    html head title meta link base body
+    article section nav aside header footer address h1 h2 h3 h4 h5 h6 hgroup main p hr pre blockquote
+    ol ul li dl dt dd figure figcaption div details summary template
+    a em strong small s cite q dfn abbr ruby rt rp data time code var samp kbd sub sup i b u mark bdi bdo
+    span br wbr ins del
+    img map area
+    table caption colgroup col thead tbody tfoot tr td th
+""".split())
 # Column layout is presentational too: <table><col width="99%"><tr>..., the archive's own markup on
 # 386 landing pages, is invalid XHTML 5 twice over (<col> belongs inside <colgroup>, width on neither:
 # epubcheck RSC-005 in 388 books of the archive-wide run). The stylesheet lays the tables out.
 TABLE_LAYOUT_TAGS = ["colgroup", "col"]
 SPOILER_CLASS = "bbc-spoiler"
-# HTML 4 inline elements that XHTML 5 dropped (epubcheck RSC-005 "element not allowed here"), and what
-# shows the same thing today: <tt> is seen in 8 landing pages of the archive, the others are there for
-# completeness. (<u> and <s> are still HTML.)
-LEGACY_INLINE_TAGS = {
+# HTML 4 elements that XHTML 5 dropped (epubcheck RSC-005 "element not allowed here"), and what shows
+# the same thing today: <tt> is seen in 8 landing pages of the archive, <xmp> (verbatim text, shown
+# preformatted) in Policenauts, the others are there for completeness. (<u> and <s> are still HTML.)
+LEGACY_TAGS = {
     "tt": ("code", None),
     "big": ("span", "font-size: larger;"),
     "strike": ("s", None),
@@ -1700,6 +1721,7 @@ LEGACY_INLINE_TAGS = {
     "nobr": ("span", "white-space: nowrap;"),
     "blink": ("span", None),
     "marquee": ("span", None),
+    "xmp": ("pre", None),
 }
 # What XHTML 5 allows directly inside a list: items, and the two tags TAGS_TO_DROP removes anyway.
 LIST_TAGS = ["ul", "ol"]
@@ -1738,9 +1760,6 @@ def get_cleaned_html(page: str) -> BeautifulSoup:
     """Parse a page and make its markup fit for a book: no scripts, handlers or players, no legacy
     attributes, no comments, and spoilers that stay readable."""
     soup = BeautifulSoup(page, "html.parser")
-    for tag in tags_to_clean:
-        while found := soup.find(tag):
-            found.unwrap()
     sanitize(soup)
     return soup
 
@@ -1789,10 +1808,12 @@ def sanitize(soup: BeautifulSoup):
     for center in soup.find_all("center"):
         center.name = "div"
         center["style"] = "text-align: center;"
-    for legacy in soup.find_all(list(LEGACY_INLINE_TAGS)):
-        legacy.name, style = LEGACY_INLINE_TAGS[legacy.name]
+    for legacy in soup.find_all(list(LEGACY_TAGS)):
+        legacy.name, style = LEGACY_TAGS[legacy.name]
         if style:
             legacy["style"] = style
+    for unknown in soup.find_all(lambda tag: tag.name not in XHTML_TAGS):
+        unknown.unwrap()   # nested unknowns are still in the tree when their turn comes
 
     repair_tables(soup)
     nest_orphan_items(soup)
@@ -1800,13 +1821,14 @@ def sanitize(soup: BeautifulSoup):
     unnest_blocks_from_inline(soup)
 
     for element in soup.find_all(True):
-        for attribute in list(element.attrs):
-            if attribute.startswith("on") or attribute in ATTRIBUTES_TO_DROP:
-                del element.attrs[attribute]
         # <a name="x"> is the HTML 4 anchor; XHTML 5 wants an id
         if element.name == "a" and "name" in element.attrs:
             element.attrs.setdefault("id", element.attrs["name"])
-            del element.attrs["name"]
+        allowed = GLOBAL_ATTRIBUTES | ELEMENT_ATTRIBUTES.get(element.name, set())
+        integers = INTEGER_ATTRIBUTES.get(element.name, set())
+        for attribute, value in list(element.attrs.items()):
+            if attribute not in allowed or attribute in integers and not str(value).strip().isdigit():
+                del element.attrs[attribute]
         # Forum spoilers come with black-on-black inline styles (and hover handlers, removed above):
         # unreadable on paper. The stylesheet marks .bbc-spoiler instead.
         classes = element.get("class") or []

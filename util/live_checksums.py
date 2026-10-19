@@ -50,7 +50,9 @@ CHECKSUMS = Path(__file__).resolve().parent.parent / "tests" / "resources" / "li
 # a text LP whose updates quote the game in the forum's old [code] blocks, <pre>code:<hr>... (the <pre> is split
 # around the rule by sanitize(): RSC-005 in 11 books of that run), and a video LP whose landing page mixes
 # <img ...> and <img ... /> so that html.parser leaves an <img> open around headings and lists inside an unclosed
-# <b> (the void element is emptied first: RSC-005 in that book).
+# <b> (the void element is emptied first: RSC-005 in that book), and a four-part video LP whose landing page gives
+# an <img> an attribute named "p" (broken quoting; dropped with every attribute XHTML 5 does not allow: RSC-005
+# in 14 books of that run).
 LETS_PLAYS = [
     "X-COM-Terror-from-the-Deep",
     "Dwarf-Fortress-Boatmurdered",
@@ -69,6 +71,7 @@ LETS_PLAYS = [
     "Laura-Bow-The-Colonels-Bequest",
     "Bureaucracy",
     "Ratchet-Clank-Future-A-Crack-In-Time",
+    "Bionic-Commando",
 ]
 
 
