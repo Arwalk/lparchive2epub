@@ -56,7 +56,10 @@ CHECKSUMS = Path(__file__).resolve().parent.parent / "tests" / "resources" / "li
 # keeps an empty copy of (the note that replaces the picture names it without a link of its own: a link may not
 # hold a link, RSC-005 in 2 books of that run), and a video LP with no update pages whose landing page holds four
 # smilies with an empty src (dropped by sanitize(): XHTML 5 wants a src at least one character long, RSC-005 in
-# 3 books of that run).
+# 3 books of that run), and a video LP whose first update links a picture on a host that answers a web page
+# behind a byte-order mark (not an image whatever the URL says, now that detect_image_type trusts neither the
+# Content-Type nor the URL: epubcheck OPF-029 and PKG-021 in 5 books of that run; Saints-Row-2, whose picture
+# lparchive keeps as a gzip stream, is a 203 MB book with a flaky image host, too big for this list).
 LETS_PLAYS = [
     "X-COM-Terror-from-the-Deep",
     "Dwarf-Fortress-Boatmurdered",
@@ -78,6 +81,7 @@ LETS_PLAYS = [
     "Bionic-Commando",
     "La-Pucelle-Tactics",
     "Super-Ghouls-n-Ghosts-(by-Captain_duck)",
+    "SpaceChem-2012-Tournament",
 ]
 
 

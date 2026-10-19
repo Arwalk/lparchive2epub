@@ -2,15 +2,16 @@ import asyncio
 import contextlib
 import datetime
 import functools
+import gzip
 import html
 import io
-import mimetypes
 import os
 import re
 import sqlite3
 import sys
 import tempfile
 import zipfile
+import zlib
 from dataclasses import dataclass, field
 from hashlib import blake2b
 from typing import List
@@ -316,23 +317,21 @@ IMAGE_SIGNATURES = (
     (b"II*\x00", "tiff", "tiff"),   # little-endian TIFF...
     (b"MM\x00*", "tiff", "tiff"),   # ...and big-endian (Myth-II-Soulblighter's maps)
 )
-IMAGE_EXTENSIONS = {
-    "image/jpeg": "jpg",
-    "image/png": "png",
-    "image/gif": "gif",
-    "image/webp": "webp",
-    "image/bmp": "bmp",
-    "image/svg+xml": "svg",
-    "image/tiff": "tiff",
-}
+# lparchive keeps HTML pages under picture names (a 404 page, an ad frame, the author's own site's page
+# saved where the picture should be) and serves them with the picture's Content-Type, so neither the
+# header nor the URL can be trusted for the type (epubcheck OPF-029 and PKG-021 in 5 books of the
+# archive-wide run of 2026-10-17). A raster image never starts with "<", a page may start with a BOM.
+UTF8_BOM = b"\xef\xbb\xbf"
+GZIP_MAGIC = b"\x1f\x8b"
 
 
 def detect_image_type(content: bytes, url: str = "", content_type: str | None = None) -> tuple[str, str] | None:
     """Return (media type, file extension) for downloaded image bytes, or None if this is not an image.
 
-    The bytes are authoritative: file extensions on image hosts are often wrong, and dead hosts
-    happily answer 200 with an HTML page. The URL and Content-Type header are only fallbacks for
-    formats without a simple signature."""
+    The bytes alone decide: file extensions on image hosts are often wrong, dead hosts happily answer
+    200 with an HTML page, and lparchive.org serves whatever file sits under a picture's name with
+    the Content-Type of its extension. Every supported format has a signature; SVG is text and is
+    recognised by its root element. `url` and `content_type` are kept for the callers' messages."""
     if not content:
         return None  # some hosts answer 200 with an empty body for images that are gone
     head = content[:16]
@@ -341,17 +340,29 @@ def detect_image_type(content: bytes, url: str = "", content_type: str | None = 
             return f"image/{subtype}", ext
     if head.startswith(b"RIFF") and head[8:12] == b"WEBP":
         return "image/webp", "webp"
-    start = content[:512].lstrip()
+    start = content[:512].removeprefix(UTF8_BOM).lstrip()
     if start.startswith(b"<svg") or (start.startswith(b"<?xml") and b"<svg" in content[:2048]):
         return "image/svg+xml", "svg"
-    if start.startswith((b"<!DOCTYPE", b"<html", b"<HTML", b"<head", b"<body", b"<!doctype")):
-        return None
-    # Fallbacks: a format we have no signature for; trust the declared type, then the URL
-    for candidate in (content_type.split(";")[0].strip().lower() if content_type else None,
-                      mimetypes.guess_type(urlparse(url).path)[0]):
-        if candidate in IMAGE_EXTENSIONS:
-            return candidate, IMAGE_EXTENSIONS[candidate]
     return None
+
+
+def is_markup(content: bytes) -> bool:
+    """Whether a body that is not an image is text markup: a web page, an XML document, a comment, a
+    script (the "not an image" message says what the server sent instead of the picture)."""
+    return content[:512].removeprefix(UTF8_BOM).lstrip().startswith(b"<")
+
+
+def unwrap_gzip(body: bytes) -> bytes:
+    """A file stored gzip-compressed, served as it is (Saints-Row-2's fan art, a 97 KB gzip of a PNG,
+    served as image/png without a Content-Encoding): the picture is inside. aiohttp already removes a
+    declared Content-Encoding, so a gzip magic in a body is always the file itself. Bytes that do not
+    decompress are returned unchanged and fail the type detection as before."""
+    if not body.startswith(GZIP_MAGIC):
+        return body
+    try:
+        return gzip.decompress(body)
+    except (OSError, EOFError, zlib.error):
+        return body
 INTRO_FILE_NAME = "introduction.xhtml"
 
 # Typos in the scheme part of a URL found in some LPs: "hhttp://", "htttp://", "ttp://", "http:/", "http//"...
@@ -1228,24 +1239,34 @@ async def _fetch_image(session: aiohttp.ClientSession, img_url: str, fetch: Fetc
     """Download the image, trying the other spellings lparchive may have saved it under after a 404.
     The error raised is the one for the URL the page gave, the fallbacks being an implementation detail."""
     try:
-        return await fetch_with_retries(session, img_url, fetch=fetch)
+        fetched = await fetch_with_retries(session, img_url, fetch=fetch)
     except NonRetryableError as first:
         if first.status != 404:
             raise
         for alternative in lparchive_fallback_urls(img_url):
             try:
-                return await fetch_with_retries(session, alternative, fetch=fetch)
+                fetched = await fetch_with_retries(session, alternative, fetch=fetch)
+                break
             except NonRetryableError:
                 continue
-        raise first
+        else:
+            raise first
+    body = unwrap_gzip(fetched.body)
+    if body is not fetched.body:
+        fetched = Fetched(fetched.url, body, fetched.content_type, fetched.encoding)
+    return fetched
 
 
 def _detect_or_fail(fetched: Fetched, img_url: str) -> tuple[str, str]:
     detected = detect_image_type(fetched.body, img_url, fetched.content_type)
     if detected is None:
         declared = (fetched.content_type or "unknown type").split(";")[0].strip()
-        raise NotAnImageError(f"Not an image: the server answered with {declared} ({len(fetched.body)} bytes)",
-                              img_url)
+        size = f"{len(fetched.body)} bytes"
+        if is_markup(fetched.body) and not declared.startswith("text/"):
+            # lparchive serves an HTML page saved under a picture's name as image/png: say what it is
+            raise NotAnImageError(f"Not an image: the server answered {declared}, but the body is a web page ({size})",
+                                  img_url)
+        raise NotAnImageError(f"Not an image: the server answered with {declared} ({size})", img_url)
     return detected
 
 

@@ -1,5 +1,6 @@
 import asyncio
 import datetime
+import gzip
 import hashlib
 import io
 import json
@@ -821,9 +822,19 @@ async def test_write_failure_is_reported_and_leaves_no_partial_file(monkeypatch)
     (b"MM\x00*fake", "http://x/1-map14.tiff.", "application/octet-stream", ("image/tiff", "tiff")),
     (b"II*\x00fake", "http://x/a", None, ("image/tiff", "tiff")),
     (b'<svg xmlns="http://www.w3.org/2000/svg"></svg>', "http://x/a", None, ("image/svg+xml", "svg")),
-    (b"\x00\x01unknown", "http://x/a.webp", None, ("image/webp", "webp")),             # URL fallback
-    (b"\x00\x01unknown", "http://x/a", "image/gif; charset=binary", ("image/gif", "gif")),  # header fallback
+    (b"\x00\x01unknown", "http://x/a.webp", None, None),                     # the URL does not make it an image...
+    (b"\x00\x01unknown", "http://x/a", "image/gif; charset=binary", None),    # ...nor does the header
     (b"<!DOCTYPE html><html><body>Not found</body></html>", "http://x/a.png", "text/html", None),
+    # what lparchive.org serves under a picture's name, with the picture's Content-Type (9vb.13): the author's
+    # site's page behind a byte-order mark (Fatestay-night), an XHTML 404 page (Ogre-Battle-64), an ad frame
+    # (Final-Fantasy-IV-The-After-Years), a host's page behind a byte-order mark (SpaceChem-2012-Tournament)
+    (b"\xef\xbb\xbf<!DOCTYPE html PUBLIC \"-//W3C//DTD XHTML 1.0 Transitional//EN\">\r\n<html>", "http://x/47-cas03b.png", "image/png", None),
+    (b'<?xml version="1.0" encoding="iso-8859-1"?>\n<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Transitional//EN"', "http://x/snap0005.jpg", "image/jpeg", None),
+    (b"<!--\n\n624 total\n468 ad\n-->\n\n<html>", "http://x/55-AY055.jpg", "image/jpeg", None),
+    (b"\xef\xbb\xbf<!DOCTYPE html>", "http://img.example/cumulative-quantity.png", "text/html", None),
+    (b"<?php echo 'no'; ?>", "http://x/a.gif", "image/gif", None),
+    (b"\xef\xbb\xbf<svg xmlns=\"http://www.w3.org/2000/svg\"></svg>", "http://x/a.png", "image/png", ("image/svg+xml", "svg")),
+    (b'<?xml version="1.0"?>\n<svg xmlns="http://www.w3.org/2000/svg"></svg>', "http://x/a", None, ("image/svg+xml", "svg")),
     (b"\x00\x01unknown", "http://x/a.php", "text/plain", None),
     (b"", "http://x/a.gif", "image/gif", None),                           # empty body, whatever the header says
 ])
@@ -867,7 +878,8 @@ async def test_wiki_file_links_are_kept_and_not_fetched_and_empty_src_is_not_rep
     url = "https://lparchive.org/X-COM-Terror-from-the-Deep"
     page = f"{url}/Update%2001/"
     wiki = "https://en.wikipedia.org/wiki/File:San_Francisco_in_ruin_edit2.jpg"
-    session = _FakeSession("never-matches", responses={wiki: _FakeResponse(403, b"forbidden")})
+    session = _FakeSession("never-matches", responses={wiki: _FakeResponse(403, b"forbidden"),
+                                                       f"{page}shot.png": _FakeResponse(200, PNG_BYTES)})
     session.responses[page] = _FakeResponse(
         200, f'<div id="content"><a href="{wiki}">the picture</a> <img src=""/> <img src="shot.png"/></div>'.encode())
     messages = []
@@ -890,13 +902,17 @@ async def test_image_media_type_comes_from_content_and_non_images_are_skipped():
     url = "https://lparchive.org/X-COM-Terror-from-the-Deep"
     jpeg_as_png_url = f"{url}/Update%2001/shot.PNG"
     dead_host_url = "http://img.example/dead.jpg"
+    page_as_png_url = f"{url}/Update%2001/47-cas03b.png"
+    page_as_png = b"\xef\xbb\xbf<!DOCTYPE html PUBLIC>\r\n<html><body>Videos</body></html>"
     session = _FakeSession("never-matches", responses={
         jpeg_as_png_url: _FakeResponse(200, JPEG_BYTES, "image/png"),   # lying extension and header
         dead_host_url: _FakeResponse(200, b"<!DOCTYPE html><html><body>gone</body></html>", "text/html"),
+        # an HTML page saved under the picture's name, served with the picture's type (Fatestay-night update 46)
+        page_as_png_url: _FakeResponse(200, page_as_png, "image/png"),
     })
-    # one chapter embeds both images
+    # one chapter embeds the three images
     session.responses[f"{url}/Update%2001/"] = _FakeResponse(
-        200, f'<div id="content"><img src="shot.PNG"/><img src="{dead_host_url}"/></div>'.encode())
+        200, f'<div id="content"><img src="shot.PNG"/><img src="{dead_host_url}"/><img src="47-cas03b.png"/></div>'.encode())
     messages = []
     with tempfile.TemporaryDirectory() as d:
         out = f"{d}/book.epub"
@@ -915,8 +931,46 @@ async def test_image_media_type_comes_from_content_and_non_images_are_skipped():
     assert dead_host_url in chapter
     assert f'<span class="missing-image">[image not available: <a href="{dead_host_url}">dead.jpg</a>]</span>' in chapter
     assert not any("html" in n for n in image_files)
+    assert not any(hashlib.blake2b(page_as_png).hexdigest() in n for n in image_files)   # the page served as image/png is not in the book either
+    assert f'<span class="missing-image">[image not available: <a href="{page_as_png_url}">47-cas03b.png</a>]</span>' in chapter
     report = "\n".join(messages)
     assert dead_host_url in report and "Not an image" in report and "text/html" in report
+    assert "the server answered image/png, but the body is a web page (" in report
+    assert "1 image(s) whose copy on lparchive.org is empty, or is a web page saved under the image's name:" in report
+    assert "Please open an issue" not in report   # nothing the tool can do about either
+
+
+@pytest.mark.asyncio
+async def test_a_picture_stored_gzip_compressed_is_unwrapped():
+    """Saints-Row-2's fan art: lparchive keeps a gzip stream of the PNG under the .png name and serves it
+    as image/png with no Content-Encoding, so aiohttp hands the gzip bytes over. The picture is inside:
+    the book gets the PNG, named after the PNG's bytes. A gzip of something else, or a broken gzip, is
+    not an image, as before."""
+    url = "https://lparchive.org/X-COM-Terror-from-the-Deep"
+    picture = _make_image("PNG", (8, 6))
+    session = _FakeSession("never-matches", responses={
+        f"{url}/Update%2001/12-fanart.png": _FakeResponse(200, gzip.compress(picture), "image/png"),
+        f"{url}/Update%2001/page.png": _FakeResponse(200, gzip.compress(b"<!DOCTYPE html><html></html>"), "image/png"),
+        f"{url}/Update%2001/broken.png": _FakeResponse(200, gzip.compress(picture)[:40], "image/png"),
+    })
+    session.responses[f"{url}/Update%2001/"] = _FakeResponse(
+        200, b'<div id="content"><img src="12-fanart.png"/><img src="page.png"/><img src="broken.png"/></div>')
+    messages = []
+    with tempfile.TemporaryDirectory() as d:
+        out = f"{d}/book.epub"
+        await asyncio.wait_for(do(url, out, session, messages.append), timeout=30)
+        with zipfile.ZipFile(out) as z:
+            chapter = z.read("EPUB/update_0.xhtml").decode()
+            name = f"EPUB/images/{hashlib.blake2b(picture).hexdigest()}.png"
+            assert name in z.namelist(), z.namelist()
+            assert z.read(name) == picture
+            opf = z.read("EPUB/content.opf").decode()
+    assert f'<item href="{name.removeprefix("EPUB/")}" id="i{hashlib.blake2b(picture).hexdigest()}" media-type="image/png"/>' in opf
+    assert f'<span class="missing-image">[image not available: <a href="{url}/Update%2001/page.png">page.png</a>]</span>' in chapter
+    assert f'<span class="missing-image">[image not available: <a href="{url}/Update%2001/broken.png">broken.png</a>]</span>' in chapter
+    report = "\n".join(messages)
+    assert "page.png" in report and "but the body is a web page" in report
+    assert "broken.png" in report and "the server answered with image/png (40 bytes)" in report
 
 
 def test_get_image_url_keeps_question_mark_and_hash_in_archived_file_names():
@@ -3265,9 +3319,13 @@ async def test_a_built_book_passes_the_real_epubcheck():
     full = f"{url}/Update%2001/full.png"
     picture = _make_image("PNG", (40, 30))   # a real picture: epubcheck decodes images (PNG_BYTES would be PKG-021)
     session = _FakeSession("never-matches", responses={full: _FakeResponse(200, picture),
-                                                       f"{url}/Update%2001/shot.png": _FakeResponse(200, picture)})
+                                                       f"{url}/Update%2001/shot.png": _FakeResponse(200, picture),
+                                                       # a gzip of a PNG and a web page, both served as image/png (9vb.13)
+                                                       f"{url}/Update%2001/12-fanart.png": _FakeResponse(200, gzip.compress(_make_image("PNG", (30, 20))), "image/png"),
+                                                       f"{url}/Update%2001/47-cas03b.png": _FakeResponse(200, b"\xef\xbb\xbf<!DOCTYPE html PUBLIC>\r\n<html></html>", "image/png")})
     session.responses[f"{url}/Update%2001/"] = _FakeResponse(
         200, b'<div id="content"><img src="shot.png"/> <a href="full.png">see the full map</a> '
+             b'<img src="12-fanart.png"/> <img src="47-cas03b.png"/> '
              b'<a href="https://en.wikipedia.org/wiki/File:X.jpg">wiki</a> <img src="http://img.example/dead.png"/> '
              # links as written on the archive's pages: spaces (RSC-020), a host no encoding can save, an
              # unregistered scheme (HTM-025), and a dead picture whose URL holds spaces (the note links it)
@@ -3614,6 +3672,7 @@ async def test_unavailable_images_become_notes_not_dangling_paths():
             b'<img src="ok.png"/></div>')),
         f"{chapter_url}2-transportx.gif": _FakeResponse(200, b"", "image/gif"),
         f"{chapter_url}gone.png": _FakeResponse(404, b"no"),
+        f"{chapter_url}ok.png": _FakeResponse(200, PNG_BYTES),
     })
     files = await _build_book(session)
     page = files["EPUB/update_0.xhtml"].decode()
