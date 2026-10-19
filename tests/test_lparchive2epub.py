@@ -627,6 +627,8 @@ async def test_unretrievable_chapter_fails_loudly_by_default():
     assert "status code: 404" in report
     assert "No book was written" in report
     assert "--allow-missing-updates" in report
+    assert "1 update(s) that failed for a reason this tool may be able to do something about:" in report
+    assert ISSUES_URL in report   # a listed update is on the archive: a 404 there is unexpected, unlike a picture's
 
 
 @pytest.mark.asyncio
@@ -1020,6 +1022,12 @@ def test_lparchive_fallback_urls():
     assert lib.lparchive_fallback_urls("https://lparchive.org/Echo-Night/Images/40-Pole&amp;Paddle.jpg") == []
     assert lib.lparchive_fallback_urls("https://lparchive.org/Echo-Night/Images/40-Pole.jpg") == []
     assert lib.lparchive_fallback_urls("https://img.example/show.php?a=1&b=2") == []   # a real query string
+    # a forum cache-busting query the archiver dropped (Quest-64 update 9): the name cut after its extension
+    assert lib.lparchive_fallback_urls("https://lparchive.org/Quest-64/Update%209/1-questtales.png%3Ft=1203476272") == [
+        "https://lparchive.org/Quest-64/Update%209/1-questtales.png"]
+    assert lib.lparchive_fallback_urls("https://lparchive.org/Advance-Wars/Update%201/21-Ashley%3F.png") == []   # no extension before the '?'
+    assert lib.lparchive_fallback_urls("https://lparchive.org/Some-LP/1-a.jpg%3F12") == [
+        "https://lparchive.org/Some-LP/1-a.jpg", "https://lparchive.org/Some-LP/Images/1-a.jpg%3F12", "https://lparchive.org/Some-LP/Images/1-a.jpg"]
     # a picture referenced next to the landing page normally lives in the LP's Images/ folder
     root = "https://lparchive.org/Ratchet-Clank-Into-the-Nexus"
     assert lib.lparchive_fallback_urls(f"{root}/62-B04.png") == [f"{root}/Images/62-B04.png"]
@@ -1060,6 +1068,23 @@ async def test_landing_page_picture_missing_the_images_folder_is_fetched_from_it
     session.responses[f"{root}/Images/99-X.png"] = _FakeResponse(404, b"no")
     with pytest.raises(lib.NonRetryableError, match=re.escape(f"{root}/99-X.png, status code: 404")):
         await asyncio.wait_for(lib._get_image(session, nowhere, ImageRegistry()), timeout=5)
+
+
+@pytest.mark.asyncio
+async def test_picture_archived_without_its_query_string_is_fetched_from_the_cut_name():
+    root = "https://lparchive.org/Quest-64/Update%209/"
+    with_query, cut = f"{root}1-questtales.png%3Ft=1203476272", f"{root}1-questtales.png"
+    session = _FakeSession("never-matches", responses={
+        with_query: _FakeResponse(404, b"not here"), cut: _FakeResponse(200, PNG_BYTES, "image/png")})
+    src = "1-questtales.png?t=1203476272"
+    tag = BeautifulSoup(f'<img src="{src}"/>', "html.parser").img
+    image = lib.Image(num=0, src=src, tag=tag, url=Extractor.get_image_url(root, src), root_url=root)
+    assert image.url == with_query
+
+    stored = await asyncio.wait_for(lib._get_image(session, image, ImageRegistry()), timeout=5)
+
+    assert session.requested == [with_query, cut]
+    assert stored.old_name == with_query
 
 
 @pytest.mark.asyncio
@@ -1144,12 +1169,19 @@ def test_classify_failure():
     not_an_image = lib.NotAnImageError("Not an image: the server answered with image/png (0 bytes)")
     assert lib.classify_failure(not_an_image, archive) == lib.ARCHIVE_COPY
     assert lib.classify_failure(not_an_image, elsewhere) == lib.WEB_PAGE
-    for status in (403, 404, 410):
+    for status in (400, 403, 404, 410, 418, 451):   # any 4xx off the archive: the host will not serve it
         gone = lib.NonRetryableError(f"Failed to get resource {elsewhere}, status code: {status}", elsewhere, status)
         assert lib.classify_failure(gone, elsewhere) == lib.GONE
-        assert lib.classify_failure(gone, archive) == lib.OTHER          # a 404 on the archive may be the tool's doing
+    for status in (404, 410):   # on the archive, after every fallback spelling: the file was never archived
+        missing = lib.NonRetryableError(f"Failed to get resource {archive}, status code: {status}", archive, status)
+        assert lib.classify_failure(missing, archive) == lib.ARCHIVE_MISSING
+        assert lib.classify_failure(missing, archive, page=True) == lib.OTHER   # a listed update that 404s is unexpected
+    forbidden = lib.NonRetryableError(f"Failed to get resource {archive}, status code: 403", archive, 403)
+    assert lib.classify_failure(forbidden, archive) == lib.OTHER   # the archive does not answer 403: unexpected
+    broken = "https://lparchive.org/Legend-of-Wulin-Heroes/Update%2018/9-Hunt_snakebladder.jpg</missing><missing>10-hunt_beargall.jpg"
+    assert lib.classify_failure(lib.NonRetryableError(f"Failed to get resource {broken}, status code: 404", broken, 404), broken) == lib.OTHER
     assert lib.classify_failure(lib.NonRetryableError("Malformed URL that could not be repaired: hhttp://"), None) == lib.OTHER
-    assert lib.classify_failure(lib.NonRetryableError("teapot", elsewhere, 418), elsewhere) == lib.OTHER
+    assert lib.classify_failure(lib.NonRetryableError(f"Failed to get resource {elsewhere}: too many redirects", elsewhere), elsewhere) == lib.OTHER
     unreachable = RetriesExhaustedError(f"Failed to get resource {elsewhere} after 5 retries: Cannot connect to host", elsewhere)
     assert lib.classify_failure(unreachable, elsewhere) == lib.DEAD_HOST
     assert lib.classify_failure(unreachable, archive) == lib.TEMPORARY
@@ -1168,21 +1200,23 @@ def test_failures_report_groups_by_cause_and_asks_for_an_issue_only_when_it_can_
         lib.SkippedResource(page, "http://waffleimages.com/e.png", "Failed ... getaddrinfo failed", lib.DEAD_HOST),
         lib.SkippedResource(page, "http://abload.de/f.png", "Failed ..., status code: 410", lib.GONE),
         lib.SkippedResource(page, "12-shot.png", "Not an image: the server answered with image/png (0 bytes)", lib.ARCHIVE_COPY),
+        lib.SkippedResource(page, "13-never.png", "Failed ..., status code: 404", lib.ARCHIVE_MISSING),
         lib.SkippedResource(page, "http://photobucket.com/g.png", "Not an image: ... text/html (7584 bytes)", lib.WEB_PAGE),
         lib.SkippedResource(page, "http://slow.example/h.png", "Failed ... after 5 retries: status code: 503", lib.TEMPORARY),
         lib.SkippedResource(page, "http://abload.de/f.png", "Failed ..., status code: 410", lib.GONE),   # a duplicate
     ]
     report = format_failures_report("https://lparchive.org/Some-LP", beyond_reach, "outcome line")
-    assert "9 resource(s) could not be retrieved" in report
+    assert "10 resource(s) could not be retrieved" in report
     assert ISSUES_URL not in report and "open an issue" not in report
     assert "5 image(s) on hosts that no longer exist or do not answer (i.minus.com 2, tinypic.com 1, waffleimages.com 1 and 1 more host):" in report
-    assert "1 image(s) their host no longer serves (HTTP 403, 404 or 410; abload.de 1):" in report
+    assert "1 image(s) their host no longer serves (HTTP 403, 404, 410 or another 4xx; abload.de 1):" in report
     assert "1 image(s) whose copy on lparchive.org is empty, or is a web page saved under the image's name:" in report
+    assert "1 image(s) that are not on lparchive.org (HTTP 404 under every spelling this tool knows):" in report
     assert "1 image(s) whose host answers an empty file or a web page instead of the picture (hotlink protection, parking page; photobucket.com 1):" in report
     assert "1 resource(s) whose host had trouble (server error, disconnection); try again later:" in report
     assert report.count("url:    http://abload.de/f.png") == 1
     assert report.index("hosts that no longer exist") < report.index("no longer serves") < report.index("copy on lparchive.org") \
-        < report.index("web page instead") < report.index("had trouble") < report.index("outcome line")
+        < report.index("not on lparchive.org") < report.index("web page instead") < report.index("had trouble") < report.index("outcome line")
 
     needs_a_look = beyond_reach + [lib.SkippedResource(page, "hhttp://", "Malformed URL that could not be repaired: hhttp://")]
     report = format_failures_report("https://lparchive.org/Some-LP", needs_a_look, "outcome line")
@@ -1203,20 +1237,24 @@ async def test_report_asks_for_an_issue_only_for_failures_the_tool_may_handle():
         gone: _FakeResponse(404, b"gone"),
         broken: _FakeResponse(200, b"", "image/png"),
         archive_404: _FakeResponse(404, b"not here"),
+        f"{page}5-a.jpg</missing><missing>6-b.jpg": _FakeResponse(404, b"not here"),
     })
-    for name, body in (("beyond-reach", f'<img src="{gone}"/><img src="3-empty.png"/>'),
-                       ("needs-a-look", f'<img src="{gone}"/><img src="4-missing.png"/>')):
+    for name, body in (("beyond-reach", f'<img src="{gone}"/><img src="3-empty.png"/><img src="4-missing.png"/>'),
+                       ("needs-a-look", f'<img src="{gone}"/><img src="5-a.jpg</missing><missing>6-b.jpg"/>')):
         session.responses[page] = _FakeResponse(200, f'<div id="content">{body}</div>'.encode())
         messages = []
         with tempfile.TemporaryDirectory() as d:
             await asyncio.wait_for(do(url, f"{d}/book.epub", session, messages.append), timeout=30)
         report = messages[-1]
-        assert "2 resource(s) could not be retrieved" in report and gone in report
+        assert gone in report
         if name == "beyond-reach":
+            assert "3 resource(s) could not be retrieved" in report
             assert "their host no longer serves" in report and "copy on lparchive.org is empty" in report
+            assert "not on lparchive.org (HTTP 404" in report and "4-missing.png" in report
             assert ISSUES_URL not in report
         else:
-            assert "may be able to do something about" in report and "4-missing.png" in report
+            assert "2 resource(s) could not be retrieved" in report
+            assert "may be able to do something about" in report and "5-a.jpg</missing><missing>6-b.jpg" in report
             assert ISSUES_URL in report
 
 
@@ -4081,7 +4119,7 @@ async def test_book_records_where_every_page_and_image_came_from():
                                b'<img src="http://dead.example/a.png"/><a href="ftp://x/y.png">odd</a>'
                                b'<a href="Images/big.png">the big one</a></div>'),
         u2: _FakeResponse(200, b'<div id="content"><img src="../Update%2001/shot.png"/><img src="same.png"/>'
-                               b'<img src="Smilies/emot-x.gif"/></div>'),
+                               b'<img src="Smilies/emot-x.gif"/><img src="never.png"/></div>'),
         f"{u1}shot.png": _FakeResponse(200, shot, "image/png; charset=binary"),
         f"{u2}same.png": _FakeResponse(200, shot, "image/x-png"),                 # same bytes, other URL
         f"{u1}map.tif": _FakeResponse(200, tiff, "image/tiff"),                   # converted to PNG
@@ -4090,6 +4128,7 @@ async def test_book_records_where_every_page_and_image_came_from():
         f"{u2}Smilies/emot-x.gif": _FakeResponse(404, b"not here"),              # a smilie: found site-wide (fallback)
         f"{url}/Smilies/emot-x.gif": _FakeResponse(404, b"no own copy"),
         "https://lparchive.org/Smilies/emot-x.gif": _FakeResponse(200, GIF_BYTES, None),
+        f"{u2}never.png": _FakeResponse(404, b"never archived"),                # skipped: archive-missing
     })
     files = await _build_book(session)
     data = _sources(files)
@@ -4133,6 +4172,7 @@ async def test_book_records_where_every_page_and_image_came_from():
     assert data["skipped"] == [
         {"url": None, "cause": "other", "references": [{"page": u1, "src": "ftp://x/y.png"}]},
         {"url": "http://dead.example/a.png", "cause": "gone", "references": [{"page": u1, "src": "http://dead.example/a.png"}]},
+        {"url": f"{u2}never.png", "cause": "archive-missing", "references": [{"page": u2, "src": "never.png"}]},
     ]
     assert (await _build_book(session))["EPUB/sources.json"] == files["EPUB/sources.json"]   # a second build: the same file
 

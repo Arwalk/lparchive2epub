@@ -65,7 +65,11 @@ CHECKSUMS = Path(__file__).resolve().parent.parent / "tests" / "resources" / "li
 # 3 books of that run), and a video LP whose first update links a picture on a host that answers a web page
 # behind a byte-order mark (not an image whatever the URL says, now that detect_image_type trusts neither the
 # Content-Type nor the URL: epubcheck OPF-029 and PKG-021 in 5 books of that run; Saints-Row-2, whose picture
-# lparchive keeps as a gzip stream, is a 203 MB book with a flaky image host, too big for this list).
+# lparchive keeps as a gzip stream, is a 203 MB book with a flaky image host, too big for this list), and a
+# 17-part screenshot LP whose update 9 references "1-questtales.png?t=1203476272", a name the archiver saved
+# without the forum's query (fetched from the name cut at the "%3F": the one such case of the archive-wide run),
+# and an 18-part screenshot LP with a picture lparchive.org answers 404 for under every spelling (reported as not
+# on the archive, "archive-missing" in sources.json, no bug report asked: 38 pictures in 15 books of that run).
 LETS_PLAYS = [
     "X-COM-Terror-from-the-Deep",
     "Dwarf-Fortress-Boatmurdered",
@@ -88,6 +92,8 @@ LETS_PLAYS = [
     "La-Pucelle-Tactics",
     "Super-Ghouls-n-Ghosts-(by-Captain_duck)",
     "SpaceChem-2012-Tournament",
+    "Quest-64",
+    "Digital-A-Love-Story",
 ]
 
 

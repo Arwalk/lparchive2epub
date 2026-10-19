@@ -389,6 +389,8 @@ HAS_SCHEME = re.compile(r"^[a-zA-Z][a-zA-Z0-9+.-]*:")
 # names of their own; the site-wide folder https://lparchive.org/Smilies/ has every name the archive-wide
 # run found missing (128/128 on 2026-10-17). Groups: the LP slug, the smilie file name.
 SMILIE_PATH = re.compile(r"^/(?P<lp>[^/]+)/(?:.*/)?Smilies/(?P<name>[^/]+)$", re.IGNORECASE)
+# "...1-questtales.png%3Ft=1203476272": a file extension followed by an encoded '?' and what the forum appended
+QUERY_SUFFIX = re.compile(r"(\.\w{1,5})%3F[^/]*$", re.IGNORECASE)
 
 
 def normalize_url(url: str) -> str | None:
@@ -454,6 +456,9 @@ def lparchive_fallback_urls(url: str) -> list[str]:
     - A smilie referenced relative to the update page ("Smilies/emot-x.gif" -> <LP>/Update 3/Smilies/)
       is in the LP's own Smilies/ folder when it has one, else in the site-wide one (437 of the
       failures in the archive-wide run).
+    - A page references "1-questtales.png?t=1203476272" (a cache-busting query on the forum); some such
+      names were archived with the '?' part (requested as %3F, see get_image_url), Quest-64's update 9
+      without it: the name cut at the "%3F" after its extension is tried next.
     - A landing page links its pictures as "62-B04.png", but they live in the LP's Images/ folder
       (Ratchet-Clank-Into-the-Nexus: 50 pictures, 404 in a browser too).
     External URLs are never respelled: their '&' separate real query parameters."""
@@ -463,6 +468,8 @@ def lparchive_fallback_urls(url: str) -> list[str]:
     paths = [parsed.path]
     if "&" in parsed.path and "&amp;" not in parsed.path:
         paths += [p.replace("&", "&amp;") for p in paths]
+    if "%3F" in parsed.path.upper():
+        paths += [p for p in (QUERY_SUFFIX.sub(r"\1", q) for q in paths) if p not in paths]
     smilie = SMILIE_PATH.match(parsed.path)
     if smilie:
         paths += [p for p in (f"/{smilie['lp']}/Smilies/{smilie['name']}", f"/Smilies/{smilie['name']}") if p not in paths]
@@ -835,24 +842,39 @@ class SkippedResource:
 
 # Why a resource could not be retrieved, from the tool's point of view: everything but OTHER is beyond its
 # reach, so the report only asks for a bug report when an OTHER failure is present. In report order.
-DEAD_HOST = "dead-host"        # the external host does not resolve, refuses connections or never answers
-GONE = "gone"                  # the external host answers 403/404/410 for the picture
-ARCHIVE_COPY = "archive-copy"  # lparchive.org's own copy is empty or an HTML page saved under an image name
-WEB_PAGE = "web-page"          # the external host answers an HTML page (hotlink protection, parking page)
-TEMPORARY = "temporary"        # server errors, disconnections: not gone, just not now
-OTHER = "other"                # a 404 on lparchive.org, a malformed URL, a crash: maybe the tool's doing
-FAILURE_CLASSES = (DEAD_HOST, GONE, ARCHIVE_COPY, WEB_PAGE, TEMPORARY, OTHER)
+DEAD_HOST = "dead-host"              # the external host does not resolve, refuses connections or never answers
+GONE = "gone"                        # the external host answers 4xx (403, 404, 410, a 400 or 418...) for the picture
+ARCHIVE_COPY = "archive-copy"        # lparchive.org's own copy is empty or an HTML page saved under an image name
+ARCHIVE_MISSING = "archive-missing"  # lparchive.org answers 404 under every spelling the tool knows: never archived
+WEB_PAGE = "web-page"                # the external host answers an HTML page (hotlink protection, parking page)
+TEMPORARY = "temporary"              # server errors, disconnections: not gone, just not now
+OTHER = "other"                      # a malformed URL, a page of the LP that 404s, a crash: maybe the tool's doing
+FAILURE_CLASSES = (DEAD_HOST, GONE, ARCHIVE_COPY, ARCHIVE_MISSING, WEB_PAGE, TEMPORARY, OTHER)
+
+# A URL no server could have a file at: bs4 left a stray tag in the name (Legend-of-Wulin-Heroes:
+# "9-Hunt_snakebladder.jpg</missing><missing>10-hunt_beargall.jpg"), a quote or a space got in.
+MALFORMED_PATH = re.compile(r'[<>"\s]')
 
 
-def classify_failure(e: Exception, url: str | None) -> str:
+def classify_failure(e: Exception, url: str | None, *, page: bool = False) -> str:
     """Which of FAILURE_CLASSES the failure `e` of fetching `url` (the resolved URL, None when it could
-    not be built) falls into."""
+    not be built) falls into.
+
+    A 404 on lparchive.org for a file a page references (after the lparchive_fallback_urls spellings)
+    means the archiver never saved it: 38 of the 42 "maybe the tool" items of the archive-wide run, not
+    one of them the tool's doing. A `page` of the LP that the landing page lists is another matter: the
+    archive has it, so a 404 there is unexpected and stays OTHER, as does a 4xx other than 404/410
+    from the archive and a URL that no server could have a file at (MALFORMED_PATH)."""
     on_archive = url is not None and is_lparchive_url(url)
     if isinstance(e, NotAnImageError):
         return ARCHIVE_COPY if on_archive else WEB_PAGE
     if isinstance(e, NonRetryableError):
-        if e.status in (403, 404, 410) and not on_archive:
+        if e.status is None:   # a malformed URL, too many redirects
+            return OTHER
+        if not on_archive:
             return GONE
+        if e.status in (404, 410) and not page and not MALFORMED_PATH.search(url):
+            return ARCHIVE_MISSING
         return OTHER
     if isinstance(e, RetriesExhaustedError):
         if on_archive or e.status is not None:
@@ -2186,9 +2208,11 @@ def _class_heading(cause: str, failures: list[SkippedResource], what: str) -> st
     if cause == DEAD_HOST:
         return f"{n} image(s) on hosts that no longer exist or do not answer ({hosts}):"
     if cause == GONE:
-        return f"{n} image(s) their host no longer serves (HTTP 403, 404 or 410; {hosts}):"
+        return f"{n} image(s) their host no longer serves (HTTP 403, 404, 410 or another 4xx; {hosts}):"
     if cause == ARCHIVE_COPY:
         return f"{n} image(s) whose copy on lparchive.org is empty, or is a web page saved under the image's name:"
+    if cause == ARCHIVE_MISSING:
+        return f"{n} image(s) that are not on lparchive.org (HTTP 404 under every spelling this tool knows):"
     if cause == WEB_PAGE:
         return f"{n} image(s) whose host answers an empty file or a web page instead of the picture (hotlink protection, parking page; {hosts}):"
     if cause == TEMPORARY:
@@ -2449,7 +2473,7 @@ async def do(url: str, file: str | None, session: aiohttp.ClientSession, writer,
             if fatal:
                 raise fatal[0]  # e.g. a broken --cache database: not a per-update problem, say so directly
             missing = [SkippedResource(page=c.original_href, url=c.original_href, reason=_describe(e),
-                                       cause=classify_failure(e, c.original_href))
+                                       cause=classify_failure(e, c.original_href, page=True))
                        for _, c, e in missing_updates]
             if not allow_missing_updates:
                 raise MissingUpdatesError(format_failures_report(
