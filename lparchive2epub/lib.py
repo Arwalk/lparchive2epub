@@ -5,6 +5,7 @@ import functools
 import gzip
 import html
 import io
+import json
 import os
 import re
 import sqlite3
@@ -196,6 +197,18 @@ class IndexedEpubImage:
     size: int           # of the stored bytes; kept here so a spooled image need not be read back
 
 
+@dataclass
+class Download:
+    """What fetching one image URL gave, kept for the book's sources.json (see book_sources): the URL that
+    answered (the URL itself, or a fallback spelling from lparchive_fallback_urls), the Content-Type as
+    served, and the hash, size and detected type of the bytes before any resize or conversion."""
+    fetched_from: str
+    served_type: str | None
+    raw_hash: str
+    raw_size: int
+    detected_type: str | None
+
+
 class SpooledImage(EpubImage):
     """An image whose bytes wait in a file until the book is written, so that building a large LP
     does not hold every picture in memory.
@@ -364,6 +377,9 @@ def unwrap_gzip(body: bytes) -> bytes:
     except (OSError, EOFError, zlib.error):
         return body
 INTRO_FILE_NAME = "introduction.xhtml"
+# Where every page and picture of the book came from, for whoever holds only the book (see book_sources)
+SOURCES_FILE_NAME = "sources.json"
+SOURCES_FORMAT = "lparchive2epub sources 1"
 
 # Typos in the scheme part of a URL found in some LPs: "hhttp://", "htttp://", "ttp://", "http:/", "http//"...
 FIXABLE_SCHEME = re.compile(r"^h*t+p+(s?)\s*(?::/*|//+)", re.IGNORECASE)
@@ -1133,12 +1149,19 @@ class ImageRegistry:
     5 attempts and 30 s of backoff per reference).
     by_content: hash of the downloaded bytes -> future of the finished image, so a second URL serving
     the same bytes reuses the stored image (and skips the optional resize pass) instead of being
-    processed and held twice. A future, because identical downloads usually land at the same time."""
+    processed and held twice. A future, because identical downloads usually land at the same time.
+
+    references, unresolvable, downloads: the book's sources.json (book_sources) is written from these once
+    every page is built: which (page, src) referenced each resolved URL, the references whose URL could not
+    be built at all, and what each URL's download gave (see Download)."""
 
     def __init__(self, spool_dir: str | None = None):
         self.by_url: dict[str, asyncio.Future] = {}
         self.by_content: dict[str, asyncio.Future] = {}
         self.spool_dir = spool_dir
+        self.references: dict[str, set[tuple[str, str]]] = {}
+        self.unresolvable: set[tuple[str, str]] = set()
+        self.downloads: dict[str, Download] = {}
 
 
 def spool_write(spool_dir: str, name: str, content: bytes) -> str:
@@ -1161,6 +1184,12 @@ async def _get_image(session: aiohttp.ClientSession, img: Image, registry: Image
                      processing: ImageProcessing | None = None, fetch: FetchSettings | None = None) -> IndexedEpubImage:
     # Get the image URL from either src (for img tags) or href (for a tags)
     img_url = img.url
+    if registry is not None:
+        # every reference, the ones answered from by_url below included: sources.json lists every page
+        if img_url is None:
+            registry.unresolvable.add((img.root_url, img.src))
+        else:
+            registry.references.setdefault(img_url, set()).add((img.root_url, img.src))
     if img_url is None:
         raise NonRetryableError(f"Malformed URL that could not be repaired: {img.src}")
 
@@ -1197,6 +1226,11 @@ async def _get_image(session: aiohttp.ClientSession, img: Image, registry: Image
     try:
         fetched = await _fetch_image(session, img_url, fetch)
         raw_hash = get_blake2b_hash(fetched.body)
+        if registry is not None:
+            served_type = (fetched.content_type or "").split(";")[0].strip() or None
+            detected = detect_image_type(fetched.body)
+            registry.downloads[img_url] = Download(fetched.url, served_type, raw_hash, len(fetched.body),
+                                                   detected[0] if detected else None)
         if registry is not None and raw_hash in registry.by_content:
             # Same bytes already seen under another URL: share the stored image (it may still be
             # being processed), keeping this URL as old_name so the page's links to it get rewritten.
@@ -2183,6 +2217,98 @@ def format_failures_report(url: str, failures: list[SkippedResource], outcome: s
     return "\n".join(lines)
 
 
+def book_sources(url: str, pages: list[Page], chapters: list[Chapters], unlisted: set[str], placeholders: set[str],
+                 registry: ImageRegistry, processing: ImageProcessing | None) -> dict:
+    """The content of sources.json: where every page and picture of the book came from, for whoever holds
+    only the book once the site is gone, or a later run that wants to re-check or refresh the pictures.
+
+    The pages are numbered and the pictures renamed to the hash of their bytes, so the book itself no
+    longer says; two URLs serving the same bytes share one stored file; a resized or converted picture
+    (--max-image-size, TIFF/BMP to PNG) is not the original bytes. Only the pictures that could NOT be
+    fetched kept their origin, in the missing-image note: backwards, for an archive.
+
+    Listed: the intro (the landing page), every update page (its URL and title, whether the landing page
+    listed it or it was found through next links, whether it was retrieved or stands as a placeholder),
+    every image page (the stored file it shows), every stored image (its sources, each with the URL that
+    answered when a fallback spelling did, the Content-Type as served and the (page, src) references; the
+    hash, size and type of the downloaded bytes when the stored ones differ from them), every skipped
+    image (resolved URL, or null for one whose URL could not be built, the cause class of
+    classify_failure, the references), the LP's URL, the tool's version and the options that change bytes.
+    No reason text for skipped images (a network error's message changes from run to run) and no build
+    time: two builds of one LP give one file. Sorted throughout, for the same reason."""
+    by_href = {c.new_href: c for c in chapters}
+    page_entries = []
+    image_pages: dict[str, str] = {}
+    for page in pages:
+        name = page.chapter.file_name
+        if name == INTRO_FILE_NAME:
+            page_entries.append({"file": name, "url": url})
+        else:
+            chapter = by_href[name]
+            page_entries.append({"file": name, "url": chapter.original_href, "title": str(chapter.txt),
+                                 "listed": chapter.original_href not in unlisted,
+                                 "retrieved": chapter.original_href not in placeholders})
+        for img in page.linked:
+            image_pages.setdefault(image_page_name(img), img.new_name)
+    page_entries += [{"file": name, "shows": shows} for name, shows in sorted(image_pages.items())]
+
+    def references(pairs) -> list[dict]:
+        return [{"page": page, "src": src} for page, src in sorted(pairs)]
+
+    images: dict[str, dict] = {}
+    skipped = []
+    for img_url, future in registry.by_url.items():
+        if not future.done() or future.cancelled():
+            continue   # cannot happen once the pages are built; a cancelled build writes no book
+        refs = references(registry.references.get(img_url, ()))
+        error = future.exception()
+        if error is not None:
+            skipped.append({"url": img_url, "cause": classify_failure(error, img_url), "references": refs})
+            continue
+        stored = future.result()
+        download = registry.downloads[img_url]
+        entry = images.setdefault(stored.new_name, {"file": stored.new_name, "media_type": stored.data.media_type,
+                                                    "size": stored.size, "original": None, "sources": []})
+        if download.raw_hash != stored.hash:
+            entry["original"] = {"blake2b": download.raw_hash, "size": download.raw_size,
+                                 "media_type": download.detected_type}
+        source = {"url": img_url}
+        if download.fetched_from != img_url:
+            source["fetched_from"] = download.fetched_from
+        source["served_type"] = download.served_type
+        source["references"] = refs
+        entry["sources"].append(source)
+    for entry in images.values():
+        entry["sources"].sort(key=lambda source: source["url"])
+        if entry["original"] is None:
+            del entry["original"]
+    unresolvable: dict[str, set[tuple[str, str]]] = {}
+    for page, src in registry.unresolvable:
+        unresolvable.setdefault(src, set()).add((page, src))
+    for src in sorted(unresolvable):
+        skipped.append({"url": None, "cause": OTHER, "references": references(unresolvable[src])})
+    skipped.sort(key=lambda entry: (entry["url"] or "", entry["cause"], entry["references"][0]["src"] if entry["references"] else ""))
+
+    return {
+        "format": SOURCES_FORMAT,
+        "lets_play": url,
+        "tool": {"name": "lparchive2epub", "version": tool_version()},
+        "options": {"max_image_size": processing.max_size if processing else None,
+                    "jpeg_quality": processing.jpeg_quality if processing else None},
+        "hash": "BLAKE2b-512, hexadecimal; a stored image is named after the hash of its bytes",
+        "pages": page_entries,
+        "images": [images[name] for name in sorted(images)],
+        "skipped": skipped,
+    }
+
+
+def sources_item(data: dict) -> epub.EpubItem:
+    """sources.json as a package item: in the manifest (every file of an EPUB must be), in no spine and no
+    table of contents, so no reader shows it."""
+    return epub.EpubItem(uid="sources", file_name=SOURCES_FILE_NAME, media_type="application/json",
+                         content=json.dumps(data, indent=1, ensure_ascii=False).encode("utf-8"))
+
+
 async def do(url: str, file: str | None, session: aiohttp.ClientSession, writer, strict: bool = False,
              allow_missing_updates: bool = False, image_processing: ImageProcessing | None = None,
              cover: bytes | None | bool = True, fetch: FetchSettings | None = None, spool_images: bool = True,
@@ -2258,6 +2384,7 @@ async def do(url: str, file: str | None, session: aiohttp.ClientSession, writer,
         say("building intro")
         image_registry = ImageRegistry(spool_dir)
         missing_updates: list[tuple[float, Chapters, Exception]] = []
+        placeholders: set[str] = set()   # URLs of the updates a placeholder page stands in for
         epub_intro = await build_intro(session, url, intro, image_registry, failures, image_processing, fetch)
 
         known_images: set[str] = set()
@@ -2324,6 +2451,7 @@ async def do(url: str, file: str | None, session: aiohttp.ClientSession, writer,
             failures.extend(missing)
             for i, chapter, e in missing_updates:
                 pages_indexed.append((i, build_placeholder_page(chapter, intro, e)))
+                placeholders.add(chapter.original_href)
 
         pages = [p for _, p in sorted(pages_indexed, key=lambda x: x[0])]
 
@@ -2333,6 +2461,9 @@ async def do(url: str, file: str | None, session: aiohttp.ClientSession, writer,
 
         for p in fetch.progress_bar(pages, desc="Adding pages to book"):
             add_page(known_images, book, toc, spine, p, intro.language, known_image_pages)
+        book.add_item(sources_item(book_sources(url, [epub_intro, *pages], intro.chapters,
+                                                {c.original_href for c in unlisted}, placeholders,
+                                                image_registry, image_processing)))
 
         say("preparing book structure")
         book.toc = toc

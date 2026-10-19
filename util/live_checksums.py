@@ -24,7 +24,7 @@ from aiohttp_client_cache import CachedSession, SQLiteBackend
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from lparchive2epub.cover import TITLE_PAGE_FILE_NAME  # noqa: E402
-from lparchive2epub.lib import CLIENT_TIMEOUT, FetchSettings, check_cache_path, lparchive2epub  # noqa: E402
+from lparchive2epub.lib import CLIENT_TIMEOUT, SOURCES_FILE_NAME, FetchSettings, check_cache_path, lparchive2epub  # noqa: E402
 
 CHECKSUMS = Path(__file__).resolve().parent.parent / "tests" / "resources" / "live_checksums.json"
 
@@ -85,9 +85,10 @@ LETS_PLAYS = [
 ]
 
 
-# The title page says "Converted by lparchive2epub 2.0.0.": the one part of a book that changes with a
-# release and not with the tool's behaviour.
+# The title page says "Converted by lparchive2epub 2.0.0." and sources.json carries the version too: the
+# parts of a book that change with a release and not with the tool's behaviour.
 COLOPHON_VERSION = re.compile(rb"Converted by lparchive2epub [^<]*\.</p>")
+SOURCES_VERSION = re.compile(rb'"version": "[^"]*"')
 
 
 def book_checksum(path: str) -> str:
@@ -99,6 +100,8 @@ def book_checksum(path: str) -> str:
             data = z.read(info.filename)
             if info.filename == f"EPUB/{TITLE_PAGE_FILE_NAME}":
                 data = COLOPHON_VERSION.sub(b"Converted by lparchive2epub.</p>", data)
+            elif info.filename == f"EPUB/{SOURCES_FILE_NAME}":
+                data = SOURCES_VERSION.sub(b'"version": ""', data)
             digest.update(info.filename.encode("utf-8"))
             digest.update(b"\0")
             digest.update(data)

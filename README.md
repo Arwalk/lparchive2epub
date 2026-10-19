@@ -243,6 +243,22 @@ converts WebP, which many readers can't display, to PNG or JPEG. TIFF and BMP, w
 display, are converted to PNG (lossless: they are maps and screenshots) whether or not `--max-image-size`
 is given. Animated GIFs are left as they are. A summary of the saving is printed before the book is written.
 
+## Sources
+
+Inside the book, the pages are numbered (`update_12.xhtml`) and the pictures renamed to the hash of their
+bytes, so the book alone does not say where anything came from; two addresses serving the same picture
+share one file; a resized or converted picture is not the original. For whoever holds only the book once
+lparchive.org is gone, and for a later run that wants to re-check or refresh the pictures, every book
+carries `EPUB/sources.json` (open the `.epub` as a zip): for each page, the address it was taken from, its
+title, whether the landing page listed it or it was found by following next links, and whether it was
+retrieved or stands in as a placeholder; for each image page, the picture it shows; for each stored
+picture, its sources with the referencing pages, the Content-Type served, the address that answered when
+the archive had the file under another spelling, and the hash, size and type of the downloaded bytes
+when they were resized or converted; for each skipped picture, its address, the pages that showed it and
+why it was skipped (the same classes as the report); the Let's Play's address, the tool's version and the
+options that change bytes. The file is listed in the package but in no table of contents: readers never
+show it. It carries no build time and is sorted throughout, so two builds of one Let's Play give one file.
+
 ## Memory and disk
 
 Memory use does not grow with the size of the Let's Play: as they are downloaded, images are kept in a

@@ -397,6 +397,16 @@ def test_live_checksum_ignores_the_tool_version_but_nothing_else():
     assert book_checksum(book("1.4.2")) == book_checksum(book("2.0.0")) == book_checksum(book("dev"))
     assert book_checksum(book("2.0.0")) != book_checksum(book("2.0.0", "other text"))
 
+    def book_with_sources(version: str, lp: str = "https://lparchive.org/X") -> str:
+        path = book("2.0.0")
+        with zipfile.ZipFile(path, "a") as z:
+            z.writestr("EPUB/sources.json", json.dumps({"lets_play": lp, "tool": {"name": "lparchive2epub", "version": version}}))
+        return path
+
+    assert book_checksum(book_with_sources("1.4.2")) == book_checksum(book_with_sources("dev"))
+    assert book_checksum(book_with_sources("2.0.0")) != book_checksum(book_with_sources("2.0.0", "https://lparchive.org/Y"))
+    assert book_checksum(book_with_sources("2.0.0")) != book_checksum(book("2.0.0"))
+
 
 @pytest.mark.live
 @pytest.mark.asyncio
@@ -3986,6 +3996,128 @@ async def test_links_to_images_lead_to_a_page_showing_the_image():
     assert opf.count(f'href="{image_page}"') == 1                         # one page for the picture, linked from two updates
     assert f'<itemref idref="image_{image_hash}" linear="no"/>' in opf    # reachable from the link, skipped when turning pages
     assert image_page not in files["EPUB/nav.xhtml"].decode()
+
+
+def _sources(files: dict) -> dict:
+    opf = files["EPUB/content.opf"].decode()
+    assert '<item href="sources.json" id="sources" media-type="application/json"/>' in opf
+    assert 'idref="sources"' not in opf and "sources.json" not in files["EPUB/nav.xhtml"].decode()
+    return json.loads(files["EPUB/sources.json"].decode("utf-8"))
+
+
+@pytest.mark.asyncio
+async def test_book_records_where_every_page_and_image_came_from():
+    """sources.json (lparchive2epub-368): the book renames pages and pictures, so it says itself where each
+    came from, for whoever holds only the book once the site is gone. Listed in the package, shown by no
+    reader, the same from one build to the next."""
+    from lparchive2epub.cover import tool_version
+    url = "https://lparchive.org/X-COM-Terror-from-the-Deep"
+    u1, u2 = f"{url}/Update%2001/", f"{url}/Update%2002/"
+    tiff = _make_image("TIFF", (40, 30))
+    shot = PNG_BYTES + b"shot"   # not PNG_BYTES: the fake session serves those for the landing page's own picture
+    session = _FakeSession("never-matches", responses={
+        u1: _FakeResponse(200, b'<div id="content"><img src="shot.png"/><img src="shot.png"/><img src="map.tif"/>'
+                               b'<img src="http://dead.example/a.png"/><a href="ftp://x/y.png">odd</a>'
+                               b'<a href="Images/big.png">the big one</a></div>'),
+        u2: _FakeResponse(200, b'<div id="content"><img src="../Update%2001/shot.png"/><img src="same.png"/>'
+                               b'<img src="Smilies/emot-x.gif"/></div>'),
+        f"{u1}shot.png": _FakeResponse(200, shot, "image/png; charset=binary"),
+        f"{u2}same.png": _FakeResponse(200, shot, "image/x-png"),                 # same bytes, other URL
+        f"{u1}map.tif": _FakeResponse(200, tiff, "image/tiff"),                   # converted to PNG
+        "http://dead.example/a.png": _FakeResponse(404, b"gone"),
+        f"{u1}Images/big.png": _FakeResponse(200, PNG_BYTES + b"big"),           # linked: gets an image page
+        f"{u2}Smilies/emot-x.gif": _FakeResponse(404, b"not here"),              # a smilie: found site-wide (fallback)
+        f"{url}/Smilies/emot-x.gif": _FakeResponse(404, b"no own copy"),
+        "https://lparchive.org/Smilies/emot-x.gif": _FakeResponse(200, GIF_BYTES, None),
+    })
+    files = await _build_book(session)
+    data = _sources(files)
+    assert data["format"] == "lparchive2epub sources 1" and data["lets_play"] == url
+    assert data["tool"] == {"name": "lparchive2epub", "version": tool_version()}
+    assert data["options"] == {"max_image_size": None, "jpeg_quality": None}
+    assert set(data) == {"format", "lets_play", "tool", "options", "hash", "pages", "images", "skipped"}   # no build time
+
+    pages = data["pages"]
+    assert pages[0] == {"file": "introduction.xhtml", "url": url}
+    updates = [p for p in pages if p["file"].startswith("update_")]
+    assert len(updates) == 18 and [p["file"] for p in updates] == [f"update_{n}.xhtml" for n in range(18)]
+    assert updates[0] == {"file": "update_0.xhtml", "url": u1, "title": "Update/Video 1", "listed": True, "retrieved": True}
+    assert updates[1]["url"] == u2 and updates[1]["title"] == "Update/Video 2"
+    image_pages = [p for p in pages if p["file"].startswith("image_")]
+    big_hash = lib.get_blake2b_hash(PNG_BYTES + b"big")
+    assert image_pages == [{"file": f"image_{big_hash}.xhtml", "shows": f"images/{big_hash}.png"}]
+    assert [p["file"] for p in pages] == ["introduction.xhtml", *(p["file"] for p in updates), *(p["file"] for p in image_pages)]
+
+    images = {i["file"]: i for i in data["images"]}
+    assert list(images) == sorted(images)
+    stored_shot = images[f"images/{lib.get_blake2b_hash(shot)}.png"]
+    assert stored_shot["media_type"] == "image/png" and stored_shot["size"] == len(shot) and "original" not in stored_shot
+    assert stored_shot["sources"] == [   # sorted by URL; the references of a URL sorted and deduplicated
+        {"url": f"{u1}shot.png", "served_type": "image/png",
+         "references": [{"page": u1, "src": "shot.png"}, {"page": u2, "src": "../Update%2001/shot.png"}]},
+        {"url": f"{u2}same.png", "served_type": "image/x-png", "references": [{"page": u2, "src": "same.png"}]},
+    ]
+    (converted,) = [i for i in images.values() if i.get("original")]
+    assert converted["media_type"] == "image/png" and converted["file"].endswith(".png")
+    assert converted["original"] == {"blake2b": lib.get_blake2b_hash(tiff), "size": len(tiff), "media_type": "image/tiff"}
+    assert converted["sources"] == [{"url": f"{u1}map.tif", "served_type": "image/tiff", "references": [{"page": u1, "src": "map.tif"}]}]
+    smilie = images[f"images/{lib.get_blake2b_hash(GIF_BYTES)}.gif"]
+    assert smilie["sources"] == [{"url": f"{u2}Smilies/emot-x.gif", "fetched_from": "https://lparchive.org/Smilies/emot-x.gif",
+                                  "served_type": None, "references": [{"page": u2, "src": "Smilies/emot-x.gif"}]}]
+    assert f"images/{big_hash}.png" in images
+    landing_picture = images[f"images/{lib.get_blake2b_hash(PNG_BYTES)}.png"]
+    assert landing_picture["sources"][0]["references"] == [{"page": url, "src": "Images/1-OP80jpg.jpg"}]
+    assert len(images) == 5   # the cover is not a downloaded picture
+
+    assert data["skipped"] == [
+        {"url": None, "cause": "other", "references": [{"page": u1, "src": "ftp://x/y.png"}]},
+        {"url": "http://dead.example/a.png", "cause": "gone", "references": [{"page": u1, "src": "http://dead.example/a.png"}]},
+    ]
+    assert (await _build_book(session))["EPUB/sources.json"] == files["EPUB/sources.json"]   # a second build: the same file
+
+
+@pytest.mark.asyncio
+async def test_sources_mark_placeholders_and_updates_found_through_next_links():
+    url = "https://lparchive.org/Fire-Emblem-Awakening"
+    landing = xcom.replace(b"X-COM: Terror from the Deep", b"Fire Emblem: Awakening")
+    landing = re.sub(rb'<ul class="toc">.*?</ul>', b'<ul class="toc"><li><a href="Update%201/">Update 1</a></li>'
+                     b'<li><a href="Update%202/">Update 2</a></li><li><a href="Update%204/">Update 4</a></li></ul>', landing, flags=re.S)
+    responses = {url: _FakeResponse(200, landing), f"{url}/Update%204/": _FakeResponse(503, b"later")}
+    for n, (prev, nxt) in {1: (None, 2), 2: (1, 3), 3: (2, 4)}.items():
+        responses[f"{url}/Update%20{n}/"] = _FakeResponse(200, _update_page("Fire Emblem: Awakening", n, prev, nxt, f"Chapter {n}"))
+    session = _FakeSession("never-matches", responses=responses)
+    with tempfile.TemporaryDirectory() as d:
+        out = f"{d}/book.epub"
+        await asyncio.wait_for(do(url, out, session, lambda *_: None, allow_missing_updates=True,
+                                  fetch=FetchSettings(retries=1)), timeout=60)
+        with zipfile.ZipFile(out) as z:
+            files = {n: z.read(n) for n in z.namelist()}
+    pages = [p for p in _sources(files)["pages"] if p["file"].startswith("update_")]
+    assert pages == [
+        {"file": "update_0.xhtml", "url": f"{url}/Update%201/", "title": "Update 1", "listed": True, "retrieved": True},
+        {"file": "update_1.xhtml", "url": f"{url}/Update%202/", "title": "Update 2", "listed": True, "retrieved": True},
+        {"file": "update_3.xhtml", "url": f"{url}/Update%203/", "title": "Chapter 3", "listed": False, "retrieved": True},
+        {"file": "update_2.xhtml", "url": f"{url}/Update%204/", "title": "Update 4", "listed": True, "retrieved": False},
+    ]
+
+
+@pytest.mark.asyncio
+async def test_sources_record_the_reduction_options_and_original_bytes():
+    url = "https://lparchive.org/X-COM-Terror-from-the-Deep"
+    big_jpeg = _make_image("JPEG", (800, 200), quality=95)
+    session = _FakeSession("never-matches", responses={
+        f"{url}/Update%2001/": _FakeResponse(200, b'<div id="content"><img src="huge.jpg"/><img src="tiny.png"/></div>'),
+        f"{url}/Update%2001/huge.jpg": _FakeResponse(200, big_jpeg, "image/jpeg"),
+        f"{url}/Update%2001/tiny.png": _FakeResponse(200, PNG_BYTES),   # not decodable: kept as is
+    })
+    files = await _build_book(session, image_processing=ImageProcessing(max_size=50, jpeg_quality=70))
+    data = _sources(files)
+    assert data["options"] == {"max_image_size": 50, "jpeg_quality": 70}
+    (reduced,) = [i for i in data["images"] if i["file"].endswith(".jpg")]
+    assert reduced["original"] == {"blake2b": lib.get_blake2b_hash(big_jpeg), "size": len(big_jpeg), "media_type": "image/jpeg"}
+    assert reduced["size"] == len(files[f"EPUB/{reduced['file']}"]) < len(big_jpeg)
+    (kept,) = [i for i in data["images"] if i["file"].endswith(".png")]
+    assert "original" not in kept and kept["size"] == len(PNG_BYTES)
 
 
 # A page the archive serves raw, as the author's source file, instead of through its template: no
