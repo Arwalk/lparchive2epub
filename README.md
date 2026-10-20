@@ -157,7 +157,9 @@ path = await lparchive2epub("https://lparchive.org/Dwarf-Fortress-Boatmurdered",
 The repository also contains the script `util/all_archives.py` that tries to scrape all LPs from lparchive,
 and `util/snapshot_landing_pages.py`, which refreshes `tests/resources/landing_pages.zip`: a snapshot of
 every Let's Play landing page on the archive, used by the test suite to check the extractor against the
-whole archive rather than a handful of pages. `tests/resources/chapters.json` records what the extractor
+whole archive rather than a handful of pages. `util/migrate_cache.py CACHE.sqlite|DIR` rewrites the keys of the SQLite caches
+(`--cache`, or the per-LP caches of `all_archives.py`) for the installed aiohttp-client-cache, whose 0.15 keys differ
+from 0.14's: without it a cache written before that upgrade is never hit again. `tests/resources/chapters.json` records what the extractor
 must find on each of those pages (facts and ordered chapters); `util/generate_chapter_golden.py`
 regenerates it after an intended change, and the diff shows exactly which Let's Plays moved.
 Run `pytest -m "not archive"` to skip that archive-wide check while iterating.

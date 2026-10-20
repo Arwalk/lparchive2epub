@@ -2,6 +2,7 @@ import asyncio
 import datetime
 import gzip
 import hashlib
+import sqlite3
 import io
 import json
 import os
@@ -4532,3 +4533,106 @@ def test_readme_shows_the_current_help(monkeypatch):
     start = readme.index("```\nusage: lparchive2epub") + len("```\n")
     pasted = readme[start:readme.index("```", start)]
     assert pasted == cli.arg_parser.format_help()
+
+
+@pytest.mark.asyncio
+async def test_migrate_cache_rewrites_old_keys_so_the_cache_is_hit_again(tmp_path, capsys):
+    """aiohttp-client-cache 0.15 keys a request differently from 0.14, so a cache written before the upgrade (every
+    per-LP cache of an archive-wide run) was never hit again. util/migrate_cache.py recomputes every row's key from the
+    URL it was requested at, rebuilds the redirects from the histories, keeps what is already current, drops the older
+    of two rows for one request, keeps what it cannot read, and takes a directory of caches."""
+    from aiohttp import web
+    from aiohttp.test_utils import TestServer
+    from aiohttp_client_cache import CachedSession, SQLiteBackend
+    from util.migrate_cache import migrate, main
+
+    async def handler(request):
+        if request.path == "/old":
+            raise web.HTTPFound("/page2")
+        return web.Response(text=f"body of {request.path}")
+
+    app = web.Application()
+    app.router.add_get("/{tail:.*}", handler)
+    server = TestServer(app)
+    await server.start_server()
+    urls = [str(server.make_url(p)) for p in ("/page", "/old", "/other")]
+    caches = [str(tmp_path / f"{name}.sqlite") for name in ("one", "two")]
+    try:
+        for cache in caches:
+            async with CachedSession(cache=SQLiteBackend(cache, expire_after=-1, autoclose=True)) as s:
+                for url in urls:
+                    async with s.get(url) as r:
+                        assert r.status == 200 and not r.from_cache
+    finally:
+        await server.close()   # from here on, only the cache can answer
+
+    def scramble(cache):
+        """What 0.14 left: keys the installed library does not compute, redirects pointing at them."""
+        con = sqlite3.connect(cache)
+        with con:
+            for key, in list(con.execute("SELECT key FROM responses")):
+                con.execute("UPDATE responses SET key = ? WHERE key = ?", (hashlib.sha256(b"old" + key.encode()).hexdigest(), key))
+            con.execute("DELETE FROM redirects")
+            con.execute("INSERT INTO redirects VALUES ('stale', 'nowhere')")
+        con.close()
+
+    async def all_from_cache(cache) -> list[str]:
+        async with CachedSession(cache=SQLiteBackend(cache, expire_after=-1, autoclose=True)) as s:
+            bodies = []
+            for url in urls:
+                async with s.get(url) as r:
+                    assert r.from_cache, url
+                    bodies.append(await r.text())
+            return bodies
+
+    assert await all_from_cache(caches[0]) == ["body of /page", "body of /page2", "body of /other"]
+    for cache in caches:
+        scramble(cache)
+    with pytest.raises(aiohttp.ClientConnectorError):   # the server is gone and the keys are stale: a miss
+        await all_from_cache(caches[0])
+
+    # the cache of one: a copy of /page stored under a second old key, and a row no pickle can read
+    con = sqlite3.connect(caches[0])
+    with con:
+        key, value = con.execute("SELECT key, value FROM responses LIMIT 1").fetchone()
+        con.execute("INSERT INTO responses VALUES ('duplicate-old', ?)", (value,))
+        con.execute("INSERT INTO responses VALUES ('unreadable', ?)", (sqlite3.Binary(b"not a pickle"),))
+    con.close()
+
+    report = migrate(caches[0], dry_run=True)
+    assert (report.rows, report.current, report.rewritten, report.dropped, report.unreadable, report.redirects) == (5, 0, 3, 1, 1, 1)
+    assert report.unreadable_keys == ["unreadable"] and report.error is None
+    with pytest.raises(aiohttp.ClientConnectorError):   # a dry run wrote nothing
+        await all_from_cache(caches[0])
+
+    assert main([str(tmp_path)]) == 0                   # a directory: every *.sqlite in it
+    err = capsys.readouterr().err
+    assert f"{caches[0]}: 5 responses, 0 current, 3 rewritten, 1 dropped, 1 unreadable, 1 redirects" in err
+    assert f"{caches[1]}: 3 responses, 0 current, 3 rewritten, 0 dropped, 0 unreadable, 1 redirects" in err
+    assert "total: 8 responses, 0 current, 6 rewritten, 1 dropped, 1 unreadable, 2 redirects" in err and "0 file(s) failed" in err
+    for cache in caches:
+        assert await all_from_cache(cache) == ["body of /page", "body of /page2", "body of /other"]
+    con = sqlite3.connect(caches[0])
+    assert con.execute("SELECT count(*) FROM responses").fetchone()[0] == 4   # 3 + the unreadable row, kept
+    assert con.execute("SELECT count(*) FROM redirects").fetchone()[0] == 1   # 'stale' is gone
+    con.close()
+
+    # run again: nothing to do; a row stored after the upgrade beats an old row for the same request
+    report = migrate(caches[1])
+    assert (report.current, report.rewritten, report.dropped) == (3, 0, 0)
+    con = sqlite3.connect(caches[1])
+    with con:
+        key, value = con.execute("SELECT key, value FROM responses LIMIT 1").fetchone()
+        con.execute("INSERT INTO responses VALUES ('older-copy', ?)", (value,))
+    con.close()
+    report = migrate(caches[1])
+    assert (report.rows, report.current, report.rewritten, report.dropped) == (4, 3, 0, 1)
+    assert await all_from_cache(caches[1]) == ["body of /page", "body of /page2", "body of /other"]
+
+    # not a cache, and an empty directory
+    (tmp_path / "x").mkdir()
+    sqlite3.connect(str(tmp_path / "x" / "notes.sqlite")).execute("CREATE TABLE t (a)").connection.close()
+    assert main([str(tmp_path / "x")]) == 1
+    assert "notes.sqlite: not an aiohttp-client-cache SQLite cache" in capsys.readouterr().err
+    (tmp_path / "empty").mkdir()
+    assert main([str(tmp_path / "empty")]) == 2
