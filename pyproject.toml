@@ -3,21 +3,19 @@ name = "lparchive2epub"
 version = "2.0.0"
 description = ""
 authors = [{ name = "Arwalk", email = "siragentprovocateurarwalk@gmail.com" }]
-requires-python = ">=3.12,<4"
+requires-python = ">=3.15,<4"
 readme = "README.md"
 classifiers = [
     "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.12",
-    "Programming Language :: Python :: 3.13",
-    "Programming Language :: Python :: 3.14",
+    "Programming Language :: Python :: 3.15",
 ]
 dependencies = [
-    "beautifulsoup4>=4.12.2,<5",
-    "tqdm>=4.66.4,<5",
-    "aiohttp>=3.9.5,<4",
-    "aiohttp-client-cache[all]>=0.14",
+    "beautifulsoup4>=4.15,<5",
+    "tqdm>=4.70,<5",
+    "aiohttp>=3.14,<4",
+    "aiohttp-client-cache[all]>=0.15",
     "ebooklib>=0.20",
-    "pillow==12.3.0",
+    "pillow>=13,<14",
 ]
 
 [project.optional-dependencies]
@@ -32,15 +30,19 @@ lparchive2epub = "lparchive2epub.main:main"
 
 [dependency-groups]
 dev = [
-    "pytest>=9,<10",
-    "coverage>=7.4.0,<8",
-    "pytest-asyncio>=0.26.0",
+    "pytest>=9.1,<10",
+    "coverage>=7.16,<8",
+    "pytest-asyncio>=1.4",
     "ruff>=0.17.1",
     "epubcheck>=5.3.0",
 ]
 
 [tool.uv]
 default-groups = "all"
+# A uv-managed interpreter for everyone, never the system Python: python.org's Windows builds link OpenSSL 3.0,
+# whose TLS handshake Cloudflare's bot challenge refuses whatever the headers (every Fandom picture lost in the
+# 2026-10-19 archive-wide run); the managed builds link OpenSSL 3.5 and pass.
+python-preference = "managed"
 
 [tool.uv.build-backend]
 module-name = ["lparchive2epub"]
@@ -52,7 +54,7 @@ build-backend = "uv_build"
 
 [tool.ruff]
 line-length = 130
-target-version = "py312"
+target-version = "py315"
 
 [tool.ruff.lint]
 # Correctness only, no style churn: unused imports and names, syntax errors, obvious mistakes

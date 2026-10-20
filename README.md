@@ -180,11 +180,14 @@ produces before installing it.
 
 ### Dev
 
-uv, which installs a supported Python (3.12 to 3.14) by itself if none is present
+uv, which installs the supported Python (3.15) by itself, a uv-managed build even when a system Python is present:
+python.org's Windows builds link OpenSSL 3.0, whose TLS handshake Cloudflare's bot challenge refuses (and every
+Fandom picture with it), the managed builds link OpenSSL 3.5, which passes
 
 ### Users
 
-python 3.12 to 3.14
+python 3.15 or later. On Windows, one that links OpenSSL 3.5 (`python -c "import ssl; print(ssl.OPENSSL_VERSION)"`),
+such as uv's managed builds: with python.org's OpenSSL 3.0, Fandom's image hosts refuse the tool
 
 ### Checks
 

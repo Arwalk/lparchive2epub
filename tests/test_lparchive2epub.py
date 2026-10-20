@@ -13,7 +13,7 @@ from urllib.parse import unquote
 
 import aiohttp
 from tqdm.asyncio import tqdm
-from lparchive2epub.lib import Extractor, Chapters, BeautifulSoup, normalize_url, build_update, Update, Intro, format_failures_report, ISSUES_URL, do, StrictModeError, MissingUpdatesError, ExtractionError, OutputError, check_output_path, detect_image_type, NotFoundError, NetworkError, RetriesExhaustedError, NotALetsPlayError, normalize_lp_url, fetch_with_retries, Fetched, get_cleaned_html, compose_description, parse_lp_date, reduce_image, ImageProcessing, ImageRegistry, FetchSettings, check_cache_path, discover_unlisted_chapters, canonical_slug, safe_file_name, resolve_output_path, resolve_cache_path, CacheError, EXIT_CACHE, EXIT_NOT_FOUND, EXIT_NETWORK, EXIT_OUTPUT, EXIT_INTERRUPTED, XML_WHITESPACE
+from lparchive2epub.lib import Extractor, Chapters, BeautifulSoup, normalize_url, build_update, Update, Intro, format_failures_report, ISSUES_URL, do, StrictModeError, MissingUpdatesError, ExtractionError, OutputError, check_output_path, detect_image_type, NotFoundError, NetworkError, RetriesExhaustedError, NotALetsPlayError, normalize_lp_url, fetch_with_retries, Fetched, get_cleaned_html, compose_description, parse_lp_date, reduce_image, ImageProcessing, ImageRegistry, FetchSettings, check_cache_path, discover_unlisted_chapters, canonical_slug, safe_file_name, resolve_output_path, resolve_cache_path, CacheError, EXIT_CACHE, EXIT_NOT_FOUND, EXIT_NETWORK, EXIT_OUTPUT, EXIT_INTERRUPTED, XML_WHITESPACE, sanitize
 import lparchive2epub.lib as lib
 from lparchive2epub import main as cli
 from importlib.resources import files
@@ -3012,9 +3012,9 @@ def test_rules_and_blocks_hidden_in_void_elements_are_unnested_so_the_page_valid
     """What unnest_blocks_from_inline missed (RSC-005 in 14 books of the archive-wide run). A <hr> inside bold text,
     a link or a <pre> (the forum's old [code] block, <pre>code:<hr>..., in 11 of them; a <pre> takes phrasing content
     only, like the wrappers, and so does a heading): not a block it knew, and one with no content to keep, so the
-    holder is split around it. A heading inside a heading. And a bs4 quirk: after a void tag written without a slash (<img src="a">), html.parser takes the end of the next
-    self-closed one of the same name (<img src="b" />) for a redundant </img> and ignores it, so that <img> stays
-    open and holds what follows; the page reads the same, but the passes miss the blocks hidden in it
+    holder is split around it. A heading inside a heading. And a bs4 quirk, up to 4.14: after a void tag written without a slash (<img src="a">), html.parser took the end
+    of the next self-closed one of the same name (<img src="b" />) for a redundant </img> and ignored it, so that
+    <img> stayed open and held what followed; the page read the same, but the passes missed the blocks hidden in it
     (Ratchet-Clank-Future-A-Crack-In-Time: headings and lists in an <img> in an unclosed <b>), a link sees its
     thumbnail holding other pictures, and an <input> or <embed> would take a whole post with it when dropped."""
     from ebooklib.utils import parse_html_string
@@ -3044,9 +3044,16 @@ def test_rules_and_blocks_hidden_in_void_elements_are_unnested_so_the_page_valid
     assert clean('<h3>a<h1>b</h1>c</h3>') == '<h3>a</h3><h1>b</h1>c'
     assert clean('<h2><p>x</p></h2>') == '<h2>x</h2>' and clean('<h2>a<hr/>b</h2>') == '<h2>a</h2><hr/><h2>b</h2>'
     assert clean('<b><h2>t</h2></b>') == '<h2><b>t</b></h2>'   # a wrapper still goes into its one block
-    # void elements html.parser left open: their children go right after them, before anything else is done
+    # void elements left open: their children go right after them, before anything else is done. html.parser gave
+    # them children up to bs4 4.14 (the tree built by hand below); 4.15 closes them, and the pass stays for any tree
+    # that would not
     quirk = '<img src="a.png"><img src="b.png"/><b>x<h2>t</h2>y</b>'
-    assert BeautifulSoup(quirk, "html.parser").find_all("img")[1].find("h2") is not None   # the quirk, as of bs4 4.14
+    assert BeautifulSoup(quirk, "html.parser").find_all("img")[1].find("h2") is None   # the quirk, gone as of bs4 4.15
+    held = BeautifulSoup(f'<div id="content">{quirk}</div>', "html.parser")
+    held.find_all("img")[1].append(held.b)                                              # what bs4 4.14 built
+    assert held.find_all("img")[1].find("h2") is not None
+    sanitize(held)
+    assert str(held) == '<div id="content"><img src="a.png"/><img src="b.png"/><b>xty</b></div>'
     assert clean(quirk) == '<img src="a.png"/><img src="b.png"/><b>xty</b>'
     assert clean('<br><br/><p>a</p>') == '<br/><br/><p>a</p>'
     assert clean('<input><input/>text') == 'text'   # the inputs go, not the text they held
@@ -3064,10 +3071,11 @@ def test_rules_and_blocks_hidden_in_void_elements_are_unnested_so_the_page_valid
     # unwrapped like every block in mixed content; Duke-Nukem-3D's heading inside a <pre>
     content = lambda tree: "".join(tree.find(".//div[@id='content']").itertext()).split()   # noqa: E731
     with zipfile.ZipFile(SNAPSHOT) as z:
-        for slug, open_voids in (("Ratchet-Clank-Future-A-Crack-In-Time", ["meta", "meta", "img", "img"]), ("Duke-Nukem-3D", ["meta", "meta"])):
+        for slug in ("Ratchet-Clank-Future-A-Crack-In-Time", "Duke-Nukem-3D"):
             page = z.read(f"landing_pages/{slug}.html").decode("utf-8")
             as_served = BeautifulSoup(page, "html.parser")
-            assert [v.name for v in as_served.find_all(VOID_TAGS) if v.contents] == open_voids, slug   # the head too
+            # bs4 4.14 left two <meta>s open on both and two <img>s on Ratchet's; 4.15 closes every void element
+            assert [v.name for v in as_served.find_all(VOID_TAGS) if v.contents] == [], slug
             assert _blocks_in_phrasing(parse_html_string(str(as_served))), slug   # the page needs the fix
             cleaned = get_cleaned_html(page)
             assert [v.name for v in cleaned.find_all(VOID_TAGS) if v.contents] == [], slug

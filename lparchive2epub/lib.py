@@ -1857,13 +1857,15 @@ async def lparchive2epub(url: str, file: str | None = None, root_session: aiohtt
 
 # Active content has no place in a book (and makes epubcheck demand the "scripted" property).
 TAGS_TO_DROP = ["script", "noscript", "style", "form", "input", "button", "select", "textarea"]
-# Elements that hold nothing, and that html.parser (bs4 4.14) nonetheless gives children to: after a void
-# tag written without a slash (<img src="a">), it takes the end of the next self-closed one of the same name
-# (<img src="b" />) for the redundant </img> and ignores it, so that element stays open and holds whatever
-# follows it up to its parent's end. 94 <img>s and 21 <br>s on 39 landing pages of the archive do. bs4
-# serialises the children right after the element, so the page reads the same; but the passes below walk the
-# tree, and miss the blocks hidden in the <img> inside an unclosed <b> (Ratchet-Clank-Future-A-Crack-In-Time,
-# RSC-005), see nested thumbnails in a link, or would drop a whole post with the <input> or <embed> it hides in.
+# Elements that hold nothing, and that html.parser (bs4 up to 4.14) nonetheless gave children to: after a void
+# tag written without a slash (<img src="a">), it took the end of the next self-closed one of the same name
+# (<img src="b" />) for the redundant </img> and ignored it, so that element stayed open and held whatever
+# followed it up to its parent's end. 94 <img>s and 21 <br>s on 39 landing pages of the archive did. bs4
+# serialises the children right after the element, so the page read the same; but the passes below walk the
+# tree, and missed the blocks hidden in the <img> inside an unclosed <b> (Ratchet-Clank-Future-A-Crack-In-Time,
+# RSC-005), saw nested thumbnails in a link, or would have dropped a whole post with the <input> or <embed> it hid
+# in. bs4 4.15 closes them (the floor since 2026-10-20); sanitize() still empties a void element first, for any
+# tree that would not.
 VOID_TAGS = ["area", "base", "br", "col", "embed", "hr", "img", "input", "link", "meta", "param", "source",
              "track", "wbr"]
 # Embedded players: replaced by a plain link to what they were showing, when they point somewhere.
