@@ -13,7 +13,7 @@ from urllib.parse import unquote
 
 import aiohttp
 from tqdm.asyncio import tqdm
-from lparchive2epub.lib import Extractor, Chapters, BeautifulSoup, normalize_url, build_update, Update, Intro, format_failures_report, ISSUES_URL, do, StrictModeError, MissingUpdatesError, ExtractionError, OutputError, check_output_path, detect_image_type, NotFoundError, NetworkError, RetriesExhaustedError, NotALetsPlayError, normalize_lp_url, fetch_with_retries, Fetched, get_cleaned_html, compose_description, parse_lp_date, reduce_image, ImageProcessing, ImageRegistry, FetchSettings, check_cache_path, discover_unlisted_chapters, canonical_slug, safe_file_name, resolve_output_path, resolve_cache_path, CacheError, EXIT_CACHE, EXIT_NOT_FOUND, EXIT_NETWORK, EXIT_OUTPUT, EXIT_INTERRUPTED
+from lparchive2epub.lib import Extractor, Chapters, BeautifulSoup, normalize_url, build_update, Update, Intro, format_failures_report, ISSUES_URL, do, StrictModeError, MissingUpdatesError, ExtractionError, OutputError, check_output_path, detect_image_type, NotFoundError, NetworkError, RetriesExhaustedError, NotALetsPlayError, normalize_lp_url, fetch_with_retries, Fetched, get_cleaned_html, compose_description, parse_lp_date, reduce_image, ImageProcessing, ImageRegistry, FetchSettings, check_cache_path, discover_unlisted_chapters, canonical_slug, safe_file_name, resolve_output_path, resolve_cache_path, CacheError, EXIT_CACHE, EXIT_NOT_FOUND, EXIT_NETWORK, EXIT_OUTPUT, EXIT_INTERRUPTED, XML_WHITESPACE
 import lparchive2epub.lib as lib
 from lparchive2epub import main as cli
 from importlib.resources import files
@@ -2703,12 +2703,12 @@ def _stray_list_content(tree) -> list[str]:
     """What sits directly inside a <ul>/<ol> of an lxml tree other than items: tag names, and "text"."""
     found = []
     for lst in tree.iter("ul", "ol"):
-        if (lst.text or "").strip():
+        if (lst.text or "").strip(XML_WHITESPACE):   # a &nbsp; is text to XML, which str.strip() would hide
             found.append("text")
         for child in lst:
             if isinstance(child.tag, str) and child.tag not in ("li", "script", "template"):   # comments have no tag name
                 found.append(child.tag)
-            if (child.tail or "").strip():
+            if (child.tail or "").strip(XML_WHITESPACE):
                 found.append("text")
     return found
 
@@ -2748,6 +2748,10 @@ def test_stray_content_in_lists_moves_into_items_so_the_page_validates():
         '<div id="content"><ul><li>a<b>x</b>  <i>y</i>\n</li>\n<li>b</li></ul></div>'
     for fine in ('<ul>\n  <li>a</li>\n\n  <li>b</li>\n</ul>', '<ol><li>a</li><template>t</template></ol>'):
         assert clean(fine) == untouched(fine)
+    # a &nbsp; between items is text to XML (and to a browser), not whitespace: it goes into the item before it, or
+    # into an unmarked item of its own before the first, where str.strip() used to leave it in the list
+    assert clean('<ul>\xa0<li>a</li>\n\xa0<li>b</li></ul>') == \
+        '<div id="content"><ul><li style="list-style-type: none;">\xa0</li><li>a\n\xa0</li><li>b</li></ul></div>'
 
     # the shape ebooklib writes, after its lxml re-parse
     written = parse_html_string(clean('<ul><li>a</li><br/>text<b>bold</b><ul><li>nested</li></ul></ul>'
@@ -2892,12 +2896,12 @@ def _table_faults(tree) -> list[str]:
         if table.getparent().tag in ("table", "thead", "tbody", "tfoot", "tr"):
             found.append(f"table in {table.getparent().tag}")
     for holder in tree.iter(*allowed):
-        if (holder.text or "").strip():
+        if (holder.text or "").strip(XML_WHITESPACE):   # a &nbsp; is text to XML, which str.strip() would hide
             found.append(f"text in {holder.tag}")
         for child in holder:
             if isinstance(child.tag, str) and child.tag not in allowed[holder.tag]:   # comments have no tag name
                 found.append(f"{child.tag} in {holder.tag}")
-            if (child.tail or "").strip():
+            if (child.tail or "").strip(XML_WHITESPACE):
                 found.append(f"text in {holder.tag}")
     return found
 
@@ -2951,6 +2955,15 @@ def test_tables_are_repaired_so_the_page_validates():
         '<b>stray</b><table><tr><td>a</td></tr><tr><td><b>x</b></td></tr></table>'
     assert clean('<b><ul>stray<li>x</li></ul></b>') == \
         '<ul><li style="list-style-type: none;"><b>stray</b></li><li><b>x</b></li></ul>'   # lists: the same, now
+    # a &nbsp; between cells or rows is text, not whitespace, to XML as to a browser (Star-Wars-Bounty-Hunter's
+    # "</td>&nbsp;<td>" in 6 rows, Castlevania-64's "</td></td>&nbsp;</td>" where html.parser drops the stray end
+    # tags): it goes before the table like any other text, where str.strip() used to make it whitespace and leave
+    # it in the row (RSC-005 "text not allowed here", the two books of the 2026-10-19 archive-wide run still faulted)
+    assert clean('<table><tr><td>a</td>\xa0<td>b</td>\n<td>\xa0</td>\n</tr></table>') == \
+        '\xa0<table><tr><td>a</td><td>b</td>\n<td>\xa0</td>\n</tr></table>'
+    assert clean('<table><tr><td>a</td></td>&nbsp;</td></tr>\n<tr><td>b</td></tr></table>') == \
+        '\xa0<table><tr><td>a</td></tr>\n<tr><td>b</td></tr></table>'
+    assert clean('<table>\xa0<tr><td>a</td></tr>\n\xa0\n</table>') == '\xa0\n\xa0\n<table><tr><td>a</td></tr></table>'
     # a table that opens inside a table closes it, as in a browser: Oracle-Series opens <table> twice and the rest of
     # the page sits in the outer one, which is left empty and goes; rows after an inner table get a table of their own
     assert clean('<table><table><tr><td>a</td></tr></table><br/>rest<table><tr><td>b</td></tr></table>') == \
@@ -2969,7 +2982,8 @@ def test_tables_are_repaired_so_the_page_validates():
 
     # the shape ebooklib writes, after its lxml re-parse, which leaves every one of these as it stands
     for html in ('<table><tr><td><a href="X">one<tr><td><a href="Y">two</a></table>', '<b><tr><td>x</td></tr></b>',
-                 '<table><b><tr><td>x</td></tr></b>stray<td>a</td></table>', '<i><b><table><tr><td>a</td></tr></table></b></i>'):
+                 '<table><b><tr><td>x</td></tr></b>stray<td>a</td></table>', '<i><b><table><tr><td>a</td></tr></table></b></i>',
+                 '<table><tr><td>a</td>&nbsp;<td>b</td></tr></table>', '<table><tr><td>a</td></td>&nbsp;</td></tr></table>'):
         assert _table_faults(parse_html_string(str(BeautifulSoup(html, "html.parser")))) or "<i>" in html, html
         written = parse_html_string(str(get_cleaned_html(f'<div id="content">{html}</div>')))
         assert _table_faults(written) == [] and written.findall(".//a//a") == [], html

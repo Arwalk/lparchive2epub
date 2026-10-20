@@ -2212,9 +2212,17 @@ def _turn_inside_out(soup: BeautifulSoup, wrapper: Tag):
     wrapper.unwrap()
 
 
+# What XML (and the HTML parser) count as whitespace between the parts of a table or a list: a NO-BREAK SPACE
+# (&nbsp;) is text there, which str.strip() would take away (RSC-005 "text not allowed here" in Castlevania-64 and
+# Star-Wars-Bounty-Hunter, the two books of the 2026-10-19 archive-wide run that still faulted)
+XML_WHITESPACE = " \t\r\n"
+
+
 def _is_blank(node) -> bool:
-    """Whitespace-only text, or a comment (or CDATA, doctype...): nothing a reader sees."""
-    return isinstance(node, NavigableString) and (isinstance(node, PreformattedString) or not node.strip())
+    """Whitespace-only text (as XML sees whitespace: a &nbsp; is text), or a comment (or CDATA, doctype...):
+    nothing a reader sees, and nothing that breaks a table or a list."""
+    return isinstance(node, NavigableString) and (isinstance(node, PreformattedString)
+                                                  or not node.strip(XML_WHITESPACE))
 
 
 def nest_stray_list_content(soup: BeautifulSoup):
@@ -2235,7 +2243,7 @@ def nest_stray_list_content(soup: BeautifulSoup):
                 if child.name in LIST_CHILD_TAGS:
                     moving = False
                     continue
-            elif isinstance(child, PreformattedString) or not str(child).strip():
+            elif _is_blank(child):
                 if moving:
                     item.append(child.extract())   # the space or comment between two moved words goes with them...
                 continue                           # ...the whitespace and comments between items stay

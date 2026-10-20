@@ -98,6 +98,7 @@ LETS_PLAYS = [
     "Quest-64",
     "Digital-A-Love-Story",
     "Mega-Man-Zero-2",
+    "Castlevania-64",
 ]
 
 
