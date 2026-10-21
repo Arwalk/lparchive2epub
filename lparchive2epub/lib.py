@@ -201,8 +201,9 @@ class IndexedEpubImage:
 class Download:
     """What fetching one image URL gave, kept for the book's sources.json (see book_sources): the URL that
     answered (the URL itself, a fallback spelling from lparchive_fallback_urls, or the picture a web page
-    served in its place named, see picture_named_by_page), the Content-Type as served, and the hash, size
-    and detected type of the bytes before any resize or conversion."""
+    served in its place named, see picture_named_by_page; "supplement:<file>" for a picture taken from a
+    Supplement), the Content-Type as served (None for a supplement), and the hash, size and detected type of
+    the bytes before any resize or conversion."""
     fetched_from: str
     served_type: str | None
     raw_hash: str
@@ -1014,6 +1015,11 @@ class InvalidBookError(ExtractionError):
     exit_code = EXIT_CHECK
 
 
+class SupplementError(ExtractionError):
+    """A supplement directory (--supplement, or the collection the package ships) cannot be used: no
+    manifest, a malformed line, a file missing or not a picture. See Supplement."""
+
+
 def resolve_cache_path(path: str) -> str:
     """Where the --cache SQLite file lives: `path`, with .sqlite added when it has no extension."""
     path = os.path.abspath(os.path.expanduser(path))
@@ -1248,6 +1254,81 @@ async def fetch_with_retries(session: aiohttp.ClientSession, url: str, max_retri
 
 
 
+# Pictures the package carries for hosts that hide them (see Supplement): the folder next to this module, its
+# manifest, and what sources.json's fetched_from says for a picture taken from one (the scheme, then the file's name)
+SUPPLEMENT_DIRECTORY = "supplements"
+SUPPLEMENT_MANIFEST = "manifest.tsv"
+SUPPLEMENT_SCHEME = "supplement:"
+
+
+@dataclass
+class Supplement:
+    """Pictures a host will not serve the tool, carried as files. Fandom's CDN (*.wikia.nocookie.net) and
+    tcrf.net sit behind Cloudflare's bot management, which answers a challenge page (HTTP 403) to the tool on
+    some machines (every python.org build of Python for Windows, linked against OpenSSL 3.0; any machine the
+    service has grown suspicious of) and on some days, while a browser gets the picture: 37 pictures of 5 books
+    in the archive-wide run of 2026-10-20. The files were saved from a browser; a Fandom thumbnail saved so is
+    byte for byte what the CDN serves when it lets a request through (checked against cached answers on
+    2026-10-21), and the __cb<timestamp> in its address pins the revision, so there is no newer copy to prefer.
+    An address in the collection is therefore not asked for at all: the picture comes from the file, the same
+    on every machine, and sources.json says so (fetched_from "supplement:<file>", no served type).
+
+    The package ships one (SUPPLEMENT_DIRECTORY next to this module, used by default); --supplement DIR layers
+    a user's own on top. A directory holds SUPPLEMENT_MANIFEST, one line per picture (the address as the
+    archive's page writes it, a tab, the file's name next to the manifest; # comments and blank lines are
+    skipped), and the files. Every file is checked to be a picture when the manifest is read."""
+    pictures: dict[str, str]   # the picture's address, as the page writes it -> path of the file
+
+    @classmethod
+    def load(cls, directory: str | os.PathLike) -> "Supplement":
+        manifest = os.path.join(directory, SUPPLEMENT_MANIFEST)
+        try:
+            with open(manifest, encoding="utf-8") as f:
+                lines = f.read().splitlines()
+        except OSError as e:
+            raise SupplementError(f"Cannot read the supplement manifest {manifest}: {e.strerror or e}") from e
+        pictures: dict[str, str] = {}
+        for number, line in enumerate(lines, 1):
+            if not line.strip() or line.lstrip().startswith("#"):
+                continue
+            url, tab, name = line.partition("\t")
+            url, name = url.strip(), name.strip()
+            if not tab or not url or not name:
+                raise SupplementError(f"{manifest}, line {number}: expected an address, a tab and a file name")
+            path = os.path.join(directory, name)
+            try:
+                with open(path, "rb") as f:
+                    head = f.read(4096)
+            except OSError as e:
+                raise SupplementError(f"Cannot read {path}, named by {manifest} line {number}: {e.strerror or e}") from e
+            if detect_image_type(head) is None:
+                raise SupplementError(f"{path}, named by {manifest} line {number}, is not a picture")
+            pictures[url] = path
+        return cls(pictures)
+
+    @classmethod
+    def bundled(cls) -> "Supplement":
+        """The collection the package ships."""
+        return cls.load(os.path.join(os.path.dirname(os.path.abspath(__file__)), SUPPLEMENT_DIRECTORY))
+
+    def layered(self, other: "Supplement") -> "Supplement":
+        """This collection with `other` on top: for an address both hold, the picture of `other`."""
+        return Supplement({**self.pictures, **other.pictures})
+
+    def fetched(self, url: str) -> Fetched | None:
+        """The picture for `url`, read from its file, as a download would have given it; None when the
+        collection has no picture for that address."""
+        path = self.pictures.get(url)
+        if path is None:
+            return None
+        try:
+            with open(path, "rb") as f:
+                body = f.read()
+        except OSError as e:
+            raise SupplementError(f"Cannot read {path}: {e.strerror or e}") from e
+        return Fetched(SUPPLEMENT_SCHEME + os.path.basename(path), body, None, "utf-8")
+
+
 class ImageRegistry:
     """Per-run memory of images, shared by every page being built.
 
@@ -1265,10 +1346,13 @@ class ImageRegistry:
 
     references, unresolvable, downloads: the book's sources.json (book_sources) is written from these once
     every page is built: which (page, src) referenced each resolved URL, the references whose URL could not
-    be built at all, and what each URL's download gave (see Download)."""
+    be built at all, and what each URL's download gave (see Download).
 
-    def __init__(self, spool_dir: str | None = None):
+    supplement: the pictures to take from files rather than from their host (see Supplement), if any."""
+
+    def __init__(self, spool_dir: str | None = None, supplement: Supplement | None = None):
         self.by_url: dict[str, asyncio.Future] = {}
+        self.supplement = supplement
         self.by_content: dict[str, asyncio.Future] = {}
         self.spool_dir = spool_dir
         self.references: dict[str, set[tuple[str, str]]] = {}
@@ -1365,7 +1449,11 @@ async def _get_image(session: aiohttp.ClientSession, img: Image, registry: Image
         return IndexedEpubImage(img_hash, img_url, new_name, data, len(content))  # old_name: the original URL
 
     try:
-        fetched = await _fetch_image(session, img_url, fetch)
+        # a picture the collection holds is not asked for: its host hides it, and the file is the host's copy
+        supplement = registry.supplement if registry is not None else None
+        fetched = supplement.fetched(img_url) if supplement is not None else None
+        if fetched is None:
+            fetched = await _fetch_image(session, img_url, fetch)
         raw_hash = get_blake2b_hash(fetched.body)
         if registry is not None:
             served_type = (fetched.content_type or "").split(";")[0].strip() or None
@@ -1841,7 +1929,8 @@ def _chapter_from_page(base: str, slug: str, html: str, num: int, order: float) 
 async def lparchive2epub(url: str, file: str | None = None, root_session: aiohttp.ClientSession | None = None,
                          writer=log, strict: bool = False, allow_missing_updates: bool = False,
                          image_processing: ImageProcessing | None = None, cover: bytes | None | bool = True,
-                         fetch: FetchSettings | None = None, spool_images: bool = True, check: bool = False) -> str:
+                         fetch: FetchSettings | None = None, spool_images: bool = True, check: bool = False,
+                         supplement: Supplement | None | bool = True) -> str:
     """Build the book for `url` at `file` (a path, a directory, or None for "<title>.epub" in the current
     directory). Returns the path of the written book. See `do` for the options."""
     try:
@@ -1852,7 +1941,7 @@ async def lparchive2epub(url: str, file: str | None = None, root_session: aiohtt
         root_session = aiohttp.ClientSession(timeout=CLIENT_TIMEOUT)
     async with root_session as session:
         return await do(url, file, session, writer, strict, allow_missing_updates, image_processing, cover, fetch,
-                        spool_images, check)
+                        spool_images, check, supplement)
 
 
 # Active content has no place in a book (and makes epubcheck demand the "scripted" property).
@@ -2411,8 +2500,9 @@ def book_sources(url: str, pages: list[Page], chapters: list[Chapters], unlisted
     Listed: the intro (the landing page), every update page (its URL and title, whether the landing page
     listed it or it was found through next links, whether it was retrieved or stands as a placeholder),
     every image page (the stored file it shows), every stored image (its sources, each with the URL that
-    answered when a fallback spelling did, or when the page served in the picture's place named it, the
-    Content-Type as served and the (page, src) references; the hash, size and type of the downloaded
+    answered when a fallback spelling did, or when the page served in the picture's place named it, or
+    "supplement:<file>" for a picture taken from a Supplement, the Content-Type as served and the (page, src)
+    references; the hash, size and type of the downloaded
     bytes when the stored ones differ from them), every skipped
     image (resolved URL, or null for one whose URL could not be built, the cause class of
     classify_failure, the references), the LP's URL, the tool's version and the options that change bytes.
@@ -2495,7 +2585,7 @@ def sources_item(data: dict) -> epub.EpubItem:
 async def do(url: str, file: str | None, session: aiohttp.ClientSession, writer, strict: bool = False,
              allow_missing_updates: bool = False, image_processing: ImageProcessing | None = None,
              cover: bytes | None | bool = True, fetch: FetchSettings | None = None, spool_images: bool = True,
-             check: bool = False) -> str:
+             check: bool = False, supplement: Supplement | None | bool = True) -> str:
     """`file`: the book's path, a directory to put "<title>.epub" in, or None for the current directory.
     `cover`: True for a generated text cover, bytes for a custom image, None/False for no cover.
     `writer` gets the final report and summary; progress messages go through it too unless `fetch.quiet`.
@@ -2503,8 +2593,14 @@ async def do(url: str, file: str | None, session: aiohttp.ClientSession, writer,
     (memory then stays flat whatever the size of the LP); False keeps them all in memory.
     `check`: validate the written book with epubcheck (see lparchive2epub.check) and report its findings;
     with `strict`, errors raise InvalidBookError (the book is kept).
+    `supplement`: True for the collection of pictures the package ships (see Supplement), a Supplement for
+    another, None/False to take every picture from its host.
     Returns the path of the written book."""
     fetch = fetch or FetchSettings()
+    if supplement is True:
+        supplement = Supplement.bundled()
+    elif supplement is False:
+        supplement = None
     say = (lambda *_: None) if fetch.quiet else writer
     check_output_directory(file)
     say(f"extracting lp from {url}")
@@ -2565,7 +2661,7 @@ async def do(url: str, file: str | None, session: aiohttp.ClientSession, writer,
         spine.append("nav")
 
         say("building intro")
-        image_registry = ImageRegistry(spool_dir)
+        image_registry = ImageRegistry(spool_dir, supplement)
         missing_updates: list[tuple[float, Chapters, Exception]] = []
         placeholders: set[str] = set()   # URLs of the updates a placeholder page stands in for
         epub_intro = await build_intro(session, url, intro, image_registry, failures, image_processing, fetch)
@@ -2638,6 +2734,10 @@ async def do(url: str, file: str | None, session: aiohttp.ClientSession, writer,
 
         pages = [p for _, p in sorted(pages_indexed, key=lambda x: x[0])]
         settle_causes(failures, parked_hosts(image_registry))
+        supplied = sum(1 for d in image_registry.downloads.values() if d.fetched_from.startswith(SUPPLEMENT_SCHEME))
+        if supplied:
+            say(f"{supplied} picture(s) came from the supplement collection, not from a host that hides them "
+                f"(sources.json in the book says which)")
 
         if failures and strict:
             raise StrictModeError(format_failures_report(

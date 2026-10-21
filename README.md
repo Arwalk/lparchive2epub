@@ -7,7 +7,7 @@ usage: lparchive2epub [-h] [--cache FILE] [--strict] [--allow-missing-updates]
                       [--max-image-size PIXELS] [--jpeg-quality 1-100]
                       [--concurrency N] [--retries N] [--quiet]
                       [--images-in-memory] [--cover IMAGE | --no-cover]
-                      [--check]
+                      [--supplement DIR | --no-supplement] [--check]
                       URL [OUTPUT]
 
 A tool to transform a Let's Play from lparchive.org to epub format.
@@ -54,6 +54,17 @@ options:
   --cover IMAGE         Use this image file as the cover instead of the
                         generated one (title and author on a plain background)
   --no-cover            Build the book without a cover image
+  --supplement DIR      Also take pictures from the files in DIR, on top of
+                        the collection the tool ships: for pictures their host
+                        will not serve the tool but a browser can save
+                        (Cloudflare's bot challenge on Fandom's wikis). DIR
+                        holds a manifest.tsv, one line per picture (its
+                        address as the page writes it, a tab, the file's
+                        name), and the files; a picture in the collection is
+                        taken from its file, never requested, and the book's
+                        sources.json says so
+  --no-supplement       Request every picture from its host, ignoring the
+                        collection the tool ships
   --check               Validate the written book with epubcheck and report
                         what it finds (needs the 'check' extra: pip install
                         lparchive2epub[check], and a Java runtime). With
@@ -208,7 +219,10 @@ A standalone executable is available for releases on windows. See the releases p
 
 ## Building standalone
 
-`uv run --with pyinstaller pyinstaller --onefile --name lparchive2epub lparchive2epub/main.py`
+`uv run --with pyinstaller pyinstaller --onefile --name lparchive2epub --add-data lparchive2epub/supplements:lparchive2epub/supplements lparchive2epub/main.py`
+
+(`--add-data` packs the pictures the tool carries, see "Pictures the tool carries"; without it the executable
+refuses to run, since the collection it was built with is missing.)
 
 ## Downloads
 
@@ -261,11 +275,30 @@ title, whether the landing page listed it or it was found by following next link
 retrieved or stands in as a placeholder; for each image page, the picture it shows; for each stored
 picture, its sources with the referencing pages, the Content-Type served, the address that answered when
 the archive had the file under another spelling or kept, under the picture's name, the page of a host that
-still serves it, and the hash, size and type of the downloaded bytes when they were resized or converted;
+still serves it (or `supplement:<file>` for a picture taken from the collection the tool carries, see
+below), and the hash, size and type of the downloaded bytes when they were resized or converted;
 for each skipped picture, its address, the pages that showed it and why it was skipped (the same classes
 as the report); the Let's Play's address, the tool's version and the options that change bytes. The file
 is listed in the package but in no table of contents: readers never show it. It carries no build time and
 is sorted throughout, so two builds of one Let's Play give one file.
+
+## Pictures the tool carries
+
+Some hosts will not serve the tool a picture a browser can save. Fandom's wiki CDN (`*.wikia.nocookie.net`)
+and tcrf.net sit behind Cloudflare's bot management, which answers a challenge page (HTTP 403) to the tool
+on some machines and on some days: 37 pictures of 5 Let's Plays in a run over the whole archive. The
+package carries those pictures, saved from a browser (`lparchive2epub/supplements/`: a `manifest.tsv`
+naming each picture's address and file, and the files; a Fandom thumbnail saved so is byte for byte what
+the CDN serves when it lets a request through). A picture in the collection is taken from its file and
+never requested, so the book is the same on every machine, and its `sources.json` says
+`"fetched_from": "supplement:<file>"` for it; the run says how many pictures came from the collection.
+
+To add your own, pass `--supplement DIR`: a folder with a `manifest.tsv` (one line per picture: the
+address as the Let's Play's page writes it, a tab, the file's name in the folder; `#` comments and blank
+lines are skipped) and the files, which come on top of the shipped collection. The report of a run lists
+the addresses of the pictures it could not retrieve, ready to be saved from a browser. `--no-supplement`
+requests every picture from its host instead. A manifest naming a file that is missing or is not a picture
+is refused before anything is downloaded.
 
 ## Memory and disk
 
@@ -315,4 +348,4 @@ epubcheck run goes on alongside the builds, with its own progress bar, and once 
 - Some landing pages do not list every update (or list none): the tool follows the pages' own next
   links from the last listed update to find the rest.
 - Some LPs completely fail to be downloaded.
-- Some LPs contain broken links (typos like `hhttp://`, dead image hosts...). Common typos are repaired automatically, and a picture the archive keeps a host's page of (imgur, tenor) is fetched from that host when it still serves it; resources that still can't be retrieved are left as external links and a report is printed at the end. If a whole update can't be retrieved, no book is written and the failing update(s) are listed; pass `--allow-missing-updates` to build the book anyway with a placeholder page in their place. The report groups the failures by cause in plain words (dead hosts, pictures their host no longer serves, broken or missing copies on the archive...) and, when some failure may be the tool's doing, asks you to paste it in a [GitHub issue](https://github.com/Arwalk/lparchive2epub/issues/new) so the case can be handled in a future release. Use `--strict` to fail instead.
+- Some LPs contain broken links (typos like `hhttp://`, dead image hosts...). Common typos are repaired automatically, and a picture the archive keeps a host's page of (imgur, tenor) is fetched from that host when it still serves it; a picture a host hides behind a bot challenge comes from the collection the tool carries when it has it (see "Pictures the tool carries"); resources that still can't be retrieved are left as external links and a report is printed at the end. If a whole update can't be retrieved, no book is written and the failing update(s) are listed; pass `--allow-missing-updates` to build the book anyway with a placeholder page in their place. The report groups the failures by cause in plain words (dead hosts, pictures their host no longer serves, broken or missing copies on the archive...) and, when some failure may be the tool's doing, asks you to paste it in a [GitHub issue](https://github.com/Arwalk/lparchive2epub/issues/new) so the case can be handled in a future release. Use `--strict` to fail instead.

@@ -1,0 +1,27 @@
+# Pictures their host hides behind a Cloudflare bot challenge (HTTP 403 to the tool, a picture to a browser):
+# saved from a browser on 2026-10-21, byte for byte what the host serves when it lets a request through.
+# One line per picture: the address as the archive's page writes it, a tab, the file next to this manifest.
+
+# Mega-Man-Zero-2 (16 pictures)
+http://img1.wikia.nocookie.net/__cb20100619050620/megaman/images/9/94/SplashWoman.jpg	SplashWoman.webp
+http://static2.wikia.nocookie.net/__cb20100531151129/megaman/images/7/70/CW-SniperJoe-Art.jpg	CW-SniperJoe-Art.webp
+http://static3.wikia.nocookie.net/__cb20100702030040/megaman/images/5/54/Mmx4slashbeast.jpg	Mmx4slashbeast.webp
+http://img1.wikia.nocookie.net/__cb20070223104126/megaman/images/d/d9/Mhx_vilestand.PNG	Mhx_vilestand.PNG.webp
+http://img2.wikia.nocookie.net/__cb20080809212450/megaman/images/e/e8/Mmx3bit.jpg	Mmx3bit.webp
+http://img2.wikia.nocookie.net/__cb20100616034041/megaman/images/d/d1/X4_colonel1.jpg	X4_colonel1.webp
+http://img2.wikia.nocookie.net/__cb20100619204838/megaman/images/9/9a/Mmx2agile.jpg	Mmx2agile.webp
+http://img4.wikia.nocookie.net/__cb20110328193203/megaman/images/f/ff/MMX4-Z-Ryuenjin-Sprite.png	MMX4-Z-Ryuenjin-Sprite.webp
+http://img2.wikia.nocookie.net/__cb20110328190408/megaman/images/7/73/Kuuenzan.png	Kuuenzan.webp
+http://img3.wikia.nocookie.net/__cb20091021160731/megaman/images/f/f3/Raikousen.png	Raikousen.webp
+http://img4.wikia.nocookie.net/__cb20061115005326/megaman/images/5/5c/Mm4robotmothsprite.png	Mm4robotmothsprite.webp
+http://img4.wikia.nocookie.net/__cb20100807220040/megaman/images/b/b8/King_flyer_sprite.gif	King_flyer_sprite.webp
+http://img4.wikia.nocookie.net/__cb20110328183809/megaman/images/0/01/MMX4-Z-Raijingeki-Sprite.png	MMX4-Z-Raijingeki-Sprite.webp
+http://img4.wikia.nocookie.net/__cb20080101003051/megaman/images/7/79/PantheonLauncher.jpg	PantheonLauncher.webp
+http://img2.wikia.nocookie.net/__cb20110328194318/megaman/images/4/46/MMX4-Z-Hyouretsuzan-Sprite.png	MMX4-Z-Hyouretsuzan-Sprite.webp
+http://img4.wikia.nocookie.net/__cb20130329170302/ultradragonball/images/5/51/Ekkusu.jpg	Ekkusu.webp
+
+# Pikmin-3
+http://img2.wikia.nocookie.net/__cb20130917095706/t__/teamico/images/d/d9/Phalanx.jpg	Phalanx.webp
+
+# Fire-Emblem-4-Binary
+http://static4.wikia.nocookie.net/__cb20120406065457/fireemblem/images/3/32/Laylea_%28TCG_Series_2%29.jpg	Laylea_29.webp

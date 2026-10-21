@@ -4636,3 +4636,122 @@ async def test_migrate_cache_rewrites_old_keys_so_the_cache_is_hit_again(tmp_pat
     assert "notes.sqlite: not an aiohttp-client-cache SQLite cache" in capsys.readouterr().err
     (tmp_path / "empty").mkdir()
     assert main([str(tmp_path / "empty")]) == 2
+
+
+# --- Supplement: pictures the tool carries for hosts that hide them behind a bot challenge ---
+
+def test_supplement_manifest_names_the_pictures_and_is_checked(tmp_path):
+    (tmp_path / "a.png").write_bytes(PNG_BYTES)
+    (tmp_path / "b.webp").write_bytes(WEBP_BYTES)
+    (tmp_path / "manifest.tsv").write_text("# a comment\n\nhttp://h.example/a.png\ta.png\n  http://h.example/b.jpg \t b.webp \n",
+                                           encoding="utf-8")
+    supplement = lib.Supplement.load(tmp_path)
+    assert supplement.pictures == {"http://h.example/a.png": str(tmp_path / "a.png"),
+                                   "http://h.example/b.jpg": str(tmp_path / "b.webp")}
+    fetched = supplement.fetched("http://h.example/b.jpg")
+    assert fetched.url == "supplement:b.webp" and fetched.body == WEBP_BYTES and fetched.content_type is None
+    assert supplement.fetched("http://h.example/none.png") is None
+    # layered: for an address both hold, the picture of the collection on top
+    other = lib.Supplement({"http://h.example/a.png": "/elsewhere/a.png", "http://h.example/c.gif": "/elsewhere/c.gif"})
+    assert supplement.layered(other).pictures == {"http://h.example/a.png": "/elsewhere/a.png",
+                                                  "http://h.example/b.jpg": str(tmp_path / "b.webp"),
+                                                  "http://h.example/c.gif": "/elsewhere/c.gif"}
+    assert supplement.pictures["http://h.example/a.png"] == str(tmp_path / "a.png")   # the original is untouched
+    # what a directory must not be
+    assert issubclass(lib.SupplementError, ExtractionError)
+    with pytest.raises(lib.SupplementError, match="Cannot read the supplement manifest"):
+        lib.Supplement.load(tmp_path / "missing")
+    (tmp_path / "manifest.tsv").write_text("http://h.example/a.png a.png\n", encoding="utf-8")   # a space, not a tab
+    with pytest.raises(lib.SupplementError, match=r"manifest.tsv, line 1: expected an address, a tab and a file name"):
+        lib.Supplement.load(tmp_path)
+    (tmp_path / "manifest.tsv").write_text("# fine\nhttp://h.example/x.png\tx.png\n", encoding="utf-8")
+    with pytest.raises(lib.SupplementError, match=r"Cannot read .*x.png, named by .*manifest.tsv line 2"):
+        lib.Supplement.load(tmp_path)
+    (tmp_path / "page.png").write_bytes(b"<html>Just a moment...</html>")
+    (tmp_path / "manifest.tsv").write_text("http://h.example/p.png\tpage.png\n", encoding="utf-8")
+    with pytest.raises(lib.SupplementError, match=r"page.png, named by .*manifest.tsv line 1, is not a picture"):
+        lib.Supplement.load(tmp_path)
+
+
+@pytest.mark.asyncio
+async def test_supplied_picture_comes_from_the_collection_and_sources_json_says_so(tmp_path, monkeypatch):
+    monkeypatch.setattr(lib, "RETRY_BACKOFF_BASE", 0)
+    url = "https://lparchive.org/X-COM-Terror-from-the-Deep"
+    page = f"{url}/Update%2001/"
+    hidden = "http://img4.wikia.nocookie.net/__cb20080101003051/megaman/images/7/79/PantheonLauncher.jpg"
+    other = "http://img4.wikia.nocookie.net/__cb20121014202449/megaman/images/5/5b/CopyX2.jpg"
+    (tmp_path / "PantheonLauncher.webp").write_bytes(WEBP_BYTES)
+    (tmp_path / "manifest.tsv").write_text(f"{hidden}\tPantheonLauncher.webp\n", encoding="utf-8")
+    supplement = lib.Supplement.load(tmp_path)
+    challenge = _FakeResponse(403, b"<html>Just a moment...</html>", "text/html")
+
+    def session():
+        return _FakeSession("never-matches", responses={
+            hidden: challenge, other: challenge,
+            page: _FakeResponse(200, f'<div id="content"><img src="{hidden}"/> <img src="{other}"/></div>'.encode()),
+        })
+
+    messages = []
+    with tempfile.TemporaryDirectory() as d:
+        out = f"{d}/book.epub"
+        s = session()
+        await asyncio.wait_for(do(url, out, s, messages.append, supplement=supplement), timeout=30)
+        with zipfile.ZipFile(out) as z:
+            sources = json.loads(z.read("EPUB/sources.json"))
+            chapter = z.read("EPUB/update_0.xhtml").decode()
+            names = z.namelist()
+    assert hidden not in s.requested and other in s.requested   # not a fallback: the host is never asked for it
+    stored = f"images/{lib.get_blake2b_hash(WEBP_BYTES)}.webp"
+    assert f"EPUB/{stored}" in names and stored in chapter
+    assert chapter.count("missing-image") == 1 and other in chapter
+    [image] = [i for i in sources["images"] if i["file"] == stored]
+    assert image["sources"] == [{"url": hidden, "fetched_from": "supplement:PantheonLauncher.webp", "served_type": None,
+                                 "references": [{"page": page, "src": hidden}]}]
+    assert sources["skipped"] == [{"url": other, "cause": lib.GONE, "references": [{"page": page, "src": other}]}]
+    assert "1 picture(s) came from the supplement collection, not from a host that hides them" in "\n".join(messages)
+    report = messages[-1]
+    assert "1 resource(s) could not be retrieved" in report and other in report and hidden not in report
+    # without a supplement the host is asked, and the picture is missing
+    with tempfile.TemporaryDirectory() as d:
+        s = session()
+        await asyncio.wait_for(do(url, f"{d}/book.epub", s, lambda *_: None, supplement=False), timeout=30)
+    assert hidden in s.requested
+
+
+def test_bundled_supplement_is_complete_and_sound():
+    supplement = lib.Supplement.bundled()
+    directory = os.path.join(os.path.dirname(lib.__file__), lib.SUPPLEMENT_DIRECTORY)
+    pictures = {name for name in os.listdir(directory) if name != lib.SUPPLEMENT_MANIFEST}
+    assert {os.path.basename(path) for path in supplement.pictures.values()} == pictures   # every file is named, once
+    assert len(supplement.pictures) == len(pictures) == 18
+    for url, path in supplement.pictures.items():
+        assert url.startswith("http") and not lib.is_lparchive_url(url)
+        with open(path, "rb") as f:
+            assert detect_image_type(f.read()) is not None
+
+
+def test_cli_supplement_flags(monkeypatch, capsys, tmp_path):
+    seen = {}
+
+    async def fake(url, file, session=None, *args, **kwargs):
+        seen.update(kwargs)
+        if session is not None:
+            await session.close()
+
+    monkeypatch.setattr(cli, "lparchive2epub", fake)
+    cli.main(["https://lparchive.org/Some-LP", "out.epub"])
+    assert seen["supplement"] is True   # the collection the tool ships, by default
+    cli.main(["--no-supplement", "https://lparchive.org/Some-LP", "out.epub"])
+    assert seen["supplement"] is False
+    (tmp_path / "mine.png").write_bytes(PNG_BYTES)
+    (tmp_path / "manifest.tsv").write_text("http://h.example/mine.png\tmine.png\n", encoding="utf-8")
+    cli.main(["--supplement", str(tmp_path), "https://lparchive.org/Some-LP", "out.epub"])
+    assert isinstance(seen["supplement"], lib.Supplement)
+    assert seen["supplement"].pictures["http://h.example/mine.png"] == str(tmp_path / "mine.png")
+    assert len(seen["supplement"].pictures) == len(lib.Supplement.bundled().pictures) + 1   # on top of the shipped one
+    with pytest.raises(SystemExit) as exit_info:
+        cli.main(["--supplement", str(tmp_path / "missing"), "https://lparchive.org/Some-LP", "out.epub"])
+    assert exit_info.value.code == 2 and "Cannot read the supplement manifest" in capsys.readouterr().err
+    with pytest.raises(SystemExit) as exit_info:
+        cli.main(["--supplement", str(tmp_path), "--no-supplement", "https://lparchive.org/Some-LP", "out.epub"])
+    assert exit_info.value.code == 2

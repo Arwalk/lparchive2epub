@@ -7,7 +7,8 @@ from aiohttp_client_cache import CachedSession, SQLiteBackend
 import aiohttp
 
 from lparchive2epub.lib import lparchive2epub, ExtractionError, ISSUES_URL, EXIT_FAILURE, EXIT_INTERRUPTED, normalize_lp_url, \
-    ImageProcessing, FetchSettings, check_cache_path, CLIENT_TIMEOUT, DEFAULT_CONCURRENCY, DEFAULT_RETRIES
+    ImageProcessing, FetchSettings, check_cache_path, CLIENT_TIMEOUT, DEFAULT_CONCURRENCY, DEFAULT_RETRIES, Supplement, \
+    SupplementError
 
 
 def is_lparchive_url(arg):
@@ -79,12 +80,22 @@ cover_group.add_argument("--cover", metavar="IMAGE",
                          help="Use this image file as the cover instead of the generated one (title and author on "
                               "a plain background)")
 cover_group.add_argument("--no-cover", action="store_true", help="Build the book without a cover image")
+supplement_group = arg_parser.add_mutually_exclusive_group()
+supplement_group.add_argument("--supplement", metavar="DIR",
+                              help="Also take pictures from the files in DIR, on top of the collection the tool "
+                                   "ships: for pictures their host will not serve the tool but a browser can save "
+                                   "(Cloudflare's bot challenge on Fandom's wikis). DIR holds a manifest.tsv, one "
+                                   "line per picture (its address as the page writes it, a tab, the file's name), "
+                                   "and the files; a picture in the collection is taken from its file, never "
+                                   "requested, and the book's sources.json says so")
+supplement_group.add_argument("--no-supplement", action="store_true",
+                              help="Request every picture from its host, ignoring the collection the tool ships")
 arg_parser.add_argument("--check", action="store_true",
                         help="Validate the written book with epubcheck and report what it finds (needs the 'check' "
                              "extra: pip install lparchive2epub[check], and a Java runtime). With --strict, errors "
                              "make the run fail")
 
-async def amain(args):
+async def amain(args, supplement: Supplement | bool):
     fetch = FetchSettings(concurrency=args.concurrency, retries=args.retries, quiet=args.quiet)
     if args.cache:
         cache_file = check_cache_path(args.cache)
@@ -106,7 +117,8 @@ async def amain(args):
             raise ExtractionError(f"Cannot read the cover image {args.cover}: {e.strerror or e}") from e
     written = await lparchive2epub(args.url, args.output, session, strict=args.strict,
                                    allow_missing_updates=args.allow_missing_updates, image_processing=processing,
-                                   cover=cover, fetch=fetch, spool_images=not args.images_in_memory, check=args.check)
+                                   cover=cover, fetch=fetch, spool_images=not args.images_in_memory, check=args.check,
+                                   supplement=supplement)
     if args.quiet:
         print(written)   # the one thing a script wants from a quiet run
 
@@ -117,8 +129,14 @@ def main(argv=None):
         problem = unavailable_reason()
         if problem:
             arg_parser.error(problem)   # before any download, not after a long build
+    supplement: Supplement | bool = not args.no_supplement   # True: the collection the tool ships
+    if args.supplement:
+        try:
+            supplement = Supplement.bundled().layered(Supplement.load(args.supplement))
+        except SupplementError as e:
+            arg_parser.error(str(e))
     try:
-        asyncio.run(amain(args))
+        asyncio.run(amain(args, supplement))
     except ExtractionError as e:
         print(e, file=sys.stderr)
         sys.exit(e.exit_code)
